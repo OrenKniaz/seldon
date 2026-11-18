@@ -24,6 +24,7 @@ def execute(store, provider, capacity, user):
             coaching = any(rows[r].state == "ASKED" for r in running)
             for ref, row in rows.items():
                 if (row.state == "ASKED" and ref not in running and not coaching
+                        and not decisions.contract_gap(store, ref)
                         and not store.cursor().decision and len(running) < capacity):
                     running[ref] = pool.submit(decisions.ask_unit, store, provider, ref)
                     coaching = True
@@ -48,6 +49,8 @@ def execute(store, provider, capacity, user):
             if not running:
                 if store.cursor().decision:
                     raise decisions.Waiting()
+                if any(u.state == "ASKED" and decisions.contract_gap(store, r) for r, u in rows.items()):
+                    return
                 if pending := [r for r, u in rows.items() if u.state not in ("DONE", "DROPPED", "ASKED")]:
                     raise ValueError("No unit can progress: " + ", ".join(pending))
                 return

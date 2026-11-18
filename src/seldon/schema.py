@@ -95,7 +95,7 @@ DETAIL_GAP = obj(verdict=choice("contract_gap"), need=TEXT)
 CHECK = dict(purpose=TEXT, command=array(TEXT, 1), expectedEvidence=TEXT, requirements=REFS)
 
 
-def answer_schema(kind, targets=(), owners=(), *, grown=False):
+def answer_schema(kind, targets=(), owners=(), *, grown=False, coach_contracts=False):
     gap = obj(target=choice(*targets), correction=TEXT, owners=array(choice(*owners), 1), severity=SEVERITY)
     payload = {
         "ALIGN": VISION, "ARCHITECT": obj(**{**ARCHITECT["properties"],
@@ -120,6 +120,8 @@ def answer_schema(kind, targets=(), owners=(), *, grown=False):
                     (payload, obj(ask=ASK)) if kind == "COACH" else
                     (payload, uncertain) if kind in ("JUDGE", "FLOW", "PRODUCT", "REVIEW") else
                     (payload,))
+    if coach_contracts:
+        alternatives += (obj(contract=obj(resolution=choice("answer", "gap"), text=TEXT)),)
     return obj(answer={"anyOf": [obj(**item["properties"], why=TEXT) for item in alternatives]})
 
 

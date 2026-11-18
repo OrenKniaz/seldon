@@ -1,0 +1,504 @@
+{
+  "r12": {
+    "changed": "Quiet Bench is a three-wave local simulation instrument: prove a saved fixed-filter run first, add adaptive experiments and band results, then add comparison, limiting, stopping and WAV input. The engineer decides which ideas merit hardware investigation; the bench exposes the evidence and limitations behind that decision.",
+    "questions": [],
+    "recommendation": "done",
+    "vision": {
+      "constraints": [
+        {
+          "handle": "runtime",
+          "meaning": "Required platform and dependency boundary across the product.",
+          "source": "kickoff",
+          "value": "Python 3.12 standard library plus Node 20\nfor the page checks; no third-party runtime packages, no network."
+        },
+        {
+          "handle": "platform",
+          "meaning": "Target environment.",
+          "source": "kickoff",
+          "value": "local Windows, Python 3.12 stdlib, modern desktop browser"
+        },
+        {
+          "handle": "defaults",
+          "meaning": "Excluded services and scope-change preference.",
+          "source": "kickoff",
+          "value": "no accounts, network, deployment or paid assets; ask before scope changes"
+        },
+        {
+          "handle": "server-cli",
+          "meaning": "Local server entry point and command-line contract.",
+          "source": "kickoff",
+          "value": "python server.py --port PORT --data DIR"
+        },
+        {
+          "handle": "cli",
+          "meaning": "Required commands and output formats.",
+          "source": "kickoff",
+          "value": "bench.py run --data DIR --settings JSON; list --data DIR; show ID --data DIR; export ID --data DIR. run/show emit session JSON; list emits an array; export emits CSV."
+        },
+        {
+          "handle": "api",
+          "meaning": "Page-facing operations and comparison direction.",
+          "source": "kickoff",
+          "value": "POST /api/runs with settings -> session (asynchronous allowed); GET /api/sessions -> array; GET /api/sessions/ID -> session; POST /api/runs/ID/stop; GET /api/compare?a=ID&b=ID -> array of bands with low, high, delta_db = b minus a."
+        },
+        {
+          "handle": "example-settings",
+          "meaning": "Supplied settings supported as an end-to-end example, not a restriction on other valid settings.",
+          "source": "kickoff",
+          "value": "{\"sample_rate\": 8000, \"samples\": 8192, \"signal\": {\"kind\": \"tones\", \"frequencies\": [500, 1500], \"amplitude\": 0.2}, \"path\": [0.8, 0, 0.2], \"filter\": \"lms\", \"step_size\": 0.05, \"limit\": 0.8, \"block_size\": 128, \"bands\": [[0, 1000], [1000, 4000]]}"
+        },
+        {
+          "handle": "wav",
+          "meaning": "Supported imported audio format.",
+          "source": "kickoff",
+          "value": "signal = {kind: wav, path: absolute WAV path}; 16-bit mono, same sample rate."
+        },
+        {
+          "handle": "session",
+          "meaning": "Persisted and exposed session shape, including legacy compatibility.",
+          "source": "kickoff",
+          "value": "id, settings, status (running/completed/stopped), limited (boolean), processed_samples, bands [{low, high, attenuation_db}], desired/residual/output sample arrays (before cancellation, error, limited anti-noise). Preserve this JSON as wave-1 legacy input."
+        },
+        {
+          "handle": "page-contract",
+          "meaning": "Accessible page controls, selectors, displayed results and operating instructions.",
+          "source": "kickoff",
+          "value": "Accessible labelled textarea[name=settings] (JSON), Start run button, [data-session-id=ID] saved session buttons, select[name=compare-a], select[name=compare-b], Compare button and [data-comparison] result. Show session id and band numbers. docs/try-it.md gives actual start/stop and CLI commands."
+        }
+      ],
+      "quality": [
+        {
+          "constraints": [
+            "runtime",
+            "session"
+          ],
+          "criterion": "Make attenuation calculations, band boundaries and undefined results understandable; distinguish simulation from real hardware performance.",
+          "handle": "trust",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Run a known signal and path, independently check band attenuation against saved samples, and inspect the explanation and unavailable values."
+        },
+        {
+          "constraints": [
+            "session",
+            "api"
+          ],
+          "criterion": "The limiter bounds stored output samples to the configured limit and reports limiting; a stopped run reports its actual processed samples rather than completion.",
+          "handle": "safety",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Inspect all output samples and the limiting flag in a divergent case; stop an active run and inspect its status and sample count."
+        },
+        {
+          "constraints": [
+            "platform",
+            "page-contract"
+          ],
+          "criterion": "Use a calm, precise instrument-panel direction: charcoal work surface, high-contrast markings, deliberate offline typography and uncluttered, labelled keyboard-operable controls.",
+          "handle": "instrument",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Open the page in a desktop browser, inspect the visual hierarchy and console, and operate the controls by keyboard."
+        },
+        {
+          "constraints": [
+            "server-cli",
+            "cli",
+            "api",
+            "session",
+            "page-contract",
+            "wav"
+          ],
+          "criterion": "Retained settings, results, run state and local instructions support finding and repeating an experiment; identify when an imported input must still be available.",
+          "handle": "continuity",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Run and reload a session through page and CLI, inspect settings and state, then start another run from those settings; check instructions and WAV input access."
+        }
+      ],
+      "scopeOut": [
+        {
+          "outcome": "Audio playback, hardware control and claims that simulated limiting guarantees physical hearing safety.",
+          "sources": [
+            "kickoff"
+          ]
+        },
+        {
+          "outcome": "Accounts, remote services, deployment, paid assets and third-party runtime packages.",
+          "sources": [
+            "kickoff"
+          ]
+        }
+      ],
+      "size": "large",
+      "sizeWhy": "Three demonstrable waves span numerical simulation, local persistence, a server and accessible page, CLI parity, and consequential limiter and stop behavior.",
+      "stories": [
+        {
+          "constraints": [
+            "runtime",
+            "server-cli",
+            "cli",
+            "session"
+          ],
+          "feature": "Wave 1: fixed-filter end-to-end run",
+          "handle": "first-run",
+          "outcome": "The engineer can run one tone through a fixed filter, save its settings and result, and see the saved session before adaptation is added.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, I want a minimal working simulation so I can see that the bench runs and retains a result."
+        },
+        {
+          "constraints": [
+            "runtime",
+            "example-settings",
+            "session",
+            "server-cli",
+            "cli",
+            "api",
+            "page-contract"
+          ],
+          "feature": "Wave 2: adaptive experiments and session history",
+          "handle": "adaptive-results",
+          "outcome": "The engineer can generate tones or band noise, simulate the acoustic path, run an LMS-family canceller, inspect attenuation by band, and browse and reload sessions through the page or CLI.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, I want inspectable adaptive results so I can decide which ideas are worth investigating further."
+        },
+        {
+          "constraints": [
+            "api",
+            "page-contract",
+            "session"
+          ],
+          "feature": "Wave 3: comparison",
+          "handle": "compare",
+          "outcome": "The engineer can compare two saved runs by band, with delta defined as B minus A, and inspect settings and run state to judge whether the comparison is meaningful.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, I want to compare experiments without mistaking a settings change or incomplete run for an improvement."
+        },
+        {
+          "constraints": [
+            "example-settings",
+            "api",
+            "session"
+          ],
+          "feature": "Wave 3: limiter and stop",
+          "handle": "control",
+          "outcome": "The simulated anti-noise output stays within the configured limit, limiting is reported, and a stop request ends an active run with its partial result labelled stopped.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, I want bounded output and a stop switch so a diverging experiment remains controlled and its partial result is not misleading."
+        },
+        {
+          "constraints": [
+            "wav",
+            "session"
+          ],
+          "feature": "Wave 3: WAV import",
+          "handle": "wav-input",
+          "outcome": "The engineer can use a compatible local WAV as the noise source and retain its settings with the session.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, I want to test a recorded signal as well as generated signals."
+        }
+      ],
+      "understanding": "Quiet Bench is an offline, software-only noise-cancellation experiment instrument for an audio engineer deciding what to investigate before buying hardware, not a certification of real-world performance. Results can mislead when bands lack energy, runs differ in settings or completion state, limiting occurs, or simulated paths differ from reality. Tomorrow the engineer needs retained settings and results, access to any imported WAV, and runnable local instructions to repeat an experiment.",
+      "users": [
+        "Audio engineer exploring noise-cancellation ideas before buying hardware."
+      ]
+    },
+    "why": "The supplied dream and interface settle the material product choices. The ranked stories preserve the requested wave demonstrations and expose the conditions needed to trust and repeat results without adding hardware or network scope."
+  },
+  "r23": {
+    "areas": [
+      {
+        "commitments": [
+          "scopeIn:adaptive-results",
+          "scopeIn:wav-input",
+          "quality:trust"
+        ],
+        "handle": "simulation",
+        "responsibility": "Implement signal generation, path and cancellation simulation, band measurements, and compatible WAV input, including the fixed-filter slice needed in wave 1.",
+        "scope": [
+          "simulation/**",
+          "checks/simulation/**"
+        ]
+      },
+      {
+        "commitments": [
+          "scopeIn:first-run",
+          "scopeIn:control",
+          "quality:safety"
+        ],
+        "handle": "backend",
+        "responsibility": "Own local session persistence, run lifecycle, server and CLI, including bounded output and stopping active runs.",
+        "scope": [
+          "server.py",
+          "bench.py",
+          "backend/**",
+          "checks/backend/**"
+        ]
+      },
+      {
+        "commitments": [
+          "scopeIn:compare",
+          "quality:instrument",
+          "quality:continuity"
+        ],
+        "handle": "page",
+        "responsibility": "Build the accessible instrument page, session inspection and comparison experience, and practical local operating instructions.",
+        "scope": [
+          "page/**",
+          "docs/**",
+          "checks/page/**"
+        ]
+      }
+    ],
+    "contracts": [
+      {
+        "consumers": [
+          "backend"
+        ],
+        "handle": "simulation-run",
+        "kind": "Python interface",
+        "provider": "simulation",
+        "text": "For wave 1, simulation/run.py exposes run(settings), returning a dict with processed_samples, limited, bands, desired, residual and output. It accepts JSON-compatible settings for a single tone and fixed filter; the settings example and exact supported fixed-filter fields must be documented in the module before implementation consumers are wired. Arrays contain one numeric sample per processed sample; desired is the signal before cancellation, output is simulated anti-noise, and residual is the remaining error. The function does not persist or assign an ID. Invalid settings raise ValueError with a useful message. Wave 2 extends this same interface for the supplied LMS example and other valid tones and band-noise settings."
+      },
+      {
+        "consumers": [
+          "simulation",
+          "page"
+        ],
+        "handle": "session-json",
+        "kind": "data",
+        "provider": "backend",
+        "text": "A saved and exposed session is JSON with id, settings, status (running, completed or stopped), limited (boolean), processed_samples, bands [{low, high, attenuation_db}], and desired, residual and output sample arrays. Wave 1 saves the original settings and completed fixed-filter result under a stable ID; list and show return that same session representation. Preserve wave-1 JSON as legacy input in later waves. An unavailable attenuation is JSON null, not a fabricated number."
+      },
+      {
+        "consumers": [
+          "page"
+        ],
+        "handle": "wave1-http",
+        "kind": "HTTP",
+        "provider": "backend",
+        "text": "Run locally as python server.py --port PORT --data DIR; serve the page and assets from the same local origin without external services. POST /api/runs accepts a JSON settings object and, for wave 1, returns the completed session JSON; GET /api/sessions returns a JSON array of sessions; GET /api/sessions/ID returns that session. Invalid requests return a non-success status and a readable JSON error. Later waves may return a running session asynchronously."
+      },
+      {
+        "consumers": [
+          "page"
+        ],
+        "handle": "wave1-cli",
+        "kind": "command line",
+        "provider": "backend",
+        "text": "python bench.py run --data DIR --settings JSON and python bench.py show ID --data DIR emit session JSON; python bench.py list --data DIR emits a JSON array; python bench.py export ID --data DIR emits CSV. JSON is the settings argument, not an assumed filename. Successful machine-readable output goes to stdout and errors go to stderr with a nonzero exit. CLI and server use the same data directory and session representation."
+      },
+      {
+        "consumers": [
+          "backend"
+        ],
+        "handle": "page-assets",
+        "kind": "static assets",
+        "provider": "page",
+        "text": "The backend serves page/index.html at / and the files under page/ at corresponding same-origin paths. The page uses relative API and asset URLs; no network-hosted assets or runtime packages are required. Wave 1 provides a labelled textarea[name=settings], a Start run button, and saved-session buttons with data-session-id set to the session ID; selecting one displays its ID, settings and result."
+      },
+      {
+        "consumers": [
+          "backend",
+          "page"
+        ],
+        "handle": "band-measurements",
+        "kind": "calculation",
+        "provider": "simulation",
+        "text": "Wave 2 agreement: define reproducible band energy, boundary and unavailable-value semantics shared by saved results, explanations and comparison."
+      },
+      {
+        "consumers": [
+          "page"
+        ],
+        "handle": "comparison-api",
+        "kind": "HTTP",
+        "provider": "backend",
+        "text": "Wave 3 agreement: compare saved bands with delta_db equal to B minus A and expose enough run context to judge comparability."
+      },
+      {
+        "consumers": [
+          "backend",
+          "page"
+        ],
+        "handle": "run-control",
+        "kind": "lifecycle",
+        "provider": "simulation",
+        "text": "Wave 3 agreement: cooperative stop, partial results and limiter reporting must preserve actual processed samples and bounded stored output."
+      }
+    ],
+    "decisions": [
+      {
+        "areas": [
+          "simulation",
+          "backend",
+          "page"
+        ],
+        "choice": "Start with a synchronous fixed-filter run through the same local session and page boundary used by later waves.",
+        "origin": "architecture",
+        "reason": "It proves a saved, visible result without requiring adaptive processing or asynchronous control in the first slice."
+      },
+      {
+        "areas": [
+          "simulation",
+          "backend",
+          "page"
+        ],
+        "choice": "Keep execution offline on local Windows using Python 3.12 standard library, with Node 20 only for page checks.",
+        "origin": "user",
+        "reason": "The accepted runtime excludes third-party runtime packages, remote services and network dependencies."
+      },
+      {
+        "areas": [
+          "simulation",
+          "backend",
+          "page"
+        ],
+        "choice": "Treat the bench as a simulation, not a hardware-performance or hearing-safety guarantee.",
+        "origin": "user",
+        "reason": "The accepted outcome excludes hardware control, playback and physical safety claims."
+      }
+    ],
+    "waves": [
+      {
+        "commitments": [
+          "scopeIn:first-run"
+        ],
+        "goal": "Run one generated tone through a fixed filter, save its settings and result, and see the saved session through the local server; verify the shared CLI can retrieve it."
+      },
+      {
+        "commitments": [
+          "scopeIn:adaptive-results",
+          "quality:trust",
+          "quality:instrument"
+        ],
+        "goal": "Run and inspect adaptive tone and band-noise experiments, including the supplied settings; browse and reload sessions on the accessible instrument page and CLI, and independently check explained band attenuation against saved samples."
+      },
+      {
+        "commitments": [
+          "scopeIn:compare",
+          "scopeIn:control",
+          "scopeIn:wav-input",
+          "quality:safety",
+          "quality:continuity"
+        ],
+        "goal": "Compare saved runs with context, bound and report simulated output, stop active runs with truthful partial state, and rerun compatible local WAV experiments using retained settings and practical instructions."
+      }
+    ],
+    "why": "Three disjoint ownership surfaces can start from shared wave-1 interfaces. The first wave proves the smallest saved end-to-end result; later agreements remain intentionally brief until their wave is next."
+  },
+  "r60": {
+    "edits": [
+      {
+        "kind": "feature",
+        "targetHandle": "new:backend-first-run",
+        "typedBody": {
+          "acceptance": "A fixed-filter tone run is saved and can be retrieved through the local server and shared command line.",
+          "commitments": [
+            "scopeIn:first-run"
+          ],
+          "story": "As an audio engineer, I can run and retrieve a saved simulation before adaptive processing is added."
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:session-run",
+        "typedBody": {
+          "acceptance": "A valid single-tone fixed-filter settings object runs through the agreed simulation interface and is saved under a stable ID with the original settings, completed status, limiting flag, processed sample count, bands, and desired, residual, and output arrays, with unavailable attenuation represented as null.",
+          "features": [
+            "new:backend-first-run"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:http",
+        "typedBody": {
+          "acceptance": "The local server accepts the specified port and data directory, serves the page and its assets from the same origin, returns completed runs and saved sessions through the agreed endpoints, and returns readable JSON errors with non-success statuses for invalid requests.",
+          "features": [
+            "new:backend-first-run"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:cli",
+        "typedBody": {
+          "acceptance": "The run, list, show, and export commands use the server's data directory and sessions, accept run settings as JSON text, write the specified JSON or CSV to standard output, and report errors on standard error with a nonzero exit.",
+          "features": [
+            "new:backend-first-run"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:runtime",
+        "typedBody": {
+          "acceptance": "The backend runs locally on Windows with Python 3.12 standard library only and requires no external service, network-hosted asset, account, or third-party runtime package.",
+          "features": [
+            "new:backend-first-run"
+          ]
+        }
+      }
+    ],
+    "units": [
+      {
+        "dependencies": [],
+        "instructions": "Implement the wave-1 backend within this scope using the agreed simulation-run, session-json, wave1-http, wave1-cli and page-assets contracts; use the simulation module's documented fixed-filter settings rather than inventing a competing interface. Verify a real simulation result is persisted and retrieved across the server and CLI, including invalid-request behavior and CSV export. Do not implement adaptive processing, comparison, WAV import, active-run stopping, or later-wave limiter guarantees.",
+        "requirements": [
+          "new:session-run",
+          "new:http",
+          "new:cli",
+          "new:runtime"
+        ],
+        "scope": [
+          "server.py",
+          "bench.py",
+          "backend/**",
+          "checks/backend/**"
+        ]
+      }
+    ],
+    "verdict": "planned",
+    "why": "One backend unit owns the shared persistence and interfaces for the accepted wave-1 outcome; limiter and active-run stopping are explicitly scheduled for wave 3 and are not due in this wave."
+  },
+  "r103": {
+    "checkPaths": [],
+    "checks": [],
+    "discoveries": [],
+    "outcome": "question",
+    "summary": "What are the agreed simulation-run interface and page-assets paths? Their contract text and the peer files are absent from this worktree.",
+    "why": "The backend must call the documented fixed-filter simulation interface and serve the agreed page assets; inventing either would risk breaking integration. No implementation or checks were written."
+  },
+  "r111": {
+    "ask": {
+      "options": [
+        {
+          "label": "Provide the peer contracts",
+          "means": "Supply the simulation callable and page asset paths agreed with their owners so the backend can implement and check the actual integration."
+        },
+        {
+          "label": "Agree on a convention",
+          "means": "Have the simulation and page owners explicitly agree on callable and asset paths before the backend integrates them."
+        }
+      ],
+      "question": "What simulation-run interface and page asset paths should the backend use?"
+    },
+    "why": "The supplied contracts specify observable behavior but do not define the internal simulation callable or asset locations, and the peer files are absent. Guessing either would not establish an agreed integration boundary."
+  },
+  "dream": "Build Quiet Bench, a noise-cancelling test bench that runs on this PC with no audio hardware. Python 3.12 standard library plus Node 20\nfor the page checks; no third-party runtime packages, no network. I can generate a noise signal (tones, band noise) or import a WAV\nfile; the bench simulates the acoustic path from the noise source to the ear, runs an adaptive canceller (LMS family) against it and\ntells me how much was cancelled in each frequency band. Every session is saved on a small local storage server\n(`python server.py --port PORT --data DIR`) with its settings and results, and a web page on that server lets me start a run, browse\nsaved sessions, reload one and compare two. A command line (`python bench.py run|list|show|export`) does the same without the page.\nA limiter must hold the output inside a safe level when the filter diverges, and a stop switch ends a run at once.\nBuild it in three waves and show me each one. Wave 1: the thinnest thing that runs end to end, one tone through a fixed filter,\nsaved and shown. Wave 2: the adaptive filter, attenuation per band, browse and reload. Wave 3: compare runs, limiter and stop\nswitch, WAV import.\n\nAudience and preferences:\n{\"audience\": \"an audio engineer trying ideas before buying hardware\", \"care\": \"numbers I can trust and a bench that never blasts\", \"tone\": \"calm, exact, instrument-like\", \"platform\": \"local Windows, Python 3.12 stdlib, modern desktop browser\", \"defaults\": \"no accounts, network, deployment or paid assets; ask before scope changes\"}\n\nShared black-box interface:\n{\"note\": \"Black-box fight interface, supplied equally to both contenders; message above is verbatim. No extra runtime dependencies.\", \"cli\": \"bench.py run --data DIR --settings JSON; list --data DIR; show ID --data DIR; export ID --data DIR. run/show emit session JSON; list emits an array; export emits CSV.\", \"api\": \"POST /api/runs with settings -> session (asynchronous allowed); GET /api/sessions -> array; GET /api/sessions/ID -> session; POST /api/runs/ID/stop; GET /api/compare?a=ID&b=ID -> array of bands with low, high, delta_db = b minus a.\", \"settings\": {\"sample_rate\": 8000, \"samples\": 8192, \"signal\": {\"kind\": \"tones\", \"frequencies\": [500, 1500], \"amplitude\": 0.2}, \"path\": [0.8, 0, 0.2], \"filter\": \"lms\", \"step_size\": 0.05, \"limit\": 0.8, \"block_size\": 128, \"bands\": [[0, 1000], [1000, 4000]]}, \"wav\": \"signal = {kind: wav, path: absolute WAV path}; 16-bit mono, same sample rate.\", \"session\": \"id, settings, status (running/completed/stopped), limited (boolean), processed_samples, bands [{low, high, attenuation_db}], desired/residual/output sample arrays (before cancellation, error, limited anti-noise). Preserve this JSON as wave-1 legacy input.\", \"page\": \"Accessible labelled textarea[name=settings] (JSON), Start run button, [data-session-id=ID] saved session buttons, select[name=compare-a], select[name=compare-b], Compare button and [data-comparison] result. Show session id and band numbers. docs/try-it.md gives actual start/stop and CLI commands.\"}"
+}

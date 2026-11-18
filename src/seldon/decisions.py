@@ -50,6 +50,7 @@ def coach(store, provider, subject, frame=False):
 
     frame: the planner writes the user's options; its guidance becomes one of them (R17)."""
     ref = subject.get("unit")
+    coach_contracts = bool(ref) and features.enabled("askContracts")
     document = plan.execution(store) if store.cursor().revision else {}
     facts = {"Unresolved work": subject, "Earlier user answers": questions.user_words(store),
              "Vision": store.read(store.cursor().vision) if store.cursor().vision else None,
@@ -67,13 +68,19 @@ def coach(store, provider, subject, frame=False):
         nonlocal subject, response
         key, subject = recovery.subject(store, "UNIT" if ref else subject["step"], subject)
         history = store.recovery(key)
-        if "guidance" in answer and not history["coached"] and not frame:
+        contract = answer.get("contract")
+        if contract and (contract["resolution"] == "gap" or history["coached"] or frame):
+            history["contractGap"] = source
+            store.recovery(key, history)
+            return
+        guidance = contract["text"] if contract else answer.get("guidance")
+        if guidance and not history["coached"] and not frame:
             history.update(coached=True, waiting=False)
             store.recovery(key, history)
             direction = store.record("planner_answer", {"subject": subject, "source": source,
-                "guidance": answer["guidance"], "words": answer["guidance"], "origin": "planner"})
+                "guidance": guidance, "words": guidance, "origin": "planner"})
             if ref:
-                again(store, subject, source, answer["guidance"])
+                again(store, subject, source, guidance)
             else:
                 store.record("approval", {"request": store.cursor().decision, "subject": subject,
                     "words": direction, "choice": "revise", "origin": "planner"})
@@ -97,12 +104,17 @@ def coach(store, provider, subject, frame=False):
             ask["options"].append(option("Pause", "Pause here; your work is saved and can resume", "pause"))
         response = {**subject, "ask": ask, "planner": source}
     try:
-        inference.call(store, provider, questions.build("COACH", facts), consume=consume, field="guidance/ask")
+        inference.call(store, provider, questions.build("COACH", facts, coach_contracts=coach_contracts),
+                       consume=consume, field="guidance/contract/ask" if coach_contracts else "guidance/ask")
     except ConsumptionFailure as error:
         cause, shape = record_fault(store, error)
         recovery.failed(store, cause, shape=shape)
         response = {**subject, "failure": shape["failure"], "ask": pause_ask(str(error))}
     return response
+
+
+def contract_gap(store, ref):
+    return store.recovery(recovery.lineage(store, ref)).get("contractGap")
 
 
 def ask_unit(store, provider, ref):

@@ -194,8 +194,10 @@ class Run:
                                     base=cursor.candidate)).items() if k != "state"})
             scheduler.execute(store, self.provider, self.capacity, self.user)
             if store.cursor().state not in TERMINAL:
-                advance(store, "finished", "Every unit integrated or dropped")
+                advance(store, "finished", "No more units can run in this pass")
         elif state == "WAVE-VERIFY":
+            if fixups.replan_worker_agreements(store):
+                return store.cursor().state
             observations = wave_verify.verify(store, cursor.candidate)
             gaps = proof.gaps(store, cursor.candidate, observations)
             if not gaps:

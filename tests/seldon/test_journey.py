@@ -1260,6 +1260,96 @@ def test_thin_plan_golden(tmp_path, mode, count):
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("route", ["brief", "coach", "gap"])
+def test_quietbench_peer_agreements_journey(tmp_path, route, monkeypatch):
+    """Replay Quiet Bench through B and its first backend WORK and COACH.
+
+    The approved outline had the agreements but DETAIL had no peer units yet. Existing
+    contract journeys already bind their providers, so they miss an outline-only agreement.
+    """
+    from seldon import decisions
+
+    monkeypatch.delenv("SELDON_OFF", raising=False)
+    fixture = json.loads((Path(__file__).parent / "fixtures/quietbench-c01-agreements.json").read_text(
+        encoding="utf-8"))
+    slot = tmp_path / "quietbench-agreements"
+    seen, user_questions = [], []
+    expected = {c["handle"]: c["text"] for c in fixture["r23"]["contracts"]
+                if c["handle"] in ("simulation-run", "page-assets")}
+
+    class ReceivedAgreement(BaseException):
+        pass
+
+    def agreements(facts):
+        return {ref: contract["text"] for name, contracts in facts.items()
+                if name in ("Contracts consumed", "Planned contracts")
+                for ref, contract in contracts.items() if ref in expected}
+
+    class QuietBench(Scripted):
+        def invoke(self, q, started):
+            strict_schema(q["schema"])
+            kind, facts = q["kind"], q["facts"]
+            if kind == "ARCHITECT" and "Architecture correction" in facts:
+                message = facts["Architecture correction"]
+                assert all(part in message for part in ("Expected", "got", "simulation-run",
+                                                        "Define the fixed-filter settings", "Wave 1"))
+                seen.append("architecture")
+            if kind in ("ALIGN", "ARCHITECT", "DETAIL"):
+                answer = fixture[{"ALIGN": "r12", "ARCHITECT": "r23", "DETAIL": "r60"}[kind]]
+            elif kind == "WORK":
+                if plan.GUIDE_PATH in facts["Write scope"]:
+                    return super().invoke(q, started)
+                seen.append("work")
+                if route == "brief" and agreements(facts) == expected:
+                    raise ReceivedAgreement
+                if route == "coach" and "Direction: " + guidance in facts.get("Exact failure", ""):
+                    raise ReceivedAgreement
+                answer = fixture["r103"]
+            elif kind == "COACH":
+                seen.append("coach")
+                answer = fixture["r111"]
+                if agreements(facts) == expected:
+                    answer = {"contract": {"resolution": "gap" if route == "gap" else "answer",
+                              "text": "Define the fixed-filter settings in simulation-run." if route == "gap"
+                                      else guidance}, "why": "Resolve the peer agreement in the plan."}
+            else:
+                return super().invoke(q, started)
+            return json.dumps({"answer": answer}), None
+
+    guidance = "Use " + expected["simulation-run"] + " " + expected["page-assets"]
+
+    def user(item):
+        if item["gate"] == "A":
+            return {"request": item["request"], "replyId": "approved-skeleton", "selections": [
+                {"groupId": "size", "optionId": "large"}, {"groupId": "round", "optionId": "done"}]}
+        if item["gate"] == "UNIT":
+            user_questions.append(item["ask"]["question"])
+            raise decisions.Waiting()
+        return approve(item)
+
+    slot.mkdir()
+    (slot / "mode").write_text("normal")
+    (slot / "native.py").write_text(NATIVE, encoding="utf-8")
+    provider = QuietBench(slot)
+    run = Run(slot / "product", slot / "workers", fixture["dream"],
+              provider.setup, provider, user, capacity=1)
+    try:
+        try:
+            run.run()
+        except ReceivedAgreement:
+            pass
+        assert not user_questions, user_questions
+        assert not [b for _, _, b in run.store.records("decision_request") if b["gate"] == "UNIT"]
+        assert seen == {"brief": ["work"], "coach": ["work", "coach", "work"],
+                        "gap": ["work", "coach", "architecture", "work", "coach"]}[route]
+        if route == "gap":
+            assert run.store.cursor().state == "ARCHITECT"
+            assert "The planner must settle it" in run.store.cursor().failure
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
 def test_repeating_worker_question_journey(tmp_path):
     """Repeated handoff questions reach one user wait while siblings finish, then resume.
 
@@ -1508,8 +1598,10 @@ def test_judge_once_golden(tmp_path, fault):
             if kind == "WORK":
                 if "Exact failure" in facts:
                     if q["execution"].get("session"):
-                        assert set(facts) == {"Exact failure", "Write scope", "Correction owners",
-                                              "Correction observations", "Existing checks"}
+                        assert {"Exact failure", "Write scope", "Correction owners",
+                                "Correction observations", "Existing checks"} <= facts.keys()
+                        assert ("values" in facts.get("Contracts provided", {})
+                                or "values" in facts.get("Contracts consumed", {}))
                         assert facts["Correction observations"]
                         resumed.append(q)
                         if fault == "resume-unavailable":

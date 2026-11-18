@@ -1,7 +1,6 @@
 """C18/C23; R7/R8/R9: recorded gaps reopen only their approved owning units."""
 
-from . import plan as planning
-from . import recovery
+from . import decisions, plan as planning, recovery
 from .states import advance
 
 
@@ -112,6 +111,42 @@ def replan(store, gaps):
     # A contract correction changes the outline, so its repeat is the same subject and agreement.
     recovery.planning(store, ref, sorted([g["kind"], g["subject"], *g["units"]] for g in gaps), "plan-gap",
                       outline=not contracted, finalCommit=None)
+
+
+def replan_worker_agreements(store):
+    """Only after all other work has drained, return unresolved worker agreements to ARCHITECT."""
+    pending = {unit: source for unit, row in store.units().items() if row.state == "ASKED"
+               and (source := decisions.contract_gap(store, unit))}
+    if not pending:
+        return False
+    cursor = store.cursor()
+    outline = store.plan(cursor.revision)["architecture"]
+    subject = {"wave": cursor.wave, "units": sorted(pending)}
+    unchanged = any(g.get("workerAgreements") == subject and g["vision"] == cursor.vision
+                    and g["outline"] == outline for _, _, g in store.records("architecture_gap"))
+    with store.transaction():
+        messages = []
+        for unit, source in pending.items():
+            question = store.unit(unit).failure
+            need = store.read(source)["answer"]["contract"]["text"]
+            message = (f"Wave {cursor.wave}, {unit}: Expected a settled peer agreement before the worker "
+                       f"could continue; got this question: {question}\n"
+                       f"Planner's next action: {need} Settle the agreement and bind any needed provider "
+                       "and consumer in this wave, within the accepted scope.")
+            messages.append(message)
+            key = recovery.lineage(store, unit)
+            history = store.recovery(key)
+            history.update(contractGap=None, coached=False, waiting=False)
+            store.recovery(key, history)
+            decisions.again(store, {"unit": unit}, source, message)
+        ref = store.record("architecture_gap", {"vision": cursor.vision, "source": list(pending.values()),
+            "outline": outline, "gap": "\n".join(messages), "workerAgreements": subject})
+        advance(store, "plan-gap", ref, finalCommit=None, failure=(
+            "The peer agreement is still unresolved after replanning. The planner must settle it "
+            "before these workers can continue.\n" + "\n".join(messages) if unchanged else ""))
+    if unchanged:
+        raise decisions.Waiting()
+    return True
 
 
 def corrected_checks(store):

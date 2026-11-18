@@ -7,6 +7,7 @@ contractGap (a judge gap owned by a contract goes to the planner as a contract c
 unit itself, or the contract's provider, is sent the gap as before 11-18).
 checkContract (cross-unit check disputes go to the planner; repeated product checks get a plain question).
 growPersona (proposal-aware development simulator; off = scripted menu or grouped transport control).
+askContracts (COACH resolves peer agreements or sends the gap back to the planner).
 """
 import os
 

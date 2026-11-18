@@ -123,7 +123,8 @@ def question(kind, prompt, facts, schema, examples, targets=(), execution=None, 
             "execution": execution or {}, "images": list(images)}
 
 
-def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grown=False):
+def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grown=False,
+          coach_contracts=False):
     if kind in ("ARCHITECT", "DETAIL", "WORK", "COACH") and not (kind == "WORK" and execution.get("session") and facts.get("Exact failure")):
         facts = {**facts, "Available tools and skills": AVAILABLE_TOOLS}
     if kind == "ALIGN":
@@ -156,7 +157,13 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grow
     if grown and kind == "ARCHITECT":
         prompt += ("\nUse the supplied commitment handles across the full wave horizon. Start with a "
                    "working slice of the highest-value outcomes and preserve the exact constraints.")
-    return question(kind, prompt, facts, answer_schema(kind, targets, owners, grown=grown),
+    if coach_contracts:
+        prompt += ("\nUse the contract response for questions about peer agreements. Answer with the "
+                   "applicable plan text. If the text is missing, incomplete, disputed, or the previous "
+                   "guidance did not resolve it, describe the gap and what the planner must settle. "
+                   "Use ask for decisions that require the user.")
+    return question(kind, prompt, facts, answer_schema(kind, targets, owners, grown=grown,
+                    coach_contracts=coach_contracts),
                     [example], targets, execution, images)
 
 
@@ -400,12 +407,30 @@ def requirement_facts(document, refs):
 
 def agreement_facts(document, ref):
     contracts = architecture.contracts_for(document, ref)
-    return {"Contract authority": "Contract nodes below override copies in requirement prose.",
+    return {"Contract authority": "Contract nodes override copies in requirement prose. "
+                                  "Planned contracts are area agreements before unit binding.",
             **{label: {r: {k: c[k] for k in ("kind", "text", "provider")} for r, c in contracts.items()
                     if architecture.endpoint(ref, c) == side}
             for label, side in (("Contracts provided", "provider"), ("Contracts consumed", "consumer"),
                                 ("Area contracts", None))
-            if any(architecture.endpoint(ref, c) == side for c in contracts.values())}}
+            if any(architecture.endpoint(ref, c) == side for c in contracts.values())},
+            **({"Planned contracts": planned} if (planned := planned_agreements(document, ref, contracts))
+               else {})}
+
+
+def planned_agreements(document, ref, bound):
+    """Include area agreements whose unit bindings are not in this projection yet."""
+    if ref == "guide":
+        return {}
+    area = plan.select(document, "unit")[ref]["area"]
+    outline = document.get("architecture", {})
+    participants = {area, *architecture.index(outline.get("areas", [])).get(area, {}).get("ancestors", [])}
+    agreements = outline.get("contracts", [])
+    providers = participants | {c["provider"] for c in agreements
+                                if participants.intersection(c["consumers"])}
+    contracts = plan.select(document, "contract")
+    return {r: {k: contracts.get(r, c)[k] for k in ("kind", "text", "provider")}
+            for c in agreements if (r := c["handle"]) not in bound and c["provider"] in providers}
 
 
 def repair_facts(store, assignment):
@@ -427,7 +452,6 @@ def work_brief(store, ref):
     if any("visual direction" in c["criterion"].lower() for c in plan.select(document, "criterion").values()
            if c["area"] == contract["area"]):
         facts["Design guidance used by UI workers"] = CRAFT
-    facts.update(agreement_facts(document, ref))
     refs = []
     if assignment := fixups.active(store, ref):
         repair, refs = repair_facts(store, assignment)
@@ -449,6 +473,7 @@ def work_brief(store, ref):
     if unit.thread and unit.failure:
         facts = {k: facts[k] for k in ("Exact failure", "Write scope", "Correction owners", "Existing checks",
                                      "Correction observations") if k in facts}
+    facts.update(agreement_facts(document, ref))
     return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
                  images=images(store, refs), owners=facts["Correction owners"])
 
