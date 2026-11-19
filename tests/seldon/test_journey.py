@@ -778,6 +778,72 @@ def test_wave_loop_golden(tmp_path, scalar_align, fault):
 
 
 @pytest.mark.fast
+def test_directed_checkin_architect_continuation_journey(tmp_path, scalar_align):
+    """A completed single-wave run plans the requested follow-on with its original proof.
+
+    The retained Quiet Bench reply kept a closed horizon when the check-in direction was
+    buried. Existing staged-wave journeys already have a next wave and miss this refusal.
+    """
+    from contextlib import closing
+
+    from seldon.providers import render_question
+    from seldon.run import TERMINAL
+
+    direction = "Also let me export a saved value as CSV"
+    goal = "Export the saved value as CSV"
+    run, _ = prepare(tmp_path / "directed-checkin")
+    briefs = []
+
+    class Planner(Scripted):
+        def __call__(self, q):
+            facts = q["facts"]
+            if q["kind"] == "DECIDE" and facts["Decision"] == "CHECK-IN":
+                return json.dumps({"answer": {"choice": "Other", "why": "The user requests CSV export."}})
+            if q["kind"] == "ARCHITECT" and "Finished wave" in facts:
+                strict_schema(q["schema"])
+                briefs.append(q)
+                # Replay the recorded shape unless the current direction is explicit.
+                waves = ([{"goal": goal, "commitments": ["scopeIn:1"]}]
+                         if facts.get("User check-in") == direction and facts.get("Next wave") == 2
+                         else [])
+                return json.dumps({"answer": {"areas": [], "contracts": [], "decisions": [],
+                    "waves": waves, "why": "Extend the existing saved-value outcome with export."}})
+            return super().__call__(q)
+
+    with closing(run):
+        run.provider = Planner(tmp_path / "directed-checkin")
+        while run.store.cursor().state != "CHECK-IN":
+            assert run.step() not in TERMINAL
+        store = run.store
+        before = store.cursor()
+        document = store.plan(before.revision)
+        owners = store.units()
+        evidence = store.records("observation")
+        assert before.wave == 1 and len(document["architecture"]["waves"]) == 1
+        assert owners and all(row.state == "DONE" for row in owners.values())
+        assert evidence and any(body["commit"] == before.candidate and body["exitCode"] == 0
+                                for _, _, body in evidence)
+        run.user = lambda item: direction if item["gate"] == "CHECK-IN" else approve(item)
+        assert run.step() == "PRODUCT-JUDGE"
+        assert run.step() == "ARCHITECT"
+        assert run.step() == "DETAIL"
+        q, = briefs
+        assert q["facts"]["Remaining waves"] == []
+        for reviewed in (False, True):
+            rendered, _ = render_question(q, prompts2=reviewed)
+            assert direction in rendered and "Plan wave 2" in rendered
+        assert not store.records("consumption_failure")
+        after = store.cursor()
+        continued = store.plan(after.revision)
+        assert after.wave == 2 and after.waveStart == before.candidate == after.candidate
+        assert continued["architecture"]["waves"] == [*document["architecture"]["waves"],
+                                                       {"goal": goal, "commitments": ["scopeIn:1"]}]
+        assert continued["architecture"]["areas"] == document["architecture"]["areas"]
+        assert continued["nodes"] == document["nodes"]
+        assert store.units() == owners and store.records("observation") == evidence
+
+
+@pytest.mark.fast
 @pytest.mark.parametrize("missing_object", [False, True])
 def test_recorded_shelflife_repair_coaching_journey(tmp_path, scalar_align, missing_object):
     """A reopened repair without a worktree reaches its UNIT question on the recorded base.

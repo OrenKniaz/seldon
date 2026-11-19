@@ -153,6 +153,17 @@ class Run:
             vision = questions.vision_body(store.read(cursor.vision)["answer"])
             previous = store.plan(cursor.revision) if cursor.revision else None
             built = plan.built(store) if cursor.wave > 1 and not replan else None
+            if built is not None and cursor.requestedChange:
+                # Direct replies steer via requestedChange; cursor.checkin holds ordinary approvals.
+                for _, _, approval in reversed(store.records("approval")):
+                    subject = approval["subject"]
+                    if (approval["words"] == cursor.requestedChange and approval.get("effect") == "direct"
+                            and subject.get("wave") == cursor.wave - 1
+                            and subject.get("commit") == cursor.waveStart
+                            and store.read(approval["request"])["gate"] == "CHECK-IN"):
+                        built["User check-in"] = store.read(approval["words"])["words"]
+                        built["Next wave"] = cursor.wave
+                        break
             outline = previous["architecture"] if previous else None
             gaps = [b for _, _, b in store.records("architecture_gap") if b["vision"] == cursor.vision]
             def consume(result, answer):

@@ -86,7 +86,12 @@ def call_observations(records, slot=None):
             result = folder / "result.json"
             result_saved = result.is_file()
             if result_saved:
-                usage = read_json(result).get("usage")
+                try:
+                    usage = read_json(result).get("usage")
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    # A crash test can interrupt the receipt write. Recover usage
+                    # from the native stream, or count it as unknown.
+                    pass
             worker = slot is not None and body["operation"] == "WORK"
             if worker or usage is None and (slot is not None or result_saved):
                 stream_usage = None

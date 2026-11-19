@@ -197,6 +197,12 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grow
     if grown and kind == "ARCHITECT":
         prompt += ("\nUse the supplied commitment handles across the full wave horizon. Start with a "
                    "working slice of the highest-value outcomes and preserve the exact constraints.")
+    if kind == "ARCHITECT" and "Next wave" in facts:
+        prompt = checkin_wave_task(facts["Next wave"])
+        example = {"areas": [], "contracts": [], "decisions": [],
+                   "waves": [{"goal": "Let visitors save the greeting to read later",
+                              "commitments": example["waves"][0]["commitments"][:1]}],
+                   "why": "The existing owner can extend the greeting outcome with saving."}
     if coach_contracts:
         prompt += ("\nUse the contract response for questions about peer agreements. Answer with the "
                    "applicable plan text. If the text is missing, incomplete, disputed, or the previous "
@@ -439,6 +445,14 @@ def user_words(store):
     changes = [store.read(b["words"])["words"] for _, _, b in store.records("approval")
                if b.get("choice") == "revise" or "step" in b["subject"]]
     return {"Dream": dream, **({"Requested change": changes} if changes else {})}
+
+
+def checkin_wave_task(wave):
+    return (f"Plan wave {wave} from the finished delivery and the user's check-in direction. Give the "
+            "follow-on wave its own goal and cite the accepted commitments it advances, including ones "
+            "that also had work in an earlier wave. List the upcoming waves in order. Seldon carries "
+            "forward completed waves. Keep their owners and report any needed changes to responsibilities "
+            "or agreements by handle. If the direction changes accepted scope, return scope for the user.")
 
 
 def architect_brief(vision, words, gap=None, previous=None, built=None):
@@ -734,7 +748,11 @@ def reviewed_decision(question, facts, context):
                     "and show one to three genuinely different alternatives where the words leave room. "
                     + ALIGN_DESIGN)
     elif kind == "ARCHITECT":
-        if "Finished wave" in facts:
+        if "Next wave" in facts:
+            mission = "What follow-on work delivers the user's check-in direction?"
+            opening.update(take(facts, "User check-in", "Finished wave"))
+            task = checkin_wave_task(facts.pop("Next wave"))
+        elif "Finished wave" in facts:
             mission = "What must change in the unfinished work to deliver the accepted outcome?"
             opening.update(take(facts, "Finished wave", "User check-in"))
             task = ("Preserve completed waves and owners. Describe only changed agreements, responsibilities "
