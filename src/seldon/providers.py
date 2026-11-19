@@ -9,7 +9,7 @@ import types
 import uuid
 from pathlib import Path
 
-from . import claude, features
+from . import claude, desktop, features
 from .processes import execute
 from .store import encode
 
@@ -177,6 +177,14 @@ def recorded(folder):
 
 
 def render_question(question, provider="codex", images=(), *, prompts2=None, planner_brief=None):
+    prompt, instructions = _render_question(question, provider, images, prompts2=prompts2,
+                                            planner_brief=planner_brief)
+    if question["kind"] == "WORK":
+        prompt += "\n\n" + desktop.WRITE_RULE
+    return prompt, instructions
+
+
+def _render_question(question, provider="codex", images=(), *, prompts2=None, planner_brief=None):
     """Return (stdin, instructions) without creating files or invoking a provider.
 
     Pass an explicit arm for offline replay and the actual attachment paths for that invocation.
@@ -272,7 +280,7 @@ class Provider:
         native = NATIVE[name]
         started(folder)
         result = execute(invocation["command"], invocation["cwd"], invocation["timeout"],
-                         folder / "prompt.txt", output_dir=folder)
+                         folder / "prompt.txt", env=desktop.environment(), output_dir=folder)
         for stream in ("stdout", "stderr"):
             (folder / (stream + ".bin")).write_bytes(result[stream])
         output = result["stdout"].decode("utf-8", errors="replace")

@@ -10,13 +10,14 @@ from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 
+from .desktop import environment
 from .plan import matches, safe_path
 from .states import advance
 
 
 def git(root, *args, data=None, env=None, binary=False):
     result = subprocess.run(["git", "-c", "core.autocrlf=false", *args], cwd=root, input=data,
-                            capture_output=True, timeout=120, env={**os.environ, **(env or {})},
+                            capture_output=True, timeout=120, env=environment(env),
                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     if result.returncode:
         raise RuntimeError(result.stderr.decode("utf-8", errors="replace"))
@@ -30,7 +31,8 @@ def commit(root, tree, parent=None):
 
 def contains(project, commit, base):
     return subprocess.run(["git", "merge-base", "--is-ancestor", commit, base], cwd=project,
-                          capture_output=True, timeout=120).returncode == 0
+                          capture_output=True, timeout=120, env=environment(),
+                          creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0).returncode == 0
 
 
 def init(root):

@@ -20,6 +20,10 @@ def ordered(text, *sections):
 def receipt_at_end(prompt, question):
     marker = "\n\nAnswer schema\n"
     receipt, schema = prompt.rsplit(marker, 1)
+    if question["kind"] == "WORK":
+        from seldon.desktop import WRITE_RULE
+        assert schema.endswith("\n\n" + WRITE_RULE)
+        schema = schema.removesuffix("\n\n" + WRITE_RULE)
     assert schema == encode(question["schema"])
     strict_schema(json.loads(schema))
     return json.loads(receipt.splitlines()[-1])["answer"]

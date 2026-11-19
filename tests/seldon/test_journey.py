@@ -14,6 +14,51 @@ from seldon.providers import ROLES, Codex, ProviderFailure
 from seldon.run import Run
 
 
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("provider_name,lead_mode", [("codex", False), ("claude", True)])
+def test_provider_works_without_disturbing_desktop(tmp_path, monkeypatch, provider_name, lead_mode):
+    """A scripted builder commits through the real provider launch without opening an editor.
+
+    An inherited failing editor catches a missing override; prompt and browser checks protect
+    desktop use, which the existing scripted provider journeys do not exercise.
+    """
+    from seldon import providers
+
+    product = tmp_path / "product"
+    product.mkdir()
+    gitwork.git(product, "init", "--quiet")
+    (product / "item.txt").write_text("work", encoding="utf-8")
+    hook = product / ".git/hooks/prepare-commit-msg"
+    hook.write_text('#!/bin/sh\nprintf "Scripted work\\n" > "$1"\n', encoding="utf-8")
+    hook.chmod(0o755)
+    gitwork.git(product, "add", "item.txt")
+    monkeypatch.setenv("GIT_EDITOR", "nonexistent-desktop-editor")
+    monkeypatch.setenv("BROWSER", "nonexistent-desktop-browser %s")
+    native = tmp_path / "native.py"
+    native.write_text(
+        "import json, subprocess, sys, webbrowser\n"
+        "prompt = sys.stdin.read()\n"
+        "assert 'The person is using this computer' in prompt\n"
+        "assert 'never open files or pages in desktop apps' in prompt\n"
+        "assert 'checks/kit/browser.cjs' in prompt and 'save screenshots as evidence' in prompt\n"
+        "assert webbrowser.open('https://example.invalid/')\n"
+        "subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@local', "
+        "'commit'], check=True, timeout=15, capture_output=True)\n"
+        + ("print(json.dumps({'type':'result','subtype':'success','result':'done'}))\n"
+           if provider_name == "claude" else
+           "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'done'}}))\n"
+           "print(json.dumps({'type':'turn.completed'}))\n"), encoding="utf-8")
+    setup = {"providers": providers.roles(provider_name), provider_name + "Command": [sys.executable, str(native)]}
+    calls = tmp_path / "calls"
+    question = {"kind": "WORK", "prompt": "Build", "facts": {"Milestone brief": "Build"},
+                "schema": {"type": "object"}, "examples": [{"answer": {}}],
+                "execution": {"cwd": str(product), "lead": lead_mode}}
+    answer, _ = providers.Provider(calls, setup, timeout=30).invoke(question, lambda _: None)
+    assert answer == "done"
+    assert gitwork.git(product, "log", "-1", "--format=%s") == "Scripted work"
+
 @pytest.mark.fast
 def test_quiet_bench_size_calibration_journey(tmp_path, monkeypatch):
     """ALIGN coaches effort on the recorded unstaged bench and honors the owner's size at A.
@@ -1831,6 +1876,9 @@ def journey(slot, mode="normal", count=1):
                 prompt = (folder / "prompt.txt").read_text("utf-8")
                 instructions = (folder / "instructions.txt").read_text("utf-8")
                 facts = question["facts"]
+                if question["kind"] == "WORK":
+                    from seldon.desktop import WRITE_RULE
+                    prompt = prompt.removesuffix("\n\n" + WRITE_RULE)
                 headings = ["Answer schema", "Example", *facts]
                 sections = re.split(r"\n\n(?=(?:" + "|".join(map(re.escape, headings)) + r")\n)", prompt)
                 stable = [instructions + "\n" + question["prompt"],
