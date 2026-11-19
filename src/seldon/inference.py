@@ -55,7 +55,10 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                     raise RuntimeError(f"{error}; receipt: {error.receipt}") from error
                 previous = attempt
 
+    changes = []
+
     def recorded(body):
+        changes[:] = body.get("normalisations", [])
         return store.record("provider_reply", {"attempt": attempt, "finishedAt": time.time(), **body})
 
     original, correction = question, None
@@ -94,11 +97,15 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                     if "gaps" in answer:
                         answer = {**answer, "verdict": ("gap" if questions.must_fix(answer) else
                                   "adequate" if kind == "REVIEW" else "satisfied")}
-                    check(answer)
+                    checked = check(answer)
+                    if kind == "ALIGN" and checked:
+                        changes.extend(checked)
                 if answer.get("verdict") == "uncertain" and kind == "JUDGE":
                     answer = {**answer, "verdict": "not judged", "gaps": []}
                 result = retained or store.record("answer", {"attempt": attempt, "kind": kind, "unit": unit,
                     "answer": answer, "binding": binding})
+                for change in changes:
+                    store.record("answer_normalisation", {"answer": result, **change})
                 consume(result, answer)
                 if not retained:
                     store.record("attempt_end", {"attempt": attempt, "result": result, "finishedAt": time.time()})

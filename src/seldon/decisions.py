@@ -257,6 +257,16 @@ def request(store, gate, subject, *, ask=None):
         if gate == "UNIT" or "step" in subject:
             key, subject = recovery.subject(store, gate, subject)
         ask = ask if ask is not None else gate_ask(store, gate, subject)
+        summary = []
+        if gate in ("A", "B"):
+            vision = subject.get("round", cursor.vision)
+            summary = [b["summary"] for _, _, b in store.records("answer_normalisation")
+                       if b["answer"] == vision]
+        if gate in ("B", "CHECK-IN"):
+            summary.extend(b["summary"] for _, _, b in store.records("scope_normalisation")
+                           if b.get("wave") == cursor.wave and "summary" in b)
+        if summary:
+            subject = {**subject, "normalisations": list(dict.fromkeys(summary))}
         ref = store.record("decision_request", {"gate": gate, "subject": subject,
             **({"ask": ask} if ask else {}),
             "origin": store.read(cursor.kickoff)["setup"].get("userOrigin", "user")})

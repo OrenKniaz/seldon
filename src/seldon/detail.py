@@ -141,6 +141,7 @@ def step(store, provider, capacity):
     retain_trace = any(unit.wave == cursor.wave for unit in store.units().values())
     normalised = []
     while True:
+        normalised.clear()
         try:
             if failures:
                 raise architecture.DetailCorrection(failures)
@@ -153,8 +154,11 @@ def step(store, provider, capacity):
             gap(store, {a: [{"error": str(error), "otherSide": {}}] for a in error.areas}, refs)
             return
         except architecture.DetailCorrection as error:
+            question = next((row["question"] for rows in error.corrections.values()
+                             for row in rows if "question" in row), None)
             correction = (store.record("detail_correction", {"revision": cursor.revision,
-                "sources": list(refs), "corrections": error.corrections}), error.corrections)
+                "sources": list(refs), "corrections": error.corrections,
+                **({"question": question} if question else {})}), error.corrections)
             recovery.planning(store, correction[0], error.corrections)
             replacement, failures = collect([a for a in outline["areas"]
                                              if a["handle"] in correction[1]], correction)
@@ -164,7 +168,7 @@ def step(store, provider, capacity):
             leaves = [replacements.pop(a["handle"], (a, b)) for a, b in leaves]
             leaves.extend(replacements.values())
     with store.transaction():
-        for kind, body in normalised:
-            store.record(kind, body)
         revision = store.revision(compiled, cursor.revision)
+        for kind, body in normalised:
+            store.record(kind, {**body, "wave": cursor.wave, "revision": revision})
         advance(store, "detailed", refs, revision=revision)

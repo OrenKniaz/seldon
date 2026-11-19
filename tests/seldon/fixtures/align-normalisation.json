@@ -1,0 +1,1177 @@
+{
+  "ShelfLife": {
+    "kickoff": "Build ShelfLife, a small local pantry tracker for one household. Python 3.12 standard library only (sqlite3, http.server, csv, json); no third-party packages, no network access at runtime, no build step.\n\nBackend: `python server.py --port PORT --db PATH` serves a JSON API and the web UI on 127.0.0.1.\n- Items have: id, name (1-80 chars), quantity (integer >= 0), unit (text, optional), expires (YYYY-MM-DD or null), created_at.\n- GET /api/items (optional ?expiring_within=DAYS, ?q=TEXT name search) returns items sorted by expiry (nulls last).\n- POST /api/items creates; PATCH /api/items/{id} updates quantity/name/unit/expires; POST /api/items/{id}/consume {\"amount\": n} reduces quantity (never below 0; 409 if amount exceeds quantity); DELETE /api/items/{id}.\n- Invalid input returns 400 with {\"error\": \"...\"}; unknown id 404. Data persists in the SQLite file across restarts. Concurrent requests must not corrupt data or lose updates (two simultaneous consumes of the last unit: exactly one succeeds).\n\nUI (served at /): one responsive page that works at phone and desktop sizes.\n- \"Expiring soon\" section (next 7 days, expired items clearly marked), full list with search and an expiry filter, add-item form with inline validation messages, consume and delete actions, empty state and a visible error state when the API fails.\n- Keyboard accessible with visible focus; readable contrast; no horizontal scrolling at 375px. Clean, calm visual design.\n\nImport: `python import_items.py FILE.csv --db PATH` loads rows (name,quantity,unit,expires) into the same database, skipping invalid rows and printing one summary line \"imported N, skipped M\" (exit 0), or exit 2 with an error on an unreadable file.\n\nDone means: the server, UI and importer work together from a fresh folder; a short README explains how to run them.",
+    "align": [
+      {
+        "changed": "Turned the kickoff into a ranked household outcome, preserving the API, importer, accessibility, offline and data-integrity requirements. Added an observable visual direction for the UI.",
+        "questions": [],
+        "recommendation": "done",
+        "vision": {
+          "constraints": [
+            {
+              "handle": "local-runtime",
+              "meaning": "Run locally without dependencies, runtime network access or a build step.",
+              "source": "kickoff",
+              "value": "Python 3.12 standard library only; bind to 127.0.0.1; no third-party packages, runtime network access or build step"
+            },
+            {
+              "handle": "launch",
+              "meaning": "Start the API and UI using the specified command and database location.",
+              "source": "kickoff",
+              "value": "python server.py --port PORT --db PATH"
+            },
+            {
+              "handle": "item-fields",
+              "meaning": "Use the specified item fields and validation boundaries.",
+              "source": "kickoff",
+              "value": "id; name 1–80 characters; quantity integer >= 0; optional text unit; expires YYYY-MM-DD or null; created_at"
+            },
+            {
+              "handle": "api-contract",
+              "meaning": "Preserve the specified routes, filters, ordering, mutations and error responses.",
+              "source": "kickoff",
+              "value": "GET /api/items with optional expiring_within=DAYS and q=TEXT, sorted by expiry with nulls last; POST /api/items; PATCH /api/items/{id}; POST /api/items/{id}/consume; DELETE /api/items/{id}; invalid input 400 with {\"error\":\"...\"}, unknown id 404, over-consumption 409"
+            },
+            {
+              "handle": "soon-window",
+              "meaning": "Identify food needing attention, including visibly marked expired items.",
+              "source": "kickoff",
+              "value": "Expiring soon: next 7 days; expired items clearly marked"
+            },
+            {
+              "handle": "import-contract",
+              "meaning": "Import valid CSV rows into the same database and report invalid rows or unreadable input as specified.",
+              "source": "kickoff",
+              "value": "python import_items.py FILE.csv --db PATH; columns name,quantity,unit,expires; skip invalid rows; print one summary line \"imported N, skipped M\" and exit 0, or exit 2 with an error for an unreadable file"
+            },
+            {
+              "handle": "viewport",
+              "meaning": "Keep the page usable at phone and desktop sizes.",
+              "source": "kickoff",
+              "value": "Responsive; no horizontal scrolling at 375px"
+            },
+            {
+              "handle": "fresh-folder",
+              "meaning": "Deliver the components together with startup instructions.",
+              "source": "kickoff",
+              "value": "Server, UI and importer work together from a fresh folder; short README explains how to run them"
+            }
+          ],
+          "quality": [
+            {
+              "constraints": [
+                "soon-window",
+                "viewport"
+              ],
+              "criterion": "A calm, distinctive pantry interface makes urgent food easy to spot and actions easy to understand.",
+              "handle": "ui-direction",
+              "sources": [
+                "kickoff",
+                "Design guidance used by UI workers"
+              ],
+              "verification": "Inspect the real page at 375px and desktop: use an offline-available, deliberately hierarchical type treatment, a high-contrast deep-ink and warm-cream palette with a restrained rust expiry accent, generous spacing, clear labels and plainly marked expired items; confirm no horizontal scrolling. Motion, if any, is brief and respects reduced-motion."
+            },
+            {
+              "constraints": [
+                "viewport"
+              ],
+              "criterion": "The page is keyboard accessible, readable and honest about empty and failed states.",
+              "handle": "accessible-states",
+              "sources": [
+                "kickoff",
+                "Design guidance used by UI workers"
+              ],
+              "verification": "Navigate forms, search and actions by keyboard with visible focus; inspect readable contrast, inline validation, empty state and visible API failure; open the finished page and check for a clean console and no missing requested files."
+            },
+            {
+              "constraints": [
+                "api-contract",
+                "item-fields"
+              ],
+              "criterion": "Updates preserve quantities and survive restarts, even with concurrent requests.",
+              "handle": "data-integrity",
+              "sources": [
+                "kickoff"
+              ],
+              "verification": "Create and update an item, restart against the same SQLite file and retrieve it; issue two simultaneous consumes of its last unit and verify exactly one succeeds, the other returns 409 and the stored quantity is zero."
+            },
+            {
+              "constraints": [
+                "local-runtime",
+                "launch",
+                "import-contract",
+                "fresh-folder"
+              ],
+              "criterion": "The local server, UI and importer work together without network or package installation.",
+              "handle": "local-integration",
+              "sources": [
+                "kickoff"
+              ],
+              "verification": "From a fresh folder, follow the README, import a CSV containing valid and invalid rows, then start the server against that database and find the valid rows in the UI; verify the summary and unreadable-file exit behavior."
+            }
+          ],
+          "scopeOut": [
+            {
+              "outcome": "Multi-household accounts, synchronization and hosted access are outside the single-household local tracker.",
+              "sources": [
+                "kickoff"
+              ]
+            }
+          ],
+          "size": "tiny",
+          "sizeWhy": "Micro: the closest comparable work is the explicitly described local web app with a small API, SQLite and an importer. One capable plain agent should need minutes in one session to build and verify it from the same starting point. Hosted synchronization, authentication, migrations or substantial additional workflows would make it bigger.",
+          "stories": [
+            {
+              "constraints": [
+                "soon-window",
+                "viewport"
+              ],
+              "feature": "Food needing attention",
+              "handle": "expiring",
+              "outcome": "A household member can spot expired food and what expires in the next seven days before deciding what to use.",
+              "sources": [
+                "kickoff"
+              ],
+              "story": "As a household member, I want to see what needs using soon so I can reduce waste."
+            },
+            {
+              "constraints": [
+                "api-contract",
+                "item-fields"
+              ],
+              "feature": "Find and maintain pantry stock",
+              "handle": "inventory",
+              "outcome": "A household member can search and filter the full expiry-sorted list, add valid items, update their details, consume stock and delete items.",
+              "sources": [
+                "kickoff"
+              ],
+              "story": "As a household member, I want an accurate, searchable pantry list so I know what is available and can keep it current."
+            },
+            {
+              "constraints": [
+                "api-contract",
+                "item-fields"
+              ],
+              "feature": "Reliable stock changes",
+              "handle": "reliable-stock",
+              "outcome": "Stock persists across restarts and concurrent consumption cannot overspend the available quantity.",
+              "sources": [
+                "kickoff"
+              ],
+              "story": "As a household member, I want stock changes to be dependable so I can trust the list."
+            },
+            {
+              "constraints": [
+                "import-contract"
+              ],
+              "feature": "CSV import",
+              "handle": "import",
+              "outcome": "A household member can bring existing pantry rows into the same database and see how many were imported or skipped.",
+              "sources": [
+                "kickoff"
+              ],
+              "story": "As a household member, I want to import an existing CSV so I do not have to re-enter every item."
+            },
+            {
+              "constraints": [
+                "local-runtime",
+                "launch",
+                "fresh-folder"
+              ],
+              "feature": "Local setup",
+              "handle": "setup",
+              "outcome": "A household member can start and use the complete tracker locally from a fresh folder with the supplied README.",
+              "sources": [
+                "kickoff"
+              ],
+              "story": "As a household member, I want a straightforward offline setup so my pantry tracker stays local."
+            }
+          ],
+          "understanding": "ShelfLife helps one household decide what to use before it expires and maintain a trustworthy local picture of pantry stock.",
+          "users": [
+            "Members of one household managing their shared pantry"
+          ]
+        },
+        "why": "The target user, highest-value decision and required behaviors are sufficiently specified; no material product choice needs to block the user's Gate A decision."
+      },
+      {
+        "changed": "Preserved the ranked household outcomes and corrected the local-runtime constraint to quote the kickoff exactly; the loopback binding is stated separately with its own exact source value.",
+        "questions": [],
+        "recommendation": "done",
+        "vision": {
+          "constraints": [
+            {
+              "handle": "local-runtime",
+              "meaning": "Use only the specified runtime and avoid external dependencies, runtime networking, and a build step.",
+              "source": "kickoff",
+              "value": "Python 3.12 standard library only (sqlite3, http.server, csv, json); no third-party packages, no network access at runtime, no build step."
+            },
+            {
+              "handle": "launch",
+              "meaning": "Serve the API and UI locally using the specified command and database location.",
+              "source": "kickoff",
+              "value": "`python server.py --port PORT --db PATH` serves a JSON API and the web UI on 127.0.0.1."
+            },
+            {
+              "handle": "item-fields",
+              "meaning": "Use the specified item fields and validation boundaries.",
+              "source": "kickoff",
+              "value": "Items have: id, name (1-80 chars), quantity (integer >= 0), unit (text, optional), expires (YYYY-MM-DD or null), created_at."
+            },
+            {
+              "handle": "api-contract",
+              "meaning": "Provide the specified routes, filtering, ordering, mutation and error behavior.",
+              "source": "kickoff",
+              "value": "GET /api/items (optional ?expiring_within=DAYS, ?q=TEXT name search) returns items sorted by expiry (nulls last).\n- POST /api/items creates; PATCH /api/items/{id} updates quantity/name/unit/expires; POST /api/items/{id}/consume {\"amount\": n} reduces quantity (never below 0; 409 if amount exceeds quantity); DELETE /api/items/{id}.\n- Invalid input returns 400 with {\"error\": \"...\"}; unknown id 404."
+            },
+            {
+              "handle": "soon-window",
+              "meaning": "Show food needing attention and distinguish expired items.",
+              "source": "kickoff",
+              "value": "\"Expiring soon\" section (next 7 days, expired items clearly marked)"
+            },
+            {
+              "handle": "import-contract",
+              "meaning": "Import valid rows into the same database and report skipped or unreadable input.",
+              "source": "kickoff",
+              "value": "`python import_items.py FILE.csv --db PATH` loads rows (name,quantity,unit,expires) into the same database, skipping invalid rows and printing one summary line \"imported N, skipped M\" (exit 0), or exit 2 with an error on an unreadable file."
+            },
+            {
+              "handle": "viewport",
+              "meaning": "Keep the page usable on phones and desktops.",
+              "source": "kickoff",
+              "value": "one responsive page that works at phone and desktop sizes."
+            },
+            {
+              "handle": "fresh-folder",
+              "meaning": "Deliver the components together with startup instructions.",
+              "source": "kickoff",
+              "value": "the server, UI and importer work together from a fresh folder; a short README explains how to run them."
+            },
+            {
+              "handle": "ui-behavior",
+              "meaning": "Provide the specified list, forms, actions and feedback.",
+              "source": "kickoff",
+              "value": "full list with search and an expiry filter, add-item form with inline validation messages, consume and delete actions, empty state and a visible error state when the API fails."
+            },
+            {
+              "handle": "accessibility",
+              "meaning": "Make the page keyboard accessible and readable without horizontal overflow on a narrow phone.",
+              "source": "kickoff",
+              "value": "Keyboard accessible with visible focus; readable contrast; no horizontal scrolling at 375px. Clean, calm visual design."
+            },
+            {
+              "handle": "persistence-concurrency",
+              "meaning": "Preserve stock across restarts and prevent lost updates during concurrent consumption.",
+              "source": "kickoff",
+              "value": "Data persists in the SQLite file across restarts. Concurrent requests must not corrupt data or lose updates (two simultaneous consumes of the last unit: exactly one succeeds)."
+            }
+          ],
+          "quality": [
+            {
+              "constraints": [
+                "soon-window",
+                "viewport",
+                "accessibility"
+              ],
+              "criterion": "A calm, distinctive pantry interface makes urgent food easy to spot and actions easy to understand.",
+              "handle": "ui-direction",
+              "sources": [
+                "kickoff",
+                "Design guidance used by UI workers"
+              ],
+              "verification": "Inspect the real page at 375px and desktop: use an offline-available, deliberately hierarchical type treatment, a high-contrast deep-ink and warm-cream palette with a restrained rust expiry accent, generous spacing, clear labels and plainly marked expired items; confirm no horizontal scrolling. Motion, if any, is brief and respects reduced-motion."
+            },
+            {
+              "constraints": [
+                "viewport",
+                "ui-behavior",
+                "accessibility"
+              ],
+              "criterion": "The page is keyboard accessible, readable and honest about empty and failed states.",
+              "handle": "accessible-states",
+              "sources": [
+                "kickoff",
+                "Design guidance used by UI workers"
+              ],
+              "verification": "Navigate forms, search and actions by keyboard with visible focus; inspect readable contrast, inline validation, empty state and visible API failure; open the finished page and check for a clean console and no missing requested files."
+            },
+            {
+              "constraints": [
+                "api-contract",
+                "item-fields",
+                "persistence-concurrency"
+              ],
+              "criterion": "Updates preserve quantities and survive restarts, even with concurrent requests.",
+              "handle": "data-integrity",
+              "sources": [
+                "kickoff"
+              ],
+              "verification": "Create and update an item, restart against the same SQLite file and retrieve it; issue two simultaneous consumes of its last unit and verify exactly one succeeds, the other returns 409 and the stored quantity is zero."
+            },
+            {
+              "constraints": [
+                "local-runtime",
+                "launch",
+                "import-contract",
+                "fresh-folder"
+              ],
+              "criterion": "The local server, UI and importer work together without network or package installation.",
+              "handle": "local-integration",
+              "sources": [
+                "kickoff"
+              ],
+              "verification": "From a fresh folder, follow the README, import a CSV containing valid and invalid rows, then start the server against that database and find the valid rows in the UI; verify the summary and unreadable-file exit behavior."
+            }
+          ],
+          "scopeOut": [
+            {
+              "outcome": "Multi-household accounts, synchronization and hosted access are outside the single-household local tracker.",
+              "sources": [
+                "kickoff"
+              ]
+            }
+          ],
+          "size": "tiny",
+          "sizeWhy": "Micro: the closest comparable work is the explicitly described local web app with a small API, SQLite and an importer. One capable plain agent should need minutes in one session to build and verify it from the same starting point. Hosted synchronization, authentication, migrations or substantial additional workflows would make it bigger.",
+          "stories": [
+            {
+              "constraints": [
+                "soon-window",
+                "viewport"
+              ],
+              "feature": "Food needing attention",
+              "handle": "expiring",
+              "outcome": "A household member can spot expired food and what expires in the next seven days before deciding what to use.",
+              "sources": [
+                "kickoff"
+              ],
+              "story": "As a household member, I want to see what needs using soon so I can reduce waste."
+            },
+            {
+              "constraints": [
+                "api-contract",
+                "item-fields",
+                "ui-behavior"
+              ],
+              "feature": "Find and maintain pantry stock",
+              "handle": "inventory",
+              "outcome": "A household member can search and filter the full expiry-sorted list, add valid items, update their details through the API, consume stock and delete items.",
+              "sources": [
+                "kickoff"
+              ],
+              "story": "As a household member, I want an accurate, searchable pantry list so I know what is available and can keep it current."
+            },
+            {
+              "constraints": [
+                "api-contract",
+                "item-fields",
+                "persistence-concurrency"
+              ],
+              "feature": "Reliable stock changes",
+              "handle": "reliable-stock",
+              "outcome": "Stock persists across restarts and concurrent consumption cannot overspend the available quantity.",
+              "sources": [
+                "kickoff"
+              ],
+              "story": "As a household member, I want stock changes to be dependable so I can trust the list."
+            },
+            {
+              "constraints": [
+                "import-contract"
+              ],
+              "feature": "CSV import",
+              "handle": "import",
+              "outcome": "A household member can bring existing pantry rows into the same database and see how many were imported or skipped.",
+              "sources": [
+                "kickoff"
+              ],
+              "story": "As a household member, I want to import an existing CSV so I do not have to re-enter every item."
+            },
+            {
+              "constraints": [
+                "local-runtime",
+                "launch",
+                "fresh-folder"
+              ],
+              "feature": "Local setup",
+              "handle": "setup",
+              "outcome": "A household member can start and use the complete tracker locally from a fresh folder with the supplied README.",
+              "sources": [
+                "kickoff"
+              ],
+              "story": "As a household member, I want a straightforward offline setup so my pantry tracker stays local."
+            }
+          ],
+          "understanding": "ShelfLife helps one household decide what to use before it expires and maintain a trustworthy local picture of pantry stock.",
+          "users": [
+            "Members of one household managing their shared pantry"
+          ]
+        },
+        "why": "The target user, highest-value decision and required behaviors are sufficiently specified. The corrected runtime value is copied directly from kickoff; no material product choice needs to block the user's Gate A decision."
+      }
+    ],
+    "locked": {
+      "changed": "Corrected the rejected server-command value to an exact quotation from kickoff. All vision citations use kickoff, and the UI direction is grounded in the accepted ShelfLife requirements.",
+      "questions": [],
+      "recommendation": "done",
+      "vision": {
+        "constraints": [
+          {
+            "handle": "local-runtime",
+            "meaning": "Use the specified local runtime without third-party dependencies, runtime network access, or a build step.",
+            "source": "kickoff",
+            "value": "Python 3.12 standard library only (sqlite3, http.server, csv, json); no third-party packages, no network access at runtime, no build step."
+          },
+          {
+            "handle": "server-command",
+            "meaning": "Serve the JSON API and web UI on the specified local address using the requested command.",
+            "source": "kickoff",
+            "value": "`python server.py --port PORT --db PATH` serves a JSON API and the web UI on 127.0.0.1."
+          },
+          {
+            "handle": "item-fields",
+            "meaning": "Preserve the specified item fields and validation limits.",
+            "source": "kickoff",
+            "value": "Items have: id, name (1-80 chars), quantity (integer >= 0), unit (text, optional), expires (YYYY-MM-DD or null), created_at."
+          },
+          {
+            "handle": "api-contract",
+            "meaning": "Provide the specified item operations, search, filtering, ordering, and error responses.",
+            "source": "kickoff",
+            "value": "GET /api/items (optional ?expiring_within=DAYS, ?q=TEXT name search) returns items sorted by expiry (nulls last).\n- POST /api/items creates; PATCH /api/items/{id} updates quantity/name/unit/expires; POST /api/items/{id}/consume {\"amount\": n} reduces quantity (never below 0; 409 if amount exceeds quantity); DELETE /api/items/{id}.\n- Invalid input returns 400 with {\"error\": \"...\"}; unknown id 404."
+          },
+          {
+            "handle": "expiry-window",
+            "meaning": "Highlight items expiring in the next seven days and distinguish expired items.",
+            "source": "kickoff",
+            "value": "\"Expiring soon\" section (next 7 days, expired items clearly marked)"
+          },
+          {
+            "handle": "responsive-accessible",
+            "meaning": "Support phone and desktop use, keyboard operation, visible focus, readable contrast, and the specified phone width.",
+            "source": "kickoff",
+            "value": "one responsive page that works at phone and desktop sizes."
+          },
+          {
+            "handle": "accessibility-detail",
+            "meaning": "Make the interface keyboard accessible, readable, and free of horizontal scrolling at 375px.",
+            "source": "kickoff",
+            "value": "Keyboard accessible with visible focus; readable contrast; no horizontal scrolling at 375px. Clean, calm visual design."
+          },
+          {
+            "handle": "import-contract",
+            "meaning": "Import into the same database, skip invalid rows, and report results and unreadable-file failures as specified.",
+            "source": "kickoff",
+            "value": "`python import_items.py FILE.csv --db PATH` loads rows (name,quantity,unit,expires) into the same database, skipping invalid rows and printing one summary line \"imported N, skipped M\" (exit 0), or exit 2 with an error on an unreadable file."
+          },
+          {
+            "handle": "persistence-concurrency",
+            "meaning": "Preserve data across restarts and prevent lost concurrent consumption updates.",
+            "source": "kickoff",
+            "value": "Data persists in the SQLite file across restarts. Concurrent requests must not corrupt data or lose updates (two simultaneous consumes of the last unit: exactly one succeeds)."
+          },
+          {
+            "handle": "delivery",
+            "meaning": "Deliver an integrated application that works from a fresh folder with concise run instructions.",
+            "source": "kickoff",
+            "value": "Done means: the server, UI and importer work together from a fresh folder; a short README explains how to run them."
+          }
+        ],
+        "quality": [
+          {
+            "constraints": [
+              "responsive-accessible",
+              "accessibility-detail",
+              "expiry-window"
+            ],
+            "criterion": "A clean, calm pantry interface puts expiry decisions first: use a restrained, high-contrast palette, deliberate offline typography, generous spacing, and a clearly labeled expired state rather than visual clutter.",
+            "handle": "ui-direction",
+            "sources": [
+              "kickoff"
+            ],
+            "verification": "Inspect the running page at phone and desktop widths with populated, expired, and empty states; confirm that urgency, hierarchy, and labels are clear."
+          },
+          {
+            "constraints": [
+              "responsive-accessible",
+              "accessibility-detail"
+            ],
+            "criterion": "Primary actions are keyboard usable with visible focus, readable contrast, and no horizontal scrolling at 375px.",
+            "handle": "usable-accessible",
+            "sources": [
+              "kickoff"
+            ],
+            "verification": "At 375px and desktop widths, navigate search, filtering, the form, and item actions by keyboard; inspect focus, contrast, and horizontal overflow."
+          },
+          {
+            "constraints": [
+              "api-contract",
+              "item-fields"
+            ],
+            "criterion": "Invalid form input and API failures are visible and actionable.",
+            "handle": "clear-recovery",
+            "sources": [
+              "kickoff"
+            ],
+            "verification": "Submit invalid form values and simulate an API failure; check inline validation and a visible error state."
+          },
+          {
+            "constraints": [
+              "persistence-concurrency"
+            ],
+            "criterion": "Stored pantry quantities remain correct across restarts and concurrent consumption.",
+            "handle": "data-integrity",
+            "sources": [
+              "kickoff"
+            ],
+            "verification": "Restart against the same database and race two consumes of a single remaining unit; verify persistence and exactly one successful consume."
+          },
+          {
+            "constraints": [
+              "local-runtime",
+              "delivery",
+              "import-contract",
+              "server-command"
+            ],
+            "criterion": "The documented local workflow works without installing dependencies or accessing the network at runtime.",
+            "handle": "fresh-start",
+            "sources": [
+              "kickoff"
+            ],
+            "verification": "Follow the README from a fresh folder, import a CSV, start the server, and see the imported items in the UI."
+          }
+        ],
+        "scopeOut": [
+          {
+            "outcome": "Multi-household accounts, remote hosting, and online services are outside the single-household local product.",
+            "sources": [
+              "kickoff"
+            ]
+          }
+        ],
+        "size": "tiny",
+        "sizeWhy": "Micro: the closest comparable work is a local web app with a small API, SQLite, and an importer. One capable plain agent is expected to build and verify it in minutes within one session. Authentication, multiple services, migrations, or broader deployment requirements would make it bigger.",
+        "stories": [
+          {
+            "constraints": [
+              "expiry-window",
+              "responsive-accessible",
+              "accessibility-detail"
+            ],
+            "feature": "Expiring soon",
+            "handle": "see-urgency",
+            "outcome": "The household can identify food to use soon and distinguish already expired items.",
+            "sources": [
+              "kickoff"
+            ],
+            "story": "As a household member, I want to see what is expiring so I can decide what to use first."
+          },
+          {
+            "constraints": [
+              "item-fields",
+              "api-contract",
+              "persistence-concurrency"
+            ],
+            "feature": "Consume and maintain items",
+            "handle": "maintain-items",
+            "outcome": "The household can consume and delete items through the UI, and the API supports updating item details without quantities falling below zero.",
+            "sources": [
+              "kickoff"
+            ],
+            "story": "As a household member, I want to keep pantry quantities and details current as food is used."
+          },
+          {
+            "constraints": [
+              "item-fields",
+              "api-contract",
+              "responsive-accessible",
+              "accessibility-detail"
+            ],
+            "feature": "Pantry list and search",
+            "handle": "find-items",
+            "outcome": "The household can view items ordered by expiry, search by name, and filter by expiry, including a useful empty state.",
+            "sources": [
+              "kickoff"
+            ],
+            "story": "As a household member, I want to find what is in the pantry so I can plan what to use."
+          },
+          {
+            "constraints": [
+              "item-fields",
+              "api-contract",
+              "responsive-accessible",
+              "accessibility-detail"
+            ],
+            "feature": "Add items",
+            "handle": "add-items",
+            "outcome": "The household can add a valid item and see inline messages explaining invalid entries.",
+            "sources": [
+              "kickoff"
+            ],
+            "story": "As a household member, I want to add pantry items so the list reflects what we have."
+          },
+          {
+            "constraints": [
+              "import-contract",
+              "delivery"
+            ],
+            "feature": "CSV import",
+            "handle": "import-items",
+            "outcome": "A household member can load valid existing rows into the same pantry database and see how many were imported or skipped.",
+            "sources": [
+              "kickoff"
+            ],
+            "story": "As a household member, I want to import an existing CSV so I can populate the pantry without entering every item by hand."
+          }
+        ],
+        "understanding": "ShelfLife helps one household keep a local pantry inventory and decide what to use before it expires. A noticeably better version makes urgency obvious, everyday updates quick, and quantities trustworthy without an online service.",
+        "users": [
+          "A household member tracking and using shared pantry supplies",
+          "A household member setting up or importing an existing pantry list"
+        ]
+      },
+      "why": "The accepted requirements settle the users, workflows, local operating constraints, and visual direction. No material product choice needs another question; the user decides gate A."
+    },
+    "outline": {
+      "areas": [
+        {
+          "commitments": [
+            "scopeIn:see-urgency",
+            "scopeIn:maintain-items",
+            "scopeIn:find-items",
+            "scopeIn:add-items",
+            "scopeIn:import-items",
+            "quality:ui-direction",
+            "quality:usable-accessible",
+            "quality:clear-recovery",
+            "quality:data-integrity",
+            "quality:fresh-start"
+          ],
+          "handle": "shelflife",
+          "responsibility": "One capable builder owns the integrated local application, its checks, and run instructions through delivery.",
+          "scope": [
+            "server.py",
+            "import_items.py",
+            "pantry storage and validation modules",
+            "web UI assets",
+            "README.md",
+            "application-owned checks"
+          ]
+        }
+      ],
+      "contracts": [],
+      "decisions": [
+        {
+          "areas": [
+            "shelflife"
+          ],
+          "choice": "Use one builder and one coherent ownership area; deliver urgency first, then complete the remaining accepted product.",
+          "origin": "architecture",
+          "reason": "The approved tiny, single-session scope does not justify independent owners or peer agreements. The first checkpoint must nevertheless be runnable and prove the explicitly accepted first outcome."
+        },
+        {
+          "areas": [
+            "shelflife"
+          ],
+          "choice": "Use kickoff as the vision source and derive the calm, accessible interface from its accepted requirements.",
+          "origin": "user",
+          "reason": "The requested ALIGN retry explicitly rejects an invented source handle."
+        },
+        {
+          "areas": [
+            "shelflife"
+          ],
+          "choice": "Keep the product local: Python 3.12 standard library only, no runtime network access, third-party dependencies, or build step; exclude accounts, remote hosting, and online services.",
+          "origin": "user",
+          "reason": "These are accepted runtime and product boundaries, not optional implementation preferences."
+        },
+        {
+          "areas": [
+            "shelflife"
+          ],
+          "choice": "Preserve the specified item fields, validation, API operations and errors, SQLite persistence and atomic consumption, CSV command and reporting, and documented fresh-folder workflow.",
+          "origin": "user",
+          "reason": "All remaining commitments and their exact supplied constraints remain binding for the complete delivery."
+        }
+      ],
+      "waves": [
+        {
+          "commitments": [
+            "scopeIn:see-urgency",
+            "quality:ui-direction"
+          ],
+          "goal": "First runnable slice: start the local server against a SQLite pantry and show real stored items expiring within the next seven days, with already expired items clearly labeled. Inspect populated, expired, and empty states at phone and desktop widths; verify keyboard access, visible focus, readable contrast, and no horizontal scrolling at 375px. Use a restrained, clean, calm offline design. Seed representative records through the database for this checkpoint; do not imply that add or import is already delivered."
+        },
+        {
+          "commitments": [
+            "scopeIn:maintain-items",
+            "scopeIn:find-items",
+            "scopeIn:add-items",
+            "scopeIn:import-items",
+            "quality:usable-accessible",
+            "quality:clear-recovery",
+            "quality:data-integrity",
+            "quality:fresh-start"
+          ],
+          "goal": "Complete the pantry list, search and expiry filter, add and maintain actions, importer, and documented fresh-folder workflow. Verify inline and API error recovery, keyboard use of all primary controls, persistence and concurrent consumption, and a real CSV import through to the UI."
+        }
+      ],
+      "why": "The first proven product target is the accepted urgency outcome, delivered as a runnable local slice by the same builder who owns the complete tiny application. The remaining accepted stories, quality checks, and exact kickoff constraints stay on the delivery horizon; no implementation or verification has yet been performed."
+    },
+    "firstDetail": {
+      "edits": [
+        {
+          "kind": "feature",
+          "targetHandle": "new:expiring-soon",
+          "typedBody": {
+            "acceptance": "A household member can identify stored pantry items expiring within seven days and distinguish those already expired on a calm, accessible local page.",
+            "commitments": [
+              "scopeIn:see-urgency",
+              "quality:ui-direction"
+            ],
+            "story": "As a household member, I want to see what is expiring so I can decide what to use first."
+          }
+        },
+        {
+          "kind": "requirement",
+          "targetHandle": "new:stored-urgency",
+          "typedBody": {
+            "acceptance": "With representative records seeded directly into SQLite, the running local server displays real stored items expiring within the next seven days in an Expiring soon section and clearly labels already expired items, as required by expiry-window.",
+            "features": [
+              "new:expiring-soon"
+            ]
+          }
+        },
+        {
+          "kind": "requirement",
+          "targetHandle": "new:urgency-states",
+          "typedBody": {
+            "acceptance": "At phone and desktop widths, populated, expired, and empty states present a clear urgency hierarchy using a restrained, clean, calm offline design with readable contrast, deliberate typography, and generous spacing, as required by expiry-window, responsive-accessible, and accessibility-detail.",
+            "features": [
+              "new:expiring-soon"
+            ]
+          }
+        },
+        {
+          "kind": "requirement",
+          "targetHandle": "new:accessible-layout",
+          "typedBody": {
+            "acceptance": "At 375px and desktop widths, the running page supports keyboard operation with visible focus and readable contrast, and at 375px it has no horizontal scrolling, as required by responsive-accessible and accessibility-detail.",
+            "features": [
+              "new:expiring-soon"
+            ]
+          }
+        },
+        {
+          "kind": "requirement",
+          "targetHandle": "new:runnable-checkpoint",
+          "typedBody": {
+            "acceptance": "Following the checkpoint run instructions starts the Python 3.12 standard-library server on 127.0.0.1 against a SQLite pantry without third-party dependencies, a build step, or runtime network access beyond the local server, and the page does not imply that add or import is delivered.",
+            "features": [
+              "new:expiring-soon"
+            ]
+          }
+        }
+      ],
+      "units": [
+        {
+          "dependencies": [],
+          "instructions": "Own the integrated first runnable slice and its checks: implement only the storage, server, UI, and documentation needed for the urgency outcome; seed representative database records for checking rather than presenting add or import as delivered; inspect populated, expired, and empty states at phone and desktop widths, including keyboard focus, contrast, and 375px overflow. Preserve the stated full-product contracts for later delivery without claiming those features are complete; exclude accounts, remote hosting, and online services.",
+          "requirements": [
+            "new:stored-urgency",
+            "new:urgency-states",
+            "new:accessible-layout",
+            "new:runnable-checkpoint"
+          ],
+          "scope": [
+            "server.py",
+            "pantry storage and validation modules",
+            "web UI assets",
+            "README.md",
+            "application-owned checks"
+          ]
+        }
+      ],
+      "verdict": "planned",
+      "why": "The accepted kickoff commitments and exact constraints support one integrated urgency checkpoint; a single session-sized owner avoids unnecessary peer contracts or dependencies, while remaining product capabilities are explicitly deferred rather than represented as delivered."
+    },
+    "nextDetail": {
+      "edits": [
+        {
+          "kind": "feature",
+          "targetHandle": "new:find-items",
+          "typedBody": {
+            "acceptance": "A household member can see expiry urgency, find pantry items by name and expiry, and understand an empty list.",
+            "commitments": [
+              "scopeIn:find-items",
+              "quality:usable-accessible"
+            ],
+            "story": "As a household member, I want to find what is in the pantry so I can plan what to use."
+          }
+        },
+        {
+          "kind": "feature",
+          "targetHandle": "new:add-items",
+          "typedBody": {
+            "acceptance": "A household member can add a valid item and correct invalid entries using inline guidance.",
+            "commitments": [
+              "scopeIn:add-items",
+              "quality:clear-recovery"
+            ],
+            "story": "As a household member, I want to add pantry items so the list reflects what we have."
+          }
+        },
+        {
+          "kind": "feature",
+          "targetHandle": "new:maintain-items",
+          "typedBody": {
+            "acceptance": "A household member can consume and delete items, while item details can be updated through the API without compromising stored quantities.",
+            "commitments": [
+              "scopeIn:maintain-items",
+              "quality:data-integrity",
+              "quality:clear-recovery"
+            ],
+            "story": "As a household member, I want to keep pantry quantities and details current as food is used."
+          }
+        },
+        {
+          "kind": "feature",
+          "targetHandle": "new:import-items",
+          "typedBody": {
+            "acceptance": "A household member can import valid CSV rows into the same pantry database and see imported and skipped counts.",
+            "commitments": [
+              "scopeIn:import-items",
+              "quality:fresh-start"
+            ],
+            "story": "As a household member, I want to import an existing CSV so I can populate the pantry without entering every item by hand."
+          }
+        },
+        {
+          "kind": "requirement",
+          "targetHandle": "new:urgency-and-find",
+          "typedBody": {
+            "acceptance": "The running page shows items expiring within seven days with expired items clearly labeled, provides a full expiry-sorted list with null expiries last, name search and an expiry filter, and shows a useful empty state, satisfying item-fields, api-contract, responsive-accessible and accessibility-detail.",
+            "features": [
+              "new:find-items"
+            ]
+          }
+        },
+        {
+          "kind": "requirement",
+          "targetHandle": "new:item-validation",
+          "typedBody": {
+            "acceptance": "A valid item can be added through the page and invalid entries receive inline guidance, while the API enforces a 1–80 character name, nonnegative integer quantity, optional text unit, YYYY-MM-DD or null expiry, and stored id and created_at, satisfying item-fields and api-contract.",
+            "features": [
+              "new:add-items"
+            ]
+          }
+        },
+        {
+          "kind": "requirement",
+          "targetHandle": "new:item-api",
+          "typedBody": {
+            "acceptance": "The JSON API supports the specified GET search and expiry filtering, POST creation, PATCH of name, quantity, unit and expiry, POST consume and DELETE operations, returning 400 with an error message for invalid input, 404 for an unknown id and 409 for consumption exceeding quantity, satisfying api-contract.",
+            "features": [
+              "new:find-items",
+              "new:add-items",
+              "new:maintain-items"
+            ]
+          }
+        },
+        {
+          "kind": "requirement",
+          "targetHandle": "new:maintain-and-recovery",
+          "typedBody": {
+            "acceptance": "A household member can consume and delete items through the UI, and invalid input or an API failure produces a visible, actionable recovery message without allowing a negative quantity, satisfying api-contract and item-fields.",
+            "features": [
+              "new:maintain-items",
+              "new:add-items"
+            ]
+          }
+        },
+        {
+          "kind": "requirement",
+          "targetHandle": "new:persistence-race",
+          "typedBody": {
+            "acceptance": "After a server restart against the same SQLite database items persist, and two simultaneous requests to consume the last unit yield exactly one success without a lost update, satisfying persistence-concurrency.",
+            "features": [
+              "new:maintain-items"
+            ]
+          }
+        },
+        {
+          "kind": "requirement",
+          "targetHandle": "new:csv-import",
+          "typedBody": {
+            "acceptance": "Running python import_items.py FILE.csv --db PATH imports valid name,quantity,unit,expires rows using the canonical storage and validation, skips invalid rows, prints exactly one summary line 'imported N, skipped M' and exits 0, while an unreadable file produces an error and exits 2, satisfying import-contract.",
+            "features": [
+              "new:import-items"
+            ]
+          }
+        },
+        {
+          "kind": "requirement",
+          "targetHandle": "new:accessible-design",
+          "typedBody": {
+            "acceptance": "At 375px and desktop widths the populated, expired and empty page has a clean, calm offline design with clear expiry hierarchy and readable contrast, and search, filter, form and item actions work by keyboard with visible focus and no horizontal scrolling at 375px, satisfying responsive-accessible and accessibility-detail.",
+            "features": [
+              "new:find-items",
+              "new:add-items",
+              "new:maintain-items"
+            ]
+          }
+        },
+        {
+          "kind": "requirement",
+          "targetHandle": "new:fresh-folder",
+          "typedBody": {
+            "acceptance": "Following the README and integrated docs/try-it.md walkthrough from a fresh folder imports a real CSV, starts python server.py --port PORT --db PATH on 127.0.0.1 against that database and shows the imported items in the UI using Python 3.12 standard library only, without third-party dependencies, runtime network access or a build step, satisfying local-runtime, server-command, import-contract and delivery.",
+            "features": [
+              "new:import-items",
+              "new:find-items"
+            ]
+          }
+        }
+      ],
+      "units": [
+        {
+          "dependencies": [],
+          "instructions": "Keep the existing checkpoint and its owner; complete the remaining integrated application and checks under this one owner. Preserve the proven urgency-first experience, use kickoff as the design source, implement the importer against canonical server storage and validation, and reconcile the guide's seeding workaround with the actual import command without changing guide ownership. Update README and run the guide's integrated walkthrough, including the real CSV-to-running-UI path, inline and API failure recovery, keyboard and 375px checks, persistence and concurrent consumption. Record any unperformed check and its blocker; exclude accounts, remote hosting and online services.",
+          "requirements": [
+            "new:urgency-and-find",
+            "new:item-validation",
+            "new:item-api",
+            "new:maintain-and-recovery",
+            "new:persistence-race",
+            "new:csv-import",
+            "new:accessible-design",
+            "new:fresh-folder"
+          ],
+          "scope": [
+            "server.py",
+            "import_items.py",
+            "pantry storage and validation modules",
+            "web UI assets",
+            "README.md",
+            "application-owned checks"
+          ]
+        }
+      ],
+      "verdict": "planned",
+      "why": "The recorded decision assigns one coherent builder to finish the accepted local application; the existing seeded urgency checkpoint is evidence to preserve, not proof of import or the remaining integrated workflow, and no independent file prerequisite or missing agreement requires another unit."
+    }
+  },
+  "Quiet Bench": {
+    "kickoff": "Build Quiet Bench, a noise-cancelling test bench that runs on this PC with no audio hardware. Python 3.12 standard library plus Node 20\nfor the page checks; no third-party runtime packages, no network. I can generate a noise signal (tones, band noise) or import a WAV\nfile; the bench simulates the acoustic path from the noise source to the ear, runs an adaptive canceller (LMS family) against it and\ntells me how much was cancelled in each frequency band. Every session is saved on a small local storage server\n(`python server.py --port PORT --data DIR`) with its settings and results, and a web page on that server lets me start a run, browse\nsaved sessions, reload one and compare two. A command line (`python bench.py run|list|show|export`) does the same without the page.\nA limiter must hold the output inside a safe level when the filter diverges, and a stop switch ends a run at once.\n\nAudience and preferences:\n{\"audience\": \"an audio engineer trying ideas before buying hardware\", \"care\": \"numbers I can trust and a bench that never blasts\", \"tone\": \"calm, exact, instrument-like\", \"platform\": \"local Windows, Python 3.12 stdlib, modern desktop browser\", \"defaults\": \"no accounts, network, deployment or paid assets; ask before scope changes\"}\n\nShared black-box interface:\n{\"note\": \"Black-box fight interface, supplied equally to both contenders; message above is verbatim. No extra runtime dependencies.\", \"cli\": \"bench.py run --data DIR --settings JSON; list --data DIR; show ID --data DIR; export ID --data DIR. run/show emit session JSON; list emits an array; export emits CSV.\", \"api\": \"POST /api/runs with settings -> session (asynchronous allowed); GET /api/sessions -> array; GET /api/sessions/ID -> session; POST /api/runs/ID/stop; GET /api/compare?a=ID&b=ID -> array of bands with low, high, delta_db = b minus a.\", \"settings\": {\"sample_rate\": 8000, \"samples\": 8192, \"signal\": {\"kind\": \"tones\", \"frequencies\": [500, 1500], \"amplitude\": 0.2}, \"path\": [0.8, 0, 0.2], \"filter\": \"lms\", \"step_size\": 0.05, \"limit\": 0.8, \"block_size\": 128, \"bands\": [[0, 1000], [1000, 4000]]}, \"wav\": \"signal = {kind: wav, path: absolute WAV path}; 16-bit mono, same sample rate.\", \"session\": \"id, settings, status (running/completed/stopped), limited (boolean), processed_samples, bands [{low, high, attenuation_db}], desired/residual/output sample arrays (before cancellation, error, limited anti-noise). Preserve this JSON as wave-1 legacy input.\", \"page\": \"Accessible labelled textarea[name=settings] (JSON), Start run button, [data-session-id=ID] saved session buttons, select[name=compare-a], select[name=compare-b], Compare button and [data-comparison] result. Show session id and band numbers. docs/try-it.md gives actual start/stop and CLI commands.\"}",
+    "align": [
+      {
+        "changed": "Preserved the settled, value-ranked vision and corrected the runtime constraint to quote the kickoff requirements exactly; the observed Node version is recorded separately as a verification limitation.",
+        "questions": [],
+        "recommendation": "done",
+        "vision": {
+          "constraints": [
+            {
+              "handle": "runtime",
+              "meaning": "The bench and page checks must use the requested local runtimes and must not require third-party runtime packages or network access.",
+              "source": "kickoff",
+              "value": "Python 3.12 standard library plus Node 20 for the page checks; no third-party runtime packages, no network."
+            },
+            {
+              "handle": "defaults",
+              "meaning": "The supplied settings provide an exact, reproducible example run.",
+              "source": "kickoff: Shared black-box interface.settings",
+              "value": "{\"sample_rate\": 8000, \"samples\": 8192, \"signal\": {\"kind\": \"tones\", \"frequencies\": [500, 1500], \"amplitude\": 0.2}, \"path\": [0.8, 0, 0.2], \"filter\": \"lms\", \"step_size\": 0.05, \"limit\": 0.8, \"block_size\": 128, \"bands\": [[0, 1000], [1000, 4000]]}"
+            },
+            {
+              "handle": "wav",
+              "meaning": "Imported audio must meet the specified format and match the run sample rate.",
+              "source": "kickoff: Shared black-box interface.wav",
+              "value": "signal = {kind: wav, path: absolute WAV path}; 16-bit mono, same sample rate."
+            },
+            {
+              "handle": "session",
+              "meaning": "Saved and returned sessions retain these fields and remain valid as wave-1 legacy input.",
+              "source": "kickoff: Shared black-box interface.session",
+              "value": "id, settings, status (running/completed/stopped), limited (boolean), processed_samples, bands [{low, high, attenuation_db}], desired/residual/output sample arrays (before cancellation, error, limited anti-noise). Preserve this JSON as wave-1 legacy input."
+            },
+            {
+              "handle": "cli",
+              "meaning": "The command line provides the specified machine-readable operations.",
+              "source": "kickoff: Shared black-box interface.cli",
+              "value": "bench.py run --data DIR --settings JSON; list --data DIR; show ID --data DIR; export ID --data DIR. run/show emit session JSON; list emits an array; export emits CSV."
+            },
+            {
+              "handle": "api",
+              "meaning": "The local server exposes the specified run, storage, stop and comparison contracts.",
+              "source": "kickoff: Shared black-box interface.api",
+              "value": "POST /api/runs with settings -> session (asynchronous allowed); GET /api/sessions -> array; GET /api/sessions/ID -> session; POST /api/runs/ID/stop; GET /api/compare?a=ID&b=ID -> array of bands with low, high, delta_db = b minus a."
+            },
+            {
+              "handle": "page",
+              "meaning": "The web interface preserves the required accessible controls and observable selectors.",
+              "source": "kickoff: Shared black-box interface.page",
+              "value": "Accessible labelled textarea[name=settings] (JSON), Start run button, [data-session-id=ID] saved session buttons, select[name=compare-a], select[name=compare-b], Compare button and [data-comparison] result. Show session id and band numbers."
+            },
+            {
+              "handle": "server",
+              "meaning": "Sessions are stored locally and served through the specified entry point.",
+              "source": "kickoff",
+              "value": "python server.py --port PORT --data DIR"
+            },
+            {
+              "handle": "documentation",
+              "meaning": "The user can operate both interfaces without guessing commands.",
+              "source": "kickoff: Shared black-box interface.page",
+              "value": "docs/try-it.md gives actual start/stop and CLI commands."
+            }
+          ],
+          "quality": [
+            {
+              "constraints": [
+                "defaults",
+                "wav",
+                "session"
+              ],
+              "criterion": "Results are numerically trustworthy and distinguish simulated attenuation from a real-world hardware measurement.",
+              "handle": "trustworthy-results",
+              "sources": [
+                "kickoff"
+              ],
+              "verification": "Run known signals and paths with independently checkable expected behavior; inspect band values and sample arrays, including a WAV run, and confirm the page and CLI report the saved result consistently."
+            },
+            {
+              "constraints": [
+                "defaults",
+                "session",
+                "api"
+              ],
+              "criterion": "Output remains within the configured limiter and a stop request ends processing promptly, including during divergence.",
+              "handle": "safe-control",
+              "sources": [
+                "kickoff"
+              ],
+              "verification": "Drive the filter into divergence and verify every output sample respects the limit and limited is true; stop an active run and verify stopped status and no further processing."
+            },
+            {
+              "constraints": [
+                "runtime",
+                "page"
+              ],
+              "criterion": "The page feels like a calm, exact instrument: deliberate offline-available typography, a restrained high-contrast palette, generous spacing and clear controls rather than decorative cards or gradients.",
+              "handle": "instrument-ui",
+              "sources": [
+                "kickoff: Audience and preferences",
+                "Design guidance used by UI workers"
+              ],
+              "verification": "Inspect the actual desktop page, keyboard operation, accessible labels and reduced-motion behavior; verify the browser console is clean and requested files, including the icon, are served."
+            },
+            {
+              "constraints": [
+                "session",
+                "cli",
+                "api",
+                "documentation"
+              ],
+              "criterion": "A saved experiment can be found, reloaded and compared consistently through its supported interfaces.",
+              "handle": "durable-workflow",
+              "sources": [
+                "kickoff"
+              ],
+              "verification": "Start a run, restart the server, reload it through the page and CLI, export it, and compare two saved sessions with delta_db calculated as b minus a."
+            }
+          ],
+          "scopeOut": [
+            {
+              "outcome": "Audio hardware playback, hardware control and claims of measured real-world cancellation.",
+              "sources": [
+                "kickoff"
+              ]
+            },
+            {
+              "outcome": "Accounts, network services, deployment, paid assets and third-party runtime packages.",
+              "sources": [
+                "kickoff: Audience and preferences",
+                "kickoff"
+              ]
+            }
+          ],
+          "size": "tiny",
+          "sizeWhy": "Micro: the closest supplied comparable is a standard-library signal-processing bench with a page, CLI and local storage server; one capable plain agent is estimated to build and verify it in minutes within one session. Hardware integration, external dependencies or a broader validated acoustic model would make it bigger. The observed Node version is v25.8.0, so verification specifically under the requested Node 20 remains unproven with the stated runtime access.",
+          "stories": [
+            {
+              "constraints": [
+                "defaults",
+                "wav",
+                "session"
+              ],
+              "feature": "Simulated cancellation and band results",
+              "handle": "simulate",
+              "outcome": "The engineer can generate tones or band noise or import a WAV, simulate the acoustic path and adaptive LMS-family cancellation, and judge attenuation by frequency band before buying hardware.",
+              "sources": [
+                "kickoff",
+                "kickoff: Shared black-box interface.settings",
+                "kickoff: Shared black-box interface.wav"
+              ],
+              "story": "As an audio engineer, I want to try a noise and canceller configuration and see credible per-band results so I can decide which ideas merit hardware experiments."
+            },
+            {
+              "constraints": [
+                "defaults",
+                "session",
+                "api"
+              ],
+              "feature": "Limiter and stop switch",
+              "handle": "control",
+              "outcome": "Anti-noise output is bounded at the configured safe level, limiting is recorded, and an active run can be stopped immediately.",
+              "sources": [
+                "kickoff",
+                "kickoff: Shared black-box interface.api"
+              ],
+              "story": "As an audio engineer, I want a bounded output and an immediate stop so a divergent experiment remains controlled."
+            },
+            {
+              "constraints": [
+                "server",
+                "session",
+                "page",
+                "api"
+              ],
+              "feature": "Save, reload and compare",
+              "handle": "sessions",
+              "outcome": "Every session and its settings and results are stored locally; the engineer can browse and reload sessions and compare two by band, with delta defined as b minus a.",
+              "sources": [
+                "kickoff",
+                "kickoff: Shared black-box interface.api",
+                "kickoff: Shared black-box interface.page"
+              ],
+              "story": "As an audio engineer, I want to revisit and compare experiments so I can identify which configuration improved each band."
+            },
+            {
+              "constraints": [
+                "cli",
+                "api",
+                "page",
+                "documentation",
+                "runtime"
+              ],
+              "feature": "Local page and command line",
+              "handle": "interfaces",
+              "outcome": "The engineer can start runs, browse, reload and compare in the local page, or run, list, show and export through the CLI, without accounts or network access.",
+              "sources": [
+                "kickoff",
+                "kickoff: Shared black-box interface"
+              ],
+              "story": "As an audio engineer, I want a usable local instrument and scriptable CLI so I can work interactively or repeat experiments from commands."
+            }
+          ],
+          "understanding": "Quiet Bench helps an audio engineer decide which noise-cancellation ideas deserve hardware investment by running controlled offline simulations, reporting trustworthy band-by-band results and enabling safe comparison of saved experiments.",
+          "users": [
+            "Audio engineer exploring noise-cancellation ideas before buying hardware"
+          ]
+        },
+        "why": "The intended user, key decision, interfaces, safety behavior and constraints are sufficiently specified. The observed Node discrepancy is a verification limitation, not a change to the requested Node 20 constraint; no material product choice remains to ask before the user decides gate A."
+      }
+    ]
+  }
+}

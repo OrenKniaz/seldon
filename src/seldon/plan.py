@@ -287,9 +287,22 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
             nodes[ref] = node
         local_units = {}
         for i, unit in enumerate(answer["units"], 1):
-            ref = next((r for r, u in units.items()
-                        if set(u["scope"]) - (set(GUIDE_SCOPE) if r == folded else set())
-                        == set(unit["scope"])), None)
+            scope = unit["scope"]
+            owners = {r: [p for p in u["scope"] if r != folded or p not in GUIDE_SCOPE]
+                      for r, u in units.items() if u["area"] == area["handle"]
+                      and r not in local_units.values()}
+            ref = next((r for r, paths in owners.items() if set(paths) == set(scope)), None)
+            if ref is None:
+                covered = [r for r, paths in owners.items() if paths
+                           and all(any(contains(p, old) for p in scope) for old in paths)]
+                if len(covered) == 1:
+                    ref, = covered
+                    if record:
+                        record("scope_normalisation", {"subject": ref, "action": "extended_owner",
+                            "before": owners[ref], "scope": scope,
+                            "summary": f"Kept {area['handle']!r} work with its existing owner "
+                                       "and extended its scope to "
+                                       f"{', '.join(p for p in scope if p not in owners[ref])}."})
             if ref is None:
                 number = 1
                 while (ref := f"{wave}.{area['handle']}.{number}") in units or ref in local_units.values():
@@ -353,8 +366,10 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
             if ref < other and overlaps(unit["scope"], writer["scope"]):
                 for area in {unit["area"], writer["area"]}:
                     corrections.setdefault(area, []).append({
-                        "error": "Scope ownership overlaps; assign disjoint scopes",
-                        "otherSide": {unit["area"]: unit["scope"], writer["area"]: writer["scope"]}})
+                        "error": "Two work assignments can edit the same files. Say which assignment should "
+                                 "own the shared files, or give each a separate set of files.",
+                        "question": f"Which assignment should own the files shared by {ref} and {other}?",
+                        "otherSide": {ref: unit["scope"], other: writer["scope"]}})
     if corrections:
         raise owner.DetailCorrection(corrections)
     superseded = sorted(prior_features - linked_features(document))

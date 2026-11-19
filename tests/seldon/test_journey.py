@@ -227,7 +227,10 @@ def test_grow_align_receipt_and_lock_journey(tmp_path, monkeypatch):
                "do not present a partial run as completed.")
     first = questions.consequential_round_example()
     first["vision"]["size"] = "large"  # The recorded three-wave bench was rated large.
-    first["vision"]["stories"][1].update(outcome=stopped, sources=[])
+    first["vision"]["stories"][1].update(outcome=stopped)
+    for field in ("stories", "quality", "scopeOut"):
+        for entry in first["vision"][field]:
+            entry["sources"] = ["kickoff"]
     first["questions"].append({"affects": "scopeIn:inspect", "question": "How can a colleague inspect it?",
         "options": [{"label": "Reopen a saved run", "means": "Open it on this PC"},
                     {"label": "Export a copy", "means": "Open it on another bench"}]})
@@ -3113,3 +3116,141 @@ def test_contract_gap_journey(tmp_path, scalar_align, case):
             assert not store.records("architecture_gap")
     finally:
         run.close()
+
+@pytest.mark.fast
+@pytest.mark.parametrize("dream, index",
+                         [("ShelfLife", 0), ("ShelfLife", 1), ("Quiet Bench", 0), ("Quiet Bench", 1)])
+def test_recorded_align_normalisation_journey(tmp_path, monkeypatch, dream, index):
+    """Richer recorded ALIGN replies must reach A with provenance still visible.
+
+    Exact-value happy paths miss bundled paraphrases, mislabeled citations and structured
+    settings. Quiet Bench's recorded JSON text also exercises the equivalent native object form.
+    """
+    from contextlib import closing
+
+    from seldon import features, frontdoor
+
+    monkeypatch.setattr(features, "enabled", {"growAlign", "sizeFirst", "answerRepair", "prompts2",
+                                            "judgeEvidence"}.__contains__)
+    fixture = json.loads((Path(__file__).with_name("fixtures") / "align-normalisation.json")
+                         .read_text(encoding="utf-8"))[dream]
+    reply = deepcopy(fixture["align"][index if dream == "ShelfLife" else 0])
+    if dream == "Quiet Bench" and index:
+        settings = next(c for c in reply["vision"]["constraints"] if c["handle"] == "defaults")
+        settings["value"] = json.loads(settings["value"])
+        reply["vision"]["constraints"].append(
+            {"handle": "open-backup", "value": ["external drive"], "meaning": "Proposed backup destination",
+             "source": "Runtime"})
+        reply["questions"].append(
+            {"affects": "open-backup", "question": "Where should the exported backup go?",
+             "options": [{"label": "Project folder", "means": "Keep it beside the project"},
+                         {"label": "Separate folder", "means": "Choose another folder in Other"}]})
+
+    def provider(q):
+        assert q["kind"] == "ALIGN"
+        strict_schema(q["schema"])
+        return json.dumps({"answer": reply})
+
+    root = tmp_path / "product"
+    with closing(Run(root, tmp_path / "workers", fixture["kickoff"], {}, provider, lambda _: None)) as run:
+        assert run.step() == "A"
+        assert not run.store.records("consumption_failure")
+        request = frontdoor.state(root)["waitingFor"]
+        vision = request["subject"]["vision"]
+        events = [b for _, _, b in run.store.records("answer_normalisation")]
+        assert request["subject"]["normalisations"] == list(dict.fromkeys(b["summary"] for b in events))
+        assert all(source == "kickoff" for item in vision["stories"] + vision["quality"]
+                   for source in item["sources"])
+        if dream == "ShelfLife":
+            assert any(b["action"] == ("paraphrased" if index == 0 else "citation") for b in events)
+            if index == 0:
+                launch = next(c for c in vision["constraints"] if c["handle"] == "launch")
+                assert launch["value"] == "python server.py --port PORT --db PATH"
+                assert any(b.get("sourceSpan") and b["sourceSpan"] in fixture["kickoff"] for b in events)
+        elif index:
+            stored = {c["handle"]: c for c in vision["constraints"]}
+            assert json.loads(stored["defaults"]["value"]) == settings["value"]
+            assert "open-backup" not in stored
+            assert {"rendered", "source_handle", "dropped_constraint"} <= {b["action"] for b in events}
+            question = next(g for g in request["ask"]["groups"] if "exported backup" in g["question"])
+            assert [o["label"] for o in question["options"]] == ["Project folder", "Separate folder", "Other"]
+        else:
+            assert any(b["action"] == "source_handle" and b["subject"] == "defaults" for b in events)
+            assert next(c["source"] for c in vision["constraints"] if c["handle"] == "defaults") == "kickoff"
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("collision", [False, True])
+def test_recorded_shelflife_detail_owner_journey(tmp_path, monkeypatch, collision):
+    """Continue the integrated ShelfLife checkpoint with the recorded expanded owner.
+
+    Earlier exact-scope replans miss the overlap against the existing owner when DETAIL
+    adds the importer. A partial overlap still needs a concrete ownership correction.
+    """
+    from contextlib import closing
+    from dataclasses import replace
+
+    from seldon import decisions, features, frontdoor
+    from seldon.store import UnitRow
+
+    monkeypatch.setattr(features, "enabled", {"growAlign", "sizeFirst", "answerRepair", "prompts2",
+                                            "judgeEvidence"}.__contains__)
+    fixture = json.loads((Path(__file__).with_name("fixtures") / "align-normalisation.json")
+                         .read_text(encoding="utf-8"))["ShelfLife"]
+    later = False
+
+    def provider(q):
+        strict_schema(q["schema"])
+        kind = q["kind"]
+        if kind == "REVIEW":
+            answer = {"verdict": "adequate", "gaps": [], "why": "The plan covers the two checkpoints."}
+        elif kind == "DETAIL":
+            answer = deepcopy(fixture["nextDetail" if later else "firstDetail"])
+            if later and collision:
+                answer["units"][0]["scope"] = ["server.py", "import_items.py"]
+        else:
+            answer = deepcopy(fixture[{"ALIGN": "locked", "ARCHITECT": "outline"}[kind]])
+        return json.dumps({"answer": answer})
+
+    def user(item):
+        if item["gate"] == "A":
+            return {"request": item["request"], "replyId": "shelf-lock",
+                    "selections": [{"groupId": "round", "optionId": "done"}]}
+        return None if later else approve(item)
+
+    product = tmp_path / "product"
+    with closing(Run(product, tmp_path / "workers", fixture["kickoff"], {}, provider, user)) as run:
+        for state in ("A", "ARCHITECT", "DETAIL", "REVIEW", "B", "EXECUTE"):
+            assert run.step() == state
+        store = run.store
+        cursor = store.cursor()
+        prior = plan.select(store.plan(cursor.revision), "unit")
+        owner, = prior.keys() - {"guide"}
+        for ref in prior:
+            store.unit(ref, UnitRow(wave=1, state="DONE", integrated=cursor.candidate))
+        store.cursor(replace(cursor, wave=2, state="DETAIL"))
+        later = True
+        if collision:
+            with pytest.raises(decisions.Waiting):
+                run.step()
+            failures = store.records("detail_correction")
+            correction = next(iter(failures[-1][2]["corrections"].values()))[0]
+            assert "own the shared files" in correction["error"]
+            assert len(correction["otherSide"]) == 2
+            waiting = frontdoor.state(product)["waitingFor"]
+            assert "Which assignment should own the files shared" in waiting["subject"]["question"]
+            assert not store.records("step_failure")
+            return
+        assert run.step() == "REVIEW"
+        assert run.step() == "EXECUTE"
+        current = plan.select(store.plan(store.cursor().revision), "unit")
+        assert current.keys() == prior.keys()
+        assert set(current[owner]["scope"]) - set(prior[owner]["scope"]) == {"import_items.py"}
+        assert set(prior[owner]["requirements"]) < set(current[owner]["requirements"])
+        # Later waves reuse B. Their next existing user surface is the check-in.
+        store.cursor(replace(store.cursor(), state="CHECK-IN"))
+        assert run.step() == "PRODUCT-JUDGE"
+        request = frontdoor.state(product)["waitingFor"]
+        assert any("import_items.py" in note for note in request["subject"]["normalisations"])
+        assert any(b.get("action") == "extended_owner" for _, _, b in store.records("scope_normalisation"))
+        assert not store.records("detail_correction") and not store.records("step_failure")

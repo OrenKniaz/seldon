@@ -262,11 +262,11 @@ class Run:
                 facts["Owner size override"] = size
 
         def check(answer):
-            questions.check_align_round(answer, sources)
             actual = answer["vision"]["size"]
             if size and size != "other" and actual != size:
                 raise ValueError(f"Expected the owner's size {size!r}; got {actual!r}. "
                                  "Send the proposal with the selected size.")
+            return questions.check_align_round(answer, sources)
 
         def display(ref, answer):
             advance(store, "aligned", ref, requestedChange=None)

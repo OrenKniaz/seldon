@@ -2,9 +2,10 @@
 
 import json
 import re
+from difflib import SequenceMatcher
 
 from . import architecture, fixups, gitwork, observations, plan
-from .answers import Mismatch
+from .answers import Mismatch, render_constraint_values
 from .schema import ALIGN_ROUND, answer_schema, batch_decision, obj, validate, vision_body
 from . import features
 
@@ -229,35 +230,71 @@ def align_round_brief(facts, *, sources, size_first=False):
 def check_align_round(answer, sources):
     vision = vision_body(answer)
     constraints = architecture.index(vision["constraints"], "vision.constraints")
-    for constraint in constraints.values():
-        source = constraint["source"]
-        words, value = sources.get(source, ""), constraint["value"]
+    goals = architecture.commitments(vision)
+    cited = {ref for entry in goals.values() for ref in entry.get("constraints", [])}
+    dropped, changes = set(), []
+    for handle, constraint in constraints.items():
+        source, value = constraint["source"], constraint["value"]
+        canonical = source if source in sources else re.split(r"[:;]", source, maxsplit=1)[0].strip()
+        words = sources.get(canonical, "")
+        if not words.strip():
+            if value in sources["kickoff"]:
+                canonical, words = "kickoff", sources["kickoff"]
+            elif handle not in cited:
+                dropped.add(handle)
+                changes.append({"subject": handle, "action": "dropped_constraint", "source": source,
+                                "value": value, "summary": f"Removed unsourced constraint {handle!r}."})
+                continue
+        constraint["source"] = canonical if words.strip() else "kickoff"
+        if constraint["source"] != source:
+            changes.append({"subject": handle, "action": "source_handle", "original": source,
+                            "source": constraint["source"],
+                            "summary": f"Updated the source reference for constraint {handle!r}."})
         if value in words:
             continue
-        # Sources may be JSON-rendered (escaped backslashes); a path copied either way is the same value.
-        plain = value.replace("\\\\", "\\")
-        if plain in words.replace("\\\\", "\\"):
-            constraint["value"] = plain
+        # Preserve the exact source spelling when wrapping or JSON escaping was the only difference.
+        parts = value.replace("\\\\", "\\").split()
+        pattern = r"\s+".join(re.escape(part).replace(r"\\", r"\\{1,2}") for part in parts)
+        if match := (re.search(pattern, words) if pattern else None):
+            constraint["value"] = match.group()
+            changes.append({"subject": handle, "action": "exact_source_text", "value": value,
+                            "source": canonical, "sourceSpan": match.group(),
+                            "summary": f"Restored the exact wording of constraint {handle!r}."})
             continue
-        pattern = r"\s+".join(map(re.escape, value.split()))
-        match = re.search(pattern, words) if pattern else None
-        if not match:
-            raise Mismatch("vision.constraints", f"Constraint {value!r} is absent from source "
-                           f"{source!r}. Copy an exact required value from the supplied Sources.")
-        constraint["value"] = match.group()
-    goals = architecture.commitments(vision)
+        tokens = list(re.finditer(r"\w+", words))
+        closest = SequenceMatcher(None, re.findall(r"\w+", value.casefold()),
+                                  [token.group().casefold() for token in tokens]).find_longest_match()
+        span = (words[tokens[closest.b].start():tokens[closest.b + closest.size - 1].end()]
+                if closest.size else None)
+        changes.append({"subject": handle, "action": "paraphrased",
+                        "source": canonical if words.strip() else None,
+                        "value": value, "sourceSpan": span,
+                        "summary": f"Kept constraint {handle!r} as a paraphrase." if words.strip()
+                                   else f"Kept proposed requirement {handle!r} without a source quote."})
+    answer["vision"]["constraints"] = [c for h, c in constraints.items() if h not in dropped]
+
     for entry in [*goals.values(), *vision["scopeOut"]]:
         if unknown := set(entry.get("constraints", [])) - constraints.keys():
             raise Mismatch("vision.constraints", f"Unknown constraint handles {sorted(unknown)}. "
                            f"Use these declared handles: {list(constraints)}.")
-        if unknown := set(entry["sources"]) - sources.keys():
-            raise Mismatch("vision.sources", f"Unknown source handles {sorted(unknown)}. "
-                           f"Use these supplied handles: {list(sources)}.")
+        valid = [ref for ref in entry["sources"] if ref in sources]
+        if valid != entry["sources"] or not valid:
+            label = entry.get("handle", entry.get("outcome"))
+            kept = valid or ["kickoff"]
+            changes.append({"subject": label, "action": "citation", "sources": kept,
+                            "removed": [ref for ref in entry["sources"] if ref not in sources],
+                            "summary": f"Updated citations for {label!r} to use {', '.join(kept)}."})
+            entry["sources"] = kept
     subjects = {"vision", "size", "scopeOut", *goals, *constraints}
     for ask in answer["questions"]:
         if ask["affects"] not in subjects:
             raise Mismatch("questions.affects", f"{ask['question']!r} cites {ask['affects']!r}. "
                            f"Use an affected part of this proposal: {sorted(subjects)}.")
+        if ask["affects"] in dropped:
+            changes.append({"subject": ask["affects"], "action": "question", "question": ask["question"],
+                            "summary": "Kept the open question attached to the vision."})
+            ask["affects"] = "vision"
+    return changes
 
 
 def batch_decide_brief(groups, words):
@@ -970,11 +1007,13 @@ def ask(provider, question, record, retries=2):
         answer = None
         try:
             decoded = json.loads(raw)
+            changes = render_constraint_values(decoded) if original["kind"] == "ALIGN" else []
             validate(decoded, question["schema"])
             answer = decoded["answer"]
         except (ValueError, KeyError) as error:
             errors = str(error).splitlines()
-        record({"rawAnswer": raw, "errors": errors})
+        record({"rawAnswer": raw, "errors": errors,
+                **({"normalisations": changes} if not errors and changes else {})})
         if not errors:
             return answer
         rejected.append({"Rejected answer": raw, "Errors": errors})

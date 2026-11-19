@@ -73,15 +73,9 @@ def test_quiet_bench_choice_trace_at_b(tmp_path, scalar_align):
     run = Run(slot / "product", slot / "workers", dream, scripted.setup, planning, approve)
     store = run.store
     try:
-        def call(brief, answer, check, consume=lambda *_: None, *, bad_launch=None):
+        def call(brief, answer, check, consume=lambda *_: None):
             def provider(q):
                 strict_schema(q["schema"])
-                if bad_launch is not None:
-                    corrections = q["facts"].get("Exact corrections")
-                    if not corrections:
-                        return json.dumps({"answer": bad_launch})
-                    error = corrections[0]["Errors"][0]
-                    assert "machine-inventory.exe" in error and "exact required value" in error
                 return json.dumps({"answer": answer})
             return inference.call(store, provider, brief, check=check, consume=consume)[0]
 
@@ -106,8 +100,10 @@ def test_quiet_bench_choice_trace_at_b(tmp_path, scalar_align):
         sources = {"kickoff": dream}
         bad_launch = deepcopy(initial)
         bad_launch["vision"]["constraints"][0]["value"] = "machine-inventory.exe"
-        first = call(questions.align_round_brief(facts, sources=sources), initial,
-                     lambda a: questions.check_align_round(a, sources), bad_launch=bad_launch)
+        first = call(questions.align_round_brief(facts, sources=sources), bad_launch,
+                     lambda a: questions.check_align_round(a, sources))
+        assert any(b["answer"] == first and b["action"] == "paraphrased"
+                   for _, _, b in store.records("answer_normalisation"))
         displayed = store.record("decision_request", {"gate": "A", "subject": {"round": first},
                                    "ask": {"groups": groups}, "origin": "counterfactual"})
         reply = store.record("user_words", {"request": displayed, "words": compare_words,
@@ -128,6 +124,7 @@ def test_quiet_bench_choice_trace_at_b(tmp_path, scalar_align):
         comparison.update(outcome="Compare the shared measured interval and label the result partial.",
                           sources=[reply])
         inspection["sources"] = [inspect]
+        revised["vision"]["quality"][0]["sources"] = ["kickoff"]
         revised["vision"]["stories"] = [inspection, comparison]
         revised.update(changed="Use the shared interval for comparisons.",
                        questions=[], recommendation="done")
@@ -137,14 +134,17 @@ def test_quiet_bench_choice_trace_at_b(tmp_path, scalar_align):
             assert questions.vision_body(answer)["stories"][0]["handle"] == "inspect"
             advance(store, "aligned", ref, vision=ref)
             advance(store, "approve", ref)
-        locked = questions.vision_body(revised)
+        locked = deepcopy(questions.vision_body(revised))
+        revised["vision"]["quality"][0]["sources"].append("Design guidance used by UI workers")
         call(questions.align_round_brief({**facts, "Previous proposal": store.read(first)["answer"],
                                         "Selected choices": interpreted}, sources=sources), revised,
              lambda a: questions.check_align_round(a, sources), lock)
         for state in ("DETAIL", "REVIEW", "B", "EXECUTE"):
             assert run.step() == state
         assert plan.approved(store)
-        at_b = store.read(store.cursor().B)["subject"]["plan"]
+        at_b_subject = store.read(store.cursor().B)["subject"]
+        assert any("trust" in note for note in at_b_subject["normalisations"])
+        at_b = at_b_subject["plan"]
         vision = at_b["nodes"]["vision"]["body"]
         assert vision == locked and "machine-inventory.exe" not in json.dumps(vision)
         commitments = architecture.commitments(vision)

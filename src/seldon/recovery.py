@@ -77,7 +77,9 @@ def planning(store, cause, shape, event=None, outline=True, **updates):
                 advance(store, event, cause, **updates)
             return
         body = store.read(cause)
+        question = body.get("question")
         decisions.request(store, store.cursor().state, {"step": store.cursor().state,
+            **({"question": question} if question else {}),
             "tried": [body.get("gap") or str(body.get("corrections", cause))],
             "recommendation": "Change the approach to the unresolved plan"})
     raise decisions.Waiting()
