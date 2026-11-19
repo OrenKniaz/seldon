@@ -4,6 +4,7 @@ import importlib.util
 import shutil
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -16,11 +17,28 @@ spec.loader.exec_module(replay)
 CASES = ("9996c71c", "6a5e00ae")
 
 
-def run(*args, ok=True):
-    result = subprocess.run([sys.executable, "-B", str(TOOL), *map(str, args)],
+def replay_cli(tool, *args, ok=True):
+    result = subprocess.run([sys.executable, "-B", str(tool), *map(str, args)],
                             capture_output=True, text=True, timeout=45)
     assert (result.returncode == 0) == ok, result.stdout + result.stderr
     return result.stdout + result.stderr
+
+
+def pinned_tool(slot):
+    # The experiment must exercise the real pin guard even after main's renderer changes.
+    source = replay.REPO
+    try:
+        replay.git(source, "cat-file", "-e", f"{replay.PIN}^{{commit}}")
+    except ValueError:
+        # Lane snapshots contain the source tree but omit the canonical history.
+        source = Path("C:/Users/oren/codex-harness/work/sprint-20261027/semantic-cc")
+    replay.git(source, "clone", "--quiet", "--shared", "--no-checkout", str(source), str(slot))
+    replay.git(slot, "update-ref", "--no-deref", "HEAD", replay.PIN)
+    replay.git(slot, "restore", "--source=HEAD", "--staged", "--worktree", "--", "src/seldon")
+    tool = slot / "tools" / TOOL.name
+    tool.parent.mkdir()
+    shutil.copyfile(TOOL, tool)
+    return tool
 
 
 @pytest.mark.skipif(
@@ -29,6 +47,7 @@ def run(*args, ok=True):
 def test_recorded_work_and_folded_judge_round_trip(tmp_path):
     """A replay built from today's checkout can silently lose the old kit, receipt schema or screenshot."""
     root = tmp_path / "experiment"
+    run = partial(replay_cli, pinned_tool(tmp_path / "pinned"))
     run("prepare", root, "--case", CASES[0], "--case", CASES[1])
     private = root / "private"
     key_file = private / "key.sealed.json"

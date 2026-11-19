@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 
-from . import architecture, fixups, inference, judgment, plan, proof, questions
+from . import architecture, fixups, inference, judgment, observations, plan, proof, questions
 from .states import advance
 
 
@@ -42,8 +42,9 @@ def evidence(store, feature):
 
 
 def row(body):
-    return {k: body[k] for k in ("check", "requirements", "exitCode", "stdout", "stderr",
-                                 "executionStarted", "cleanupVerified", "timedOut")}
+    return {**{k: body[k] for k in ("check", "requirements", "exitCode", "stdout", "stderr",
+                                   "executionStarted", "cleanupVerified", "timedOut")},
+            **observations.judge_fields(body)}
 
 
 def brief(store, feature):

@@ -30,6 +30,14 @@ def folded_brief(store, document, owner, observations):
     question = questions.judge_brief(store, owner, commit, observations)
     subjects_to_judge = folded_subjects(document)
     facts = question["facts"]
+    if features.enabled("judgeEvidence"):
+        subjects_to_judge["codeQuality"] = {
+            "criterion": "Main implementation is readable and safe to change.",
+            "verification": "Use the owner's delivered implementation under Product files. Look for "
+                            "readable names and control flow, compressed one-liners hiding logic, "
+                            "and handling of plausible failure paths. Name a concrete maintenance "
+                            "consequence and the smallest correction for a must-fix finding.",
+        }
     facts["Subjects"] = subjects_to_judge
     facts["Requirement to feature links"] = {
         ref: row["features"] for ref, row in subjects(document, "FLOW").items()}
@@ -53,6 +61,8 @@ def folded_brief(store, document, owner, observations):
     sample["tryItGuide"] = {"verdict": "uncertain", "neededFacts": ["Fresh-copy CLI output"],
                             "why": "The documented CLI command was not observed."}
     sample["sourceAcceptance"]["why"] = "The check fails on the missing reader and reloads real stored data."
+    if "codeQuality" in sample:
+        sample["codeQuality"]["why"] = "Named load and save functions make the failure paths easy to follow."
     return questions.question("JUDGE", prompt, facts, folded_judge_schema(subjects_to_judge, owner),
         [{"findings": sample, "why": "The guide needs another observation."}], subjects_to_judge,
         images=question["images"], context=question.get("renderContext"))

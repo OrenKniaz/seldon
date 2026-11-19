@@ -11,12 +11,13 @@ askContracts (COACH resolves peer agreements or sends the gap back to the planne
 sizeFirst (new kickoffs record effort-based planning and the SELDON_SPLIT experiment arm).
 prompts2 (mission-first briefs; off = original provider rendering). OFF BY DEFAULT until its replay
 A/B decides: SELDON_ON=prompts2 turns it on.
+judgeEvidence (documented operation observations and an explicit folded code-quality finding).
 """
 import os
 
 
 # Features still on trial: off unless SELDON_ON names them (an A/B has not decided yet).
-TRIAL = {"prompts2"}
+TRIAL = {"prompts2", "judgeEvidence"}
 
 
 def _names(var):

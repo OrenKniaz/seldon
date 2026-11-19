@@ -5,7 +5,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from . import features, gitwork, plan
+from . import features, gitwork, observations as evidence_facts, plan
 from .processes import execute
 from .providers import ROLES
 
@@ -39,8 +39,12 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
     else:
         gitwork.checkout(checkout, commit)
     cleanup_verified, dirty = True, False
+    walkthroughs = plan.guide_checks(plan.execution(store)) if purpose == "final" else ()
     try:
         for ref, check in declarations.items():
+            if checkout is None:
+                checkout = Path(gitwork.admit(root, scratch, commit))
+                _observer.checkout = checkout
             runtime = scratch / ("check-" + uuid.uuid4().hex)
             evidence, temp = runtime / "evidence", runtime / "temp"
             evidence.mkdir(parents=True)
@@ -56,7 +60,10 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
             cleanup_verified = result["cleanupVerified"]
             body = {k: v[-4096:].decode("utf-8", errors="replace") if isinstance(v, bytes) else v
                     for k, v in result.items()}
-            files = [store.artifact(p.read_bytes(), ref) for p in evidence.rglob("*") if p.is_file()]
+            body.update(evidence_facts.runtime(result, checkout, temp, evidence,
+                                              walkthrough=ref in walkthroughs, commit=commit))
+            files = [store.artifact(p.read_bytes(), ref) for p in evidence.rglob("*")
+                     if p.is_file() and not (p.parent == evidence and evidence_facts.runtime_file(p.name))]
             body.update(check=ref, unit=unit, commit=commit, purpose=purpose,
                         requirements=check["requirements"], command=check["command"], cwd=str(checkout),
                         evidenceFiles=files)
@@ -66,7 +73,12 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
                 observations.append(store.record("observation", body))
             if not cleanup_verified:
                 raise UncertainCleanup("Command cleanup unverified: " + str(body))
-            gitwork.clean(checkout, commit)
+            if any(item["locked"] and item["root"] == "checkout"
+                   for item in body.get("fileCleanup", {}).get("blockedFiles", [])):
+                # Don't turn a cleanup observation into a failed check or reuse locked state.
+                _observer.checkout = checkout = None
+            else:
+                gitwork.clean(checkout, commit)
             dirty = False
     finally:
         # Never reset/reuse a workspace whose descendants may still be running.

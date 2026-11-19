@@ -2,7 +2,7 @@
 
 import json
 
-from . import architecture, fixups, gitwork, plan
+from . import architecture, fixups, gitwork, observations, plan
 from .answers import Mismatch
 from .schema import ALIGN_ROUND, answer_schema, batch_decision, obj, validate, vision_body
 from . import features
@@ -59,6 +59,17 @@ SOLE_WORK = (
     "with the requirement handles they prove and list check files and helpers in checkPaths. "
     "Keep existing declarations unless updating or retiring one by handle. Save visual evidence in "
     "SELDON_EVIDENCE_DIR. Seldon runs the declared checks; run locally as needed to build or debug.")
+
+OPERATION_WALKTHROUGH = (
+    "For each accepted operation with start/stop or progress, observe one run through the documented "
+    "user interface in the integrated walkthrough. Start it, read state while active, stop it and read "
+    "the resulting state (including saved state if documented). For progress-only operations read the "
+    "terminal state after completion. Write a JSON array in SELDON_EVIDENCE_DIR/operation-lifecycle.json "
+    "with one object per operation: operation, linked requirement or wave commitment handles, "
+    "documentation reference, observed "
+    "(true), and the actual start, whileRunning, stop (if applicable) and after responses or visible state. "
+    "If the interface is undocumented or a step cannot be observed, record observed=false and the "
+    "reason. Keep these observations even when the outcome differs from expectations.")
 
 SIZE_ESTIMATE = (
     "Estimate how long one capable plain agent would need to build and verify the grown scope and quality "
@@ -567,7 +578,9 @@ def reviewed_judge(question, facts, context):
     if "findings" in question["schema"]["properties"]["answer"].get("properties", {}):
         task = ("On this delivered revision give a finding for every supplied subject under its exact "
                 "handle, including the feature, requirements, quality and guide subjects shown. Put the "
-                "code-quality assessment in sourceAcceptance. For tryItGuide, compare the actual "
+                + ("code-quality assessment in codeQuality. " if "codeQuality" in facts["Subjects"]
+                   else "code-quality assessment in sourceAcceptance. ") +
+                "For tryItGuide, compare the actual "
                 "documented steps with the fresh-checkout walkthrough and its observed results. "
                 "Give each finding its own reason.")
         findings = dict(question["examples"][0]["answer"]["findings"])
@@ -830,6 +843,8 @@ def work_brief(store, ref):
     facts["Runtime"] = runtime(setup)
     if ref != "guide" and plan.guide_owner(document) == ref:
         facts["Try-it guide"] = plan.GUIDE_WALKTHROUGH
+    if plan.guide_owner(document) == ref and features.enabled("judgeEvidence"):
+        facts["Operation lifecycle walkthrough"] = OPERATION_WALKTHROUGH
     if not sole:
         facts.update(agreement_facts(document, ref))
     wave = document.get("architecture", {}).get("waves", [])
@@ -876,8 +891,8 @@ def execution_facts(store, ref, *, sole=False):
 
 
 def observed(store, refs):
-    return [{k: b[k] for k in ("commit", "check", "requirements", "purpose", "command",
-                             "exitCode", "stdout", "stderr")}
+    return [{**{k: b[k] for k in ("commit", "check", "requirements", "purpose", "command",
+                                 "exitCode", "stdout", "stderr")}, **observations.judge_fields(b)}
             for b in (store.read(ref) for ref in refs)]
 
 

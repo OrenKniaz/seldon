@@ -1597,6 +1597,19 @@ def test_guide_walkthrough_journey(tmp_path, scalar_align):
 
 
 @pytest.mark.fast
+@pytest.mark.skipif(sys.platform != "win32", reason="Recorded product faults use Windows file sharing")
+@pytest.mark.parametrize("product", ["quiet", "shelf"])
+def test_recorded_runtime_evidence_reaches_integrated_judge(tmp_path, monkeypatch, product):
+    """Passing checks can hide a stalled Stop, browser errors and cleanup locks.
+
+    Screenshots and process exit checks miss both runtime defects and the missing source-quality subject.
+    """
+    from evidence_journey import evidence_journey
+
+    evidence_journey(tmp_path, monkeypatch, product)
+
+
+@pytest.mark.fast
 @pytest.mark.parametrize("surface", ["browser", "broken-guide"])
 def test_check_kit_golden(tmp_path, scalar_align, surface, monkeypatch):
     """Worker-authored real browser/server checks retain baseline helpers and clean descendants.

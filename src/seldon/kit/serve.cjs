@@ -1,6 +1,7 @@
 // C14/C26: serve(argv, async ({url, port, dataDir, pid}) => ..., {ready, deadline}).
 // argv substitutes {port}/{data}; the product also receives PORT and SELDON_DATA_DIR.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+const {randomUUID} = require('node:crypto');
 const net = require('node:net'), {spawn, spawnSync} = require('node:child_process');
 const {once} = require('node:events'), {setTimeout: sleep} = require('node:timers/promises');
 module.exports = async function serve(argv, check, {ready = '/', deadline = 30000} = {}) {
@@ -41,6 +42,16 @@ module.exports = async function serve(argv, check, {ready = '/', deadline = 3000
       try { process.kill(child.pid, 0); throw new Error('Server still alive'); }
       catch (error) { if (error.code !== 'ESRCH') throw error; }
     }
-    fs.rmSync(dataDir, {recursive: true, force: true});
+    const evidence = process.env.SELDON_EVIDENCE_DIR;
+    const cleanup = {directory: path.basename(dataDir), removed: true};
+    try { fs.rmSync(dataDir, {recursive: true, force: true}); }
+    catch (error) {
+      if (!evidence || !error.code) throw error;
+      cleanup.removed = false;
+      cleanup.error = error.code;
+    }
+    if (evidence) {
+      fs.writeFileSync(path.join(evidence, `server-cleanup-${randomUUID()}.json`), JSON.stringify([cleanup]));
+    }
   }
 };
