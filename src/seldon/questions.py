@@ -234,6 +234,11 @@ def check_align_round(answer, sources):
         words, value = sources.get(source, ""), constraint["value"]
         if value in words:
             continue
+        # Sources may be JSON-rendered (escaped backslashes); a path copied either way is the same value.
+        plain = value.replace("\\\\", "\\")
+        if plain in words.replace("\\\\", "\\"):
+            constraint["value"] = plain
+            continue
         pattern = r"\s+".join(map(re.escape, value.split()))
         match = re.search(pattern, words) if pattern else None
         if not match:
