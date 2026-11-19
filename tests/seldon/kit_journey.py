@@ -76,7 +76,7 @@ def kit_journey(slot, surface):
             assert observation['exitCode'] == 0 and observation['ranOnDeliveredRevision']
             assert observation['executionStarted'] and observation['cleanupVerified']
             assert 'parent, descendant, port and data cleaned' in observation['stdout']
-            assert facts['Check artifacts']
+            assert observation['artifacts']
             assert set(facts['Checks']) == {'guide:check:1'}
             assert facts['Walkthrough check sources']['docs/try-it/check.py'].replace('\r\n', '\n') == guide_source
             assert facts['Guide file']['text'].replace('\r\n', '\n') == guide_text.strip()

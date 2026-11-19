@@ -5,23 +5,29 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
-from . import architecture, decisions, gitwork, inference, observations, plan, proof, questions, recovery
+from . import architecture, decisions, gitwork, inference, judgment, plan, proof, questions, recovery
 from .providers import ProviderFailure, recorded
-from .schema import REFS, TEXT, answer_schema, array, choice, folded_judge_schema, obj, validate
+from .schema import REFS, TEXT, answer_schema, array, choice, obj, validate
 from .states import advance
 from .store import encode
 
 CHECK = obj(purpose=TEXT, command=array(TEXT, 1), expectedEvidence=TEXT)
-MILESTONE = obj(outcome=TEXT, promises=array(TEXT, 1), spec=obj(what=TEXT, how=TEXT, test=array(CHECK, 1)),
-                brief=TEXT)
+MILESTONE = obj(outcome=TEXT, promises=array(obj(vision=TEXT, action=TEXT, result=TEXT), 1),
+                spec=obj(what=TEXT, how=TEXT, test=TEXT), brief=TEXT)
 PLAN = obj(answer=obj(milestones=array(MILESTONE, 1)))
-RECEIPT = obj(answer=obj(outcome=choice("done", "question"), summary=TEXT, checks=array(CHECK),
-                         checkPaths=REFS, walkthrough=CHECK))
+RECEIPT = obj(answer={"anyOf": [
+    obj(outcome=choice("done"), summary=TEXT, checks=array(obj(vision=TEXT, **CHECK["properties"]), 1),
+        checkPaths=REFS, walkthrough=CHECK),
+    obj(outcome=choice("question", "plan correction", "proof fault"), summary=TEXT),
+]})
 WRITE_RULES = (
     "Write only in the assigned product workspace. Preserve accepted behavior. Write semantic checks and "
     "a try-it guide. You may use provider-native sub-agents and skills within this assignment; wait for "
     "them to finish before returning. Keep Seldon's store, decisions and proof untouched. Do not commit "
-    "or change global settings. Your receipt offers a candidate for independent proof."
+    "or change global settings. Return one unattended assertion command per new vision handle and an "
+    "asserting walkthrough of the guide. Assert expected errors, including exit and streams, inside "
+    "a check that exits zero when the behavior is correct. Exercise browser paths headlessly. "
+    "List the exact check-only files and helpers needed to replay your checks. Leave earlier witnesses intact."
 )
 EXAMPLE_CHECK = {"purpose": "Greet a named visitor", "command": ["python", "checks/greet.py"],
                  "expectedEvidence": "The process prints Hello, Ada!"}
@@ -59,6 +65,11 @@ def commitments(store, cursor):
     return architecture.commitments(questions.vision_body(store.read(cursor.vision)["answer"]))
 
 
+def obligations(item, vision):
+    return {p["vision"]: p for p in item["promises"] if isinstance(p, dict)} | {
+        p: vision.get(p) for p in item["promises"] if isinstance(p, str)}
+
+
 def user_words(store, cursor):
     return {"Dream": store.read(cursor.kickoff)["words"],
             "Owner replies": [b["words"] for _, _, b in store.records("user_words")
@@ -70,15 +81,19 @@ def propose(store, provider, cursor):
     completed = previous[:cursor.wave - 1]
     promises = commitments(store, cursor)
     open_promises = {key: value for key, value in promises.items()
-                     if not any(key in m["promises"] for m in completed)}
-    example = {"outcome": "Greet a named visitor", "promises": [next(iter(open_promises or promises))],
+                     if not any(key in obligations(m, promises) for m in completed)}
+    example = {"outcome": "Greet a named visitor", "promises": [
+                   {"vision": next(iter(open_promises or promises)), "action": "Pass Ada as the name",
+                    "result": "See Hello, Ada! on standard output."}],
                "spec": {"what": "A greeting names the visitor", "how": "Read the name from a CLI argument",
-                        "test": [EXAMPLE_CHECK]},
+                        "test": "Observe the full greeting and punctuation for the supplied name."},
                "brief": EXAMPLE_BRIEF}
     facts = {**user_words(store, cursor), "Accepted vision": store.read(cursor.vision)["answer"],
              "Open promises": open_promises, "Completed milestones": completed,
              "Remaining proposal": previous[len(completed):],
              "Runtime": questions.runtime(store.read(cursor.kickoff)["setup"])}
+    if cursor.failure:
+        facts["Exact failure"] = cursor.failure
     if cursor.requestedChange:
         facts["Owner direction"] = store.read(cursor.requestedChange)["words"]
     if cursor.review:
@@ -86,35 +101,20 @@ def propose(store, provider, cursor):
     prompt = (
         "Plan the remaining milestones from these approved promises and owner words. A micro dream usually "
         "needs one milestone. Keep staging the owner asked for. Reference the supplied promise handles. "
-        "For each milestone give its usable outcome and a spec of what, how and test. Give a runnable "
-        "command and expected evidence for each promised behavior so Seldon can replay it on later builds. "
-        "Prefer an independent assertion in the command when it can directly exercise the product. "
-        "Write a 120–400 word mission brief as a tech lead to a strong engineer. Preserve the person's "
-        "exact wording where it matters. Assign the real tests and try-it guide to the same builder."
+        "For each promise state the person's action and the observable result in words. Give a spec of "
+        "what, how and what proof must observe. The planner supplies no code, tests or commands to run. "
+        "Write a 120â€“400 word mission brief as a tech lead to a strong engineer. Preserve the person's "
+        "exact wording, including any invocation they specified as part of the product. Assign the "
+        "real tests and try-it guide to the same builder."
     )
 
     def consume(source, answer):
-        proposed = answer["milestones"]
-        remaining = set(open_promises)
-        normalized = []
-        for item in proposed:
-            assigned = list(dict.fromkeys(p for p in item["promises"] if p in promises))
-            remaining.difference_update(assigned)
-            normalized.append({**item, "promises": assigned})
-        normalized[-1]["promises"].extend(key for key in promises if key in remaining)
         ref = store.record("milestone_plan", {"source": source, "vision": cursor.vision,
-            "parent": cursor.leadPlan, "milestones": completed + normalized})
+            "parent": cursor.leadPlan, "milestones": completed + answer["milestones"]})
         advance(store, "planned", ref, leadPlan=ref, B=None, requestedChange=None)
 
     inference.call(store, provider, questions.question("MILESTONES", prompt, facts, PLAN,
                    [{"milestones": [example]}]), consume=consume, binding=cursor.A)
-
-
-def ask_failure(store, gate, failure):
-    decisions.request(store, gate, {"step": gate, "failure": failure}, ask={
-        "question": "How should Seldon continue?\n" + failure,
-        "options": [decisions.option("Try a different approach", "Describe how to proceed", "direct"),
-                    decisions.option("Pause", "Keep the current state for later", "pause")]})
 
 
 def review(store, provider, cursor):
@@ -124,7 +124,7 @@ def review(store, provider, cursor):
     facts = {**user_words(store, cursor), "Accepted promises": commitments(store, cursor),
              "Milestones": milestones(store, cursor)}
     question = questions.question("REVIEW",
-        "Does this milestone plan cover the locked dream, with specific what, how and runnable tests? "
+        "Does this milestone plan cover the locked dream, with specific what, how and observable results? "
         "Check the owner's exact constraints, staging, milestone briefs and walkthrough obligation. "
         "Name any material correction.", facts, answer_schema("REVIEW"),
         [{"verdict": "adequate", "gaps": [], "why": "The named greeting is specified and exercised."}])
@@ -136,16 +136,21 @@ def review(store, provider, cursor):
                 "fresh same-provider review")
         ref = store.record("plan_review", {"revision": cursor.leadPlan, "source": source,
             "answer": answer, "notJudged": {}, "reviewTier": tier})
-        if answer["verdict"] != "adequate":
+        named = [p["vision"] if isinstance(p, dict) else p
+                 for item in facts["Milestones"] for p in item["promises"]]
+        if set(named) != facts["Accepted promises"].keys() or len(named) != len(set(named)):
+            failure = f"Assign each accepted promise exactly once. Planned: {named}."
+        elif answer["verdict"] != "adequate":
             failure = "; ".join([gap["correction"] for gap in answer.get("gaps", [])]
                                 or answer.get("neededFacts", []) or [answer["why"]])
-            key = "lead-plan:" + str(cursor.A)
-            if recovery.failed(store, ref, key=key, shape=failure):
-                ask_failure(store, "LEAD-REVIEW", failure)
-            else:
-                advance(store, "repair-plan", ref, review=ref)
         else:
             advance(store, "reviewed", ref, review=ref, repairs=0)
+            return
+        key = "lead-plan:" + str(cursor.A)
+        if recovery.failed(store, ref, key=key, shape=failure):
+            decisions.owner_question(store, "Planner", failure)
+        else:
+            advance(store, "repair-plan", ref, review=ref, failure=failure)
 
     inference.call(store, provider, question, consume=consume, binding=cursor.leadPlan)
 
@@ -220,18 +225,13 @@ def build(store, provider, cursor):
             cursor = store.cursor(replace(cursor, leadReturn=returned))
     if not cursor.leadReturn:
         session = builder_session(store, calls)
-        if cursor.repairs and not cursor.requestedChange and (cursor.repairs > 1 or not session):
-            subject = decisions.coach(store, provider, {"step": "BUILD", "tried": [cursor.failure],
-                "failure": cursor.failure}, frame=True)
-            if subject:
-                decisions.request(store, "BUILD", subject)
-            else:
-                ask_failure(store, "BUILD", cursor.failure)
-            return
         if current and not session and any(b["attempt"] == current[-1][0]
                                           for _, _, b in store.records("call_started")):
             raise proof.UncertainCleanup("The builder has no resumable session in its recording.")
-        facts = {"Milestone brief": assignment["brief"], "Approved spec": item["spec"],
+        spec = item["spec"]
+        facts = {"Milestone brief": assignment["brief"],
+                 "Approved spec": spec if isinstance(spec["test"], str) else {**spec, "test": "See promises."},
+                 "Promises": obligations(item, commitments(store, cursor)),
                  "Owner words": user_words(store, cursor), "Write scope": assignment["workspace"],
                  "Guide path": plan.GUIDE_PATH}
         if cursor.productVerdict:
@@ -240,7 +240,8 @@ def build(store, provider, cursor):
             facts["Exact failure"] = cursor.failure
         if cursor.requestedChange:
             facts["Owner direction"] = store.read(cursor.requestedChange)["words"]
-        example = {"outcome": "done", "summary": "A visitor can greet Ada.", "checks": [EXAMPLE_CHECK],
+        example = {"outcome": "done", "summary": "A visitor can greet Ada.",
+                   "checks": [{**EXAMPLE_CHECK, "vision": next(iter(facts["Promises"]))}],
                    "checkPaths": ["checks/greet.py"], "walkthrough": EXAMPLE_CHECK}
         question = questions.question("WORK", WRITE_RULES, facts, RECEIPT, [example],
             execution={"cwd": assignment["workspace"], "session": session, "lead": cursor.leadBuild,
@@ -256,76 +257,45 @@ def build(store, provider, cursor):
                 raise
             if isinstance(error, ProviderFailure) and not error.transient:
                 raise proof.UncertainCleanup(str(error)) from error
-            fail(store, store.cursor(), str(error))
+            fail(store, store.cursor(), str(error), "Seldon" if isinstance(error, ProviderFailure) else "Builder",
+                 retry="Retry builder" if isinstance(error, ProviderFailure) else None)
             return
         cursor = store.cursor()
     answer = store.read(cursor.leadReturn)["answer"]
-    if answer["outcome"] == "question":
-        fail(store, cursor, answer["summary"])
+    if answer["outcome"] != "done":
+        owner = {"question": "Planner", "plan correction": "Planner", "proof fault": "Seldon"}[answer["outcome"]]
+        _, candidate, _ = gitwork.snapshots(assignment["workspace"], assignment["base"], ["**"], [], cursor.scratch)
+        fail(store, cursor, answer["summary"], owner, candidate=candidate, replan=answer["outcome"] == "plan correction")
         return
-    advance(store, "returned", cursor.leadReturn, failure="", requestedChange=None)
+    advance(store, "returned", cursor.leadReturn, requestedChange=None)
 
 
-def fail(store, cursor, failure):
+def fail(store, cursor, failure, owner="Builder", *, candidate=None, evidence=(),
+         replan=False, retry=None):
+    # A candidate's tree is stable across snapshots, sessions and reworded receipts.
+    root = store.root.parent
+    tree = gitwork.git(root, "rev-parse", f"{candidate}^{{tree}}") if candidate else None
     with store.transaction():
         cause = store.record("lead_failure", {"milestone": cursor.wave, "assignment": cursor.leadBuild,
-            "return": cursor.leadReturn, "failure": failure})
+            "return": cursor.leadReturn, "failure": failure, "candidate": candidate, "tree": tree,
+            "owner": owner, "evidence": evidence})
+        if owner == "Seldon" and cursor.state == "PROVE":
+            store.cursor(replace(cursor, failure=failure))
+            return decisions.owner_question(store, owner, failure, retry=retry)
         updates = {"leadReturn": None, "repairs": cursor.repairs + 1, "failure": failure,
                    "requestedChange": None}
+        if replan and not recovery.failed(store, cause, key=f"lead-spec:{cursor.wave}",
+                                        shape=[tree, milestones(store, cursor)[cursor.wave - 1]["promises"]]):
+            advance(store, "repair-plan", cause, **{**updates, "leadBuild": None, "B": None})
+            return
         if cursor.state == "PROVE":
             advance(store, "repair-build", cause, **updates)
         else:
             store.cursor(replace(cursor, **updates))
-
-
-def check_set(previous, cursor, item, receipt):
-    declarations = dict(previous.get("checks", {}))
-    prefix = f"milestone-{cursor.wave}"
-    for index, check in enumerate([*item["spec"]["test"], *receipt["checks"]], 1):
-        if not any(c["command"] == check["command"] and c["requirements"] == item["promises"]
-                   for c in declarations.values()):
-            declarations[f"{prefix}-check-{index}"] = {**check, "requirements": item["promises"]}
-    walk = f"{prefix}-walkthrough"
-    command = receipt["walkthrough"]["command"]
-    matching = next((ref for ref, check in declarations.items() if check["command"] == command
-                     and check["requirements"] == item["promises"]), None)
-    if matching:
-        walk = matching
-    else:
-        declarations[walk] = {**receipt["walkthrough"], "requirements": item["promises"]}
-    return declarations, list(dict.fromkeys([*previous.get("walkthroughs", []), walk]))
-
-
-def judge(store, provider, cursor, candidate, checks, refs, checked, walkthroughs):
-    project = store.root.parent
-    names = [p for p in gitwork.paths(project, candidate) if not p.startswith("checks/kit/")]
-    files = {name: content.decode("utf-8", errors="replace") for name, content in
-             gitwork.blobs(project, candidate, ["**"], named=names).items()}
-    delivered = {key for check in checks.values() for key in check["requirements"]}
-    subjects = {key: value for key, value in commitments(store, cursor).items() if key in delivered}
-    subjects.update(tryItGuide="The documented try-it steps work from a fresh checkout.",
-                    sourceAcceptance="Real implementation with no stubs, mocks or missing behavior.",
-                    codeQuality="Main implementation is readable and safe to change.")
-    facts = {"Candidate": candidate, "Subjects": subjects, "Product files": files,
-             "Code shape (measured)": observations.code_shape(files), "Checks": checks,
-             "Walkthrough checks": walkthroughs, "Observations": questions.observed(store, refs)}
-    sample = {key: {"verdict": "satisfied", "gaps": [], "why": "The check exercises the delivered action."}
-              for key in subjects}
-    question = questions.question("JUDGE",
-        "Judge each promised behavior and quality criterion against the real observations, the source and "
-        "the guide. Confirm tests fail for the right reason and cover the actual user path. For code quality "
-        "use the measured shape and name concrete maintainability defects. Report missing evidence as "
-        "uncertainty and return exact corrections for material gaps.", facts,
-        folded_judge_schema(subjects, "builder"), [{"findings": sample, "why": "Evidence was reviewed."}],
-        subjects, images=questions.images(store, checked))
-    source, answer = inference.call(store, provider, question, binding=candidate)
-    failures = [gap["correction"] for f in answer["findings"].values() if "gaps" in f
-                for gap in questions.must_fix(f)]
-    failures += [f["why"] + " " + "; ".join(f["neededFacts"]) for f in answer["findings"].values()
-                 if f["verdict"] == "uncertain"]
-    if not files.get(plan.GUIDE_PATH, "").strip():
-        failures.append(f"Deliver the runnable try-it guide at {plan.GUIDE_PATH}.")
-    return source, failures
+        if replan:
+            decisions.owner_question(store, owner, failure)
+        else:
+            decisions.route_repair(store, cause, owner, tree, failure, retry)
 
 
 def prove(store, provider, cursor):
@@ -333,31 +303,43 @@ def prove(store, provider, cursor):
     assignment = store.read(cursor.leadBuild)
     receipt = store.read(cursor.leadReturn)["answer"]
     worktree, base = assignment["workspace"], assignment["base"]
-    item = milestones(store, cursor)[cursor.wave - 1]
+    items = milestones(store, cursor)
+    vision = commitments(store, cursor)
+    subjects = {key: value for item in items[:cursor.wave] for key, value in obligations(item, vision).items()}
+    current = obligations(items[cursor.wave - 1], vision)
     previous = store.read(cursor.productVerdict) if cursor.productVerdict else {}
-    checks, walks = check_set(previous, cursor, item, receipt)
+    candidate = None
     try:
         red, candidate, changed = gitwork.snapshots(
             worktree, base, ["**"], receipt["checkPaths"], cursor.scratch)
+        checks, new, walks = proof.milestone_checks(store, previous, cursor.wave, current, subjects, receipt, candidate)
     except ValueError as error:
-        fail(store, cursor, str(error))
+        fail(store, cursor, str(error), candidate=candidate)
         return
-    green = proof.observe(store, project, candidate, checks, "milestone", walkthroughs=walks)
+    green = proof.observe(store, project, candidate, checks | new, "milestone", walkthroughs=walks)
     if failed := proof.failures(store, green):
-        fail(store, cursor, f"Candidate {candidate} failed integrated proof: " + proof.explain(failed))
+        runner_fault = any(not o["executionStarted"] or o["timedOut"] for o in failed)
+        fail(store, cursor, proof.explain(failed), "Seldon" if runner_fault else "Builder",
+             candidate=candidate, evidence=green, retry="Retry proof" if runner_fault else None)
         return
-    new = {ref: check for ref, check in checks.items() if ref not in previous.get("checks", {})}
-    red_refs = proof.observe(store, project, red, new, "milestone-red")
-    judgment, gaps = judge(store, provider, cursor, candidate, checks, red_refs + green, green, walks)
-    if gaps:
-        fail(store, cursor, f"Candidate {candidate}: " + "\n".join(gaps))
+    red_refs = proof.observe(store, project, red,
+        {key: check for key, check in new.items() if key not in walks
+         and check["requirements"][0] in current}, "milestone-red")
+    judge, fixes, missing = judgment.milestone(store, provider, candidate, subjects, checks | new,
+                                              red_refs + green, walks)
+    if fixes or missing:
+        fail(store, cursor, "\n".join(fixes or missing), "Builder" if fixes else "Seldon",
+             candidate=candidate, evidence=[judge, *green],
+             retry="Run proof after the evidence is fixed" if missing and not fixes else None)
         return
+    checks.update({k: v for k, v in new.items() if "replacement" not in v})
     gitwork.unchanged(project, base)
     with store.transaction():
         verdict = store.record("milestone_proof", {"milestone": cursor.wave, "plan": cursor.leadPlan,
             "commit": candidate, "assignment": cursor.leadBuild, "return": cursor.leadReturn,
             "changed": changed, "checks": checks, "walkthroughs": walks, "red": red_refs,
-            "observations": green, "judge": judgment, "previous": cursor.productVerdict})
+            "observations": green, "executedChecks": list(checks | new), "judge": judge,
+            "previous": cursor.productVerdict})
         intent = store.record("publication", {"milestone": cursor.wave, "before": base,
             "commit": candidate, "verdict": verdict, "observations": green})
         store.cursor(replace(store.cursor(), publication=intent))
@@ -373,7 +355,8 @@ def eligible(store):
     if (not cursor.B or cursor.wave != len(milestones(store, cursor))
             or current.get("plan") != cursor.leadPlan or current.get("commit") != cursor.candidate
             or checkin.get("proof") != cursor.productVerdict
-            or observed != set(current["checks"]) or proof.failures(store, cursor.finalObservations)):
+            or observed != set(current.get("executedChecks", current["checks"]))
+            or proof.failures(store, cursor.finalObservations)):
         raise ValueError("C requires current cumulative proof and the final milestone check-in")
     gitwork.unchanged(store.root.parent, cursor.candidate)
 

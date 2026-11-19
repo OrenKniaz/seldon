@@ -84,8 +84,8 @@ if 'docs/try-it.md' in facts['Write scope']:
             check, = facts["Walkthrough checks"]
             observation, = (row for row in facts["Observations"]
                             if row["check"] == check and row["purpose"] == "final")
-            execution, = (row for row in facts["Delivered execution"] if row["check"] == check)
-            checkout = execution["cwd"]
+            execution = observation
+            checkout = observation["workingDirectory"]
             guide = facts["Product files"][plan.GUIDE_PATH]
         elif not folded and question["kind"] == "PRODUCT" and question["targets"] == ["tryItGuide"]:
             observation, = facts["Final observations"]
@@ -96,7 +96,7 @@ if 'docs/try-it.md' in facts['Write scope']:
             return original(question, started)
         assert "clean" in facts["Walkthrough checkout"].lower()
         assert "`./docs/try-it/read.ps1`" in guide
-        assert execution["executionStarted"] and execution["cleanupVerified"]
+        assert execution["cleanCheckout"] and execution["executionStarted"] and execution["cleanupVerified"]
         assert observation["exitCode"] == 0, observation["stderr"]
         ran, pending = observation["operationLifecycle"]
         assert ran["observed"] and ran["after"] == "value-001"

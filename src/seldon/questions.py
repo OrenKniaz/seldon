@@ -4,7 +4,7 @@ import json
 import re
 from difflib import SequenceMatcher
 
-from . import architecture, fixups, gitwork, observations, plan
+from . import architecture, fixups, gitwork, observations, plan, proof
 from .answers import Mismatch, links, normalised, render_constraint_values
 from .schema import ALIGN_ROUND, answer_schema, batch_decision, obj, validate, vision_body
 from . import features
@@ -1063,7 +1063,7 @@ def observed(store, refs):
 def images(store, refs):
     from pathlib import Path
     return list(dict.fromkeys(p for ref in refs for p in store.read(ref)["evidenceFiles"]
-                             if Path(p).read_bytes().startswith((b"\x89PNG", b"\xff\xd8"))))
+                             if proof.image(Path(p).read_bytes())))
 
 
 def judge_brief(store, ref, commit=None, observations=None):
@@ -1093,7 +1093,8 @@ def judge_brief(store, ref, commit=None, observations=None):
              "Check sources": checks,
              "Binary files (bytes)": binaries,
              "Product files": product,
-             "Observations": observed(store, refs)}
+             "Observations": (observed(store, refs) if observations is None
+                              else proof.account(store, refs, commit))}
     facts.update(agreement_facts(document, ref))
     return build("JUDGE", facts, requirements, images=images(store, refs),
                  owners=[ref, *architecture.contracts_for(document, ref)],

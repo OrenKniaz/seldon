@@ -1,7 +1,6 @@
 """C3/C15/I2/I10; R2/R9/R11: one area question, criterion verdicts, local fixup, code ANDs."""
 
 from dataclasses import replace
-from pathlib import Path
 
 from . import architecture, features, fixups, gitwork, inference, plan, proof, questions
 from .observations import code_shape
@@ -33,6 +32,37 @@ def folded_subjects(document):
     }
 
 
+def milestone(store, provider, commit, subjects, checks, refs, walks):
+    root = store.root.parent
+    files, images = proof.candidate_files(store, root, commit)
+    subjects = {**subjects, "tryItGuide": "The documented steps work from a fresh checkout.",
+                "sourceAcceptance": "Real implementation with no stubs, mocks or missing behavior.",
+                "codeQuality": "Main implementation is readable and safe to change."}
+    facts = {"Candidate": commit, "Subjects": subjects, "Candidate file inventory": gitwork.paths(root, commit),
+             "Product files": files, "Candidate images": images, "Code shape (measured)": code_shape(files),
+             "Walkthrough checks": walks, "Observations": proof.account(store, refs, commit),
+             "Checks": {key: {k: v for k, v in check.items() if k != "command"}
+                        for key, check in checks.items()}}
+    example = {key: {"verdict": "satisfied", "gaps": [], "why": "Observed the approved action and result."}
+               for key in subjects}
+    question = questions.question("JUDGE",
+        "Judge each approved action and result from the runner's observations. Each new or replacement "
+        "check must exercise its original promise against actual product behavior. Confirm that RED "
+        "fails for the right reason, and that retained checks still exercise the product on this candidate. "
+        "For the guide, judge the steps actually observed. Name concrete product fixes or the evidence "
+        "needed for an uncertain finding. Use source and measured code shape for maintenance findings.",
+        facts, folded_judge_schema(subjects, "builder"), [{"findings": example, "why": "Reviewed the evidence."}],
+        subjects, images=list(dict.fromkeys([*images.values(), *questions.images(store, refs)])))
+    source, answer = inference.call(store, provider, question, binding=commit)
+    fixes = [gap["correction"] for finding in answer["findings"].values()
+             for gap in questions.must_fix({"gaps": finding.get("gaps", [])})]
+    missing = [f["why"] + " " + "; ".join(f["neededFacts"]) for f in answer["findings"].values()
+               if f["verdict"] == "uncertain"]
+    if not files.get(plan.GUIDE_PATH, "").strip():
+        fixes.append(f"Deliver the runnable try-it guide at {plan.GUIDE_PATH}.")
+    return source, fixes, missing
+
+
 def folded_brief(store, document, owner, observations):
     commit = store.cursor().candidate
     question = questions.judge_brief(store, owner, commit, observations)
@@ -61,11 +91,6 @@ def folded_brief(store, document, owner, observations):
     checks = plan.guide_checks(document)
     facts["Walkthrough checks"] = list(checks)
     facts["Walkthrough checkout"] = WALKTHROUGH_CHECKOUT
-    facts["Delivered execution"] = [{k: body[k] for k in ("check", "cwd", "executionStarted",
-                                      "cleanupVerified", "timedOut", "evidenceFiles")}
-                                    for ref in observations for body in [store.read(ref)]]
-    if artifacts := check_artifacts(store, observations):
-        facts["Check artifacts"] = artifacts
     prompt = (
         "Does this owner's delivered experience meet the accepted plan? Give one finding with evidence "
         "for every listed subject. Use the base and delivered observations to judge the meaning of the "
@@ -220,11 +245,7 @@ def brief(store, kind, selected, *, trees=None):
             raise ValueError(f"{ref} needs its unit JUDGE on the changed scope before final judgment")
         if "answer" in verdict:
             verdicts.append({"unit": ref, "commit": verdict["commit"], **verdict["answer"]})
-    final = questions.observed(store, refs)
-    for item, ref in zip(final, refs):
-        body = store.read(ref)
-        item.update(workingDirectory=body["cwd"], commit=body["commit"], ranOnDeliveredRevision=True,
-                    **{k: body[k] for k in ("executionStarted", "cleanupVerified", "timedOut")})
+    final = proof.account(store, refs, cursor.finalCommit)
     criteria = {s: {k: subjects(document, kind)[s][k] for k in ("criterion", "verification")}
                 for s in selected}
     facts = {"Left out by the user": plan.left_out(store), "Criteria": criteria, "Checks": checks, "Final observations": final,
@@ -240,8 +261,6 @@ def brief(store, kind, selected, *, trees=None):
         facts["Feature verdicts"] = [{"feature": row["feature"],
             **plan.select(document, "feature")[row["feature"]], "answer": row["answer"]}
             for ref in cursor.demoVerdicts for row in [store.read(ref)] if row["feature"] in features]
-    if artifacts := check_artifacts(store, refs):
-        facts["Check artifacts"] = artifacts
     if subject == "tryItGuide":
         facts["Walkthrough checkout"] = WALKTHROUGH_CHECKOUT
         facts["Guide file"] = {"path": plan.GUIDE_PATH, "commit": cursor.finalCommit,
@@ -263,23 +282,6 @@ def brief(store, kind, selected, *, trees=None):
             "walkthrough evidence; name the responsible correction owners for any behaviour gap. "
             + questions.JUDGMENT_LEEWAY)
     return {**question, "schema": review_schema(document, kind)}
-
-
-def check_artifacts(store, refs):
-    artifacts = {}
-    observations = [store.read(ref) for ref in refs]
-    outputs = [row[key] for row in observations for key in ("stdout", "stderr")]
-    for row in observations:
-        for path in row["evidenceFiles"]:
-            content = Path(path).read_bytes()
-            artifacts[path] = {"bytes": len(content), "commit": row["commit"]}
-            try:
-                text = content.decode("utf-8")
-                if not any(text in output for output in outputs):
-                    artifacts[path]["text"] = content[-4096:].decode("utf-8", errors="replace")
-            except UnicodeDecodeError:
-                pass
-    return artifacts
 
 
 def review_schema(document, kind):

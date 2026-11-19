@@ -102,7 +102,7 @@ class QuietBenchProof(Scripted):
             assert facts["Observations"]
             assert any(o["purpose"] == "T" and o["exitCode"] != 0 for o in facts["Observations"])
             assert any(o["purpose"] == "final" and o["exitCode"] == 0 for o in facts["Observations"])
-            assert all(o["executionStarted"] and o["cleanupVerified"] for o in facts["Delivered execution"])
+            assert all(o["executionStarted"] and o["cleanupVerified"] for o in facts["Observations"] if o["ranOnDeliveredRevision"])
             browser = "Browser parity remains unresolved after the recorded OverflowError."
             findings = {subject: {
                 "verdict": "satisfied", "gaps": [], "why": "The delivered CLI ran and reloaded its saved session."

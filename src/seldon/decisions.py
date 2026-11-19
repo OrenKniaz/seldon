@@ -85,7 +85,8 @@ def coach(store, provider, subject, frame=False):
             else:
                 store.record("approval", {"request": store.cursor().decision, "subject": subject,
                     "words": direction, "choice": "revise", "origin": "planner"})
-                store.cursor(replace(store.cursor(), decision=None, requestedChange=direction, failure=""))
+                store.cursor(replace(store.cursor(), decision=None, requestedChange=direction,
+                                     failure=store.cursor().failure if subject.get("inputOwner") else ""))
             return None
         label = ("Change the agreement or approach" if subject.get("checkFailure")
                  else "Try the planner's new approach")
@@ -208,6 +209,8 @@ def step_fault(store, provider, error):
     repeated = shape in store.recovery(key)["seen"]
     recovery.failed(store, cause, shape=shape)
     subject = {"step": step, "tried": [failure], "failure": failure}
+    if step == "PROVE":
+        return owner_question(store, "Seldon", failure, retry="Run proof after the fault is fixed")
     if repeated:
         if isinstance(error, InputRejected):
             subject["ask"] = pause_ask(f"{failure} Seldon owns preparing a smaller evidence packet.")
@@ -217,6 +220,29 @@ def step_fault(store, provider, error):
         subject = coach(store, provider, subject)
     if subject:
         request(store, step, subject)
+
+
+def owner_question(store, owner, failure, *, retry=None, subject=None):
+    step = store.cursor().state
+    options = [option("Pause", "Keep this question pending", "pause")]
+    if retry:
+        options.append(option(retry, "Confirm the named input is ready to try again", "retry"))
+    else:
+        options.append(option("Provide a fix", "Describe the concrete change that resolves this failure", "direction"))
+    request(store, step, {**(subject or {}), "step": step, "inputOwner": owner, "failure": failure}, ask={
+        "question": f"{owner} owns the next change.\n{failure}", "options": options})
+
+
+def route_repair(store, cause, owner, tree, failure, retry):
+    cursor = store.cursor()
+    repeated = recovery.failed(store, cause, key=f"lead-build:{cursor.leadBuild}", shape=[owner, tree])
+    if owner == "Builder" and tree and not repeated:
+        return
+    if owner == "Planner" and not repeated:
+        request(store, cursor.state, {"step": cursor.state, "inputOwner": owner, "failure": failure,
+                                      "question": failure, "tried": [failure]})
+    else:
+        owner_question(store, owner, failure, retry=retry)
 
 
 def gate_ask(store, gate, subject):
@@ -450,7 +476,8 @@ def decide(store, provider, user):
     if "groups" in item["ask"]:
         return decide_round(store, provider, ref, item, words)
     scripted = store.read(cursor.kickoff)["setup"].get("scriptedUser", False)
-    if scripted and item["gate"] not in ("A", "B", "CHECK-IN", "C") and isinstance(words, dict):
+    input_owner = item["subject"].get("inputOwner")
+    if (scripted or input_owner) and item["gate"] not in ("A", "B", "CHECK-IN", "C") and isinstance(words, dict):
         raise Waiting()
     raw = store.record("user_words", {"request": ref, "words": words, "origin": item["origin"]})
     direction, interpretation = str(words), None
@@ -473,21 +500,31 @@ def decide(store, provider, user):
                 effect = picked["effect"] if picked else {
                     "Other": "direct", "Stop": "stop", "Waive": "waive", "Unclear": None}[choice]
                 selection.update(picked=picked, choice=choice, effect=effect, why=answer["why"])
-            interpretation, _ = inference.call(store, provider, questions.build("DECIDE", {
+            question = questions.build("DECIDE", {
                 "Decision": item["gate"], "Displayed subject": item["subject"],
                 "Displayed options": item["ask"], "User's words": words},
-                targets=[o["label"] for o in options] + (["Waive"] if item["gate"] == "CHECK-IN" else [])),
+                targets=[o["label"] for o in options] + (["Waive"] if item["gate"] == "CHECK-IN" else []))
+            if input_owner:
+                question["prompt"] += (" Choose Other only for a concrete change to the named input. "
+                                       "Acknowledgement, approval and a request to continue are Unclear.")
+            interpretation, _ = inference.call(store, provider, question,
                 consume=consume, field="choice")
             picked, choice, effect = (selection[k] for k in ("picked", "choice", "effect"))
             if effect is None:
-                with store.transaction():
-                    store.cursor(replace(store.cursor(), failure=selection["why"]))
+                if not input_owner:
+                    with store.transaction():
+                        store.cursor(replace(store.cursor(), failure=selection["why"]))
                 raise Waiting()
         else:
             choice, effect = picked["label"], picked["effect"]
         if picked:
             direction = picked["label"] + ": " + picked["means"]
-    if effect == "pause":
+    if effect in ("pause", "direction") or (input_owner and effect == "direct" and
+            (choice != "Other" or any(
+                b.get("effect") == "direct" and b["subject"].get("inputOwner") == input_owner
+                and b["subject"].get("failure") == item["subject"]["failure"]
+                and store.read(b["userWords"])["words"] == words
+                for _, _, b in store.records("approval") if "userWords" in b))):
         raise Waiting()  # Keep the displayed request and step intact for a later answer.
     with store.transaction():
         cursor = store.cursor()
@@ -503,6 +540,8 @@ def decide(store, provider, user):
             stop(store, words)
             return
         updates = {"decision": None, "failure": ""}
+        if input_owner:
+            updates["failure"] = item["subject"]["failure"]
         if effect == "waive":
             updates["waived"] = True
         if item["gate"] == "UNIT":

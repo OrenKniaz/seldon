@@ -51,9 +51,13 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
             evidence.mkdir(parents=True)
             temp.mkdir()
             command = list(check["command"])
+            dirty = True
+            retained = check.get("witness")
+            if retained and retained["commit"] != commit and retained["paths"]:
+                gitwork.git(checkout, "--literal-pathspecs", "restore", "--source", retained["commit"],
+                            "--worktree", "--", *retained["paths"])
             if (checkout / command[0]).is_file():
                 command[0] = str((checkout / command[0]).resolve())
-            dirty = True
             cleanup_verified = False
             result = execute(command, checkout, timeout=timeout,
                              env={**os.environ, "SELDON_EVIDENCE_DIR": str(evidence),
@@ -67,7 +71,9 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
                      if p.is_file() and not (p.parent == evidence and evidence_facts.runtime_file(p.name))]
             body.update(check=ref, unit=unit, commit=commit, purpose=purpose,
                         requirements=check["requirements"], command=check["command"], cwd=str(checkout),
-                        evidenceFiles=files)
+                        evidenceFiles=files, cleanCheckout=True, actualCommand=command)
+            if retained:
+                body["witness"] = retained
             if scope_tree is not None:
                 body["scopeTree"] = scope_tree
             with store.transaction():
@@ -105,6 +111,83 @@ def explain(failed):
     fields = ("check", "purpose", "command", "executionStarted", "timedOut", "cleanupVerified",
               "exitCode", "stdout", "stderr")
     return str([{field: body[field] for field in fields} for body in failed])
+
+
+def image(content):
+    return content.startswith((b"\x89PNG", b"\xff\xd8"))
+
+
+def account(store, refs, delivered=None):
+    """Render the runner's observations for both judgment paths."""
+    rows = []
+    for ref in refs:
+        body = store.read(ref)
+        fields = ("commit", "check", "requirements", "purpose", "exitCode", "stdout", "stderr",
+                  "executionStarted", "cleanupVerified", "timedOut", "cleanCheckout", "witness")
+        row = {key: body[key] for key in fields if key in body}
+        row.update(evidence_facts.judge_fields(body), command=body.get("actualCommand", body["command"]),
+                   workingDirectory=body["cwd"], ranOnDeliveredRevision=body["commit"] == delivered)
+        row["artifacts"] = {}
+        for path in body["evidenceFiles"]:
+            content = Path(path).read_bytes()
+            artifact = row["artifacts"][path] = {"bytes": len(content)}
+            if not image(content):
+                try:
+                    text = content.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if text not in body["stdout"] and text not in body["stderr"]:
+                    artifact["text"] = text[-4096:]
+        rows.append(row)
+    return rows
+
+
+def candidate_files(store, root, commit):
+    files, images = {}, {}
+    for name, content in gitwork.blobs(root, commit, ["**"]).items():
+        if image(content):
+            images[name] = store.artifact(content, "candidate-image")
+        elif b"\0" not in content:
+            try:
+                files[name] = content.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+    return files, images
+
+
+def milestone_checks(store, previous, milestone, current, subjects, receipt, candidate):
+    """Retain the original reviewed witness even when a later builder offers a replacement."""
+    retained = dict(previous.get("checks", {}))
+    walks = previous.get("walkthroughs", [])
+    declared = [c.get("vision") for c in receipt["checks"]]
+    if (not set(current).issubset(declared) or len(declared) != len(set(declared))
+            or any(key not in subjects for key in declared)):
+        raise ValueError(f"Supply one check per new promise: {', '.join(current)}.")
+    root = store.root.parent
+    # Older stores mixed plan commands and builder witnesses. Recover only commands the accepted
+    # builder actually declared, using its receipt and candidate rather than the planner's list.
+    ancestor = previous
+    while any("witness" not in c for c in retained.values()) and ancestor:
+        old = store.read(ancestor["return"])["answer"]
+        commit = ancestor["commit"]
+        paths = [p for p in gitwork.paths(root, commit) if plan.matches(p, old["checkPaths"])]
+        for key, check in retained.items():
+            if ("witness" not in check and key.startswith(f"milestone-{ancestor['milestone']}-")
+                    and any(c["command"] == check["command"] for c in [*old["checks"], old["walkthrough"]])):
+                retained[key] = {**check, "witness": {"commit": commit, "paths": paths}}
+        ancestor = store.read(ancestor["previous"]) if ancestor.get("previous") else {}
+    retained = {key: check for key, check in retained.items() if "witness" in check}
+    paths = list(dict.fromkeys(plan.safe_path(path) for path in receipt["checkPaths"]))
+    missing = set(paths) - set(gitwork.paths(root, candidate))
+    if missing:
+        raise ValueError(f"Check files absent from candidate: {', '.join(sorted(missing))}.")
+    witness = {"commit": candidate, "paths": paths}
+    submitted = {f"milestone-{milestone}:{c['vision']}": {
+        **c, "requirements": [c["vision"]], "witness": witness,
+        **({"replacement": True} if c["vision"] not in current else {})} for c in receipt["checks"]}
+    walk = f"milestone-{milestone}:walkthrough"
+    submitted[walk] = {**receipt["walkthrough"], "requirements": ["tryItGuide"], "witness": witness}
+    return retained, submitted, [*(key for key in walks if key in retained), walk]
 
 
 def gaps(store, candidate, observations):

@@ -1433,20 +1433,22 @@ def approve(request):
 
 
 @pytest.mark.fast
-@pytest.mark.parametrize("milestone_count", [1, 2], ids=["hello-reopen", "cumulative-repair"])
-def test_lead_milestones_golden(tmp_path, monkeypatch, milestone_count):
+@pytest.mark.parametrize("arm", ["hello-reopen", "cumulative-repair", "unchanged", "proof-owner", "plan-owner"])
+def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
-    A builder returning done can ship a regression, or a resumed controller can switch modes.
-    Wave journeys never issue a milestone brief or retain a Lead check across builder sessions.
+    A replacement check can hide a regression, and a proof fault can send a builder back to work.
+    Wave journeys never exercise Lead's B-bound spec, durable witness or owner-specific repair.
     """
     from types import SimpleNamespace
 
     from seldon import frontdoor, lead
     from seldon.decisions import Waiting
 
-    dream = "Say ‘Hello, Ada!’ exactly. " + (
+    milestone_count = 1 if arm in ("hello-reopen", "proof-owner", "plan-owner") else 2
+    dream = "Run `python hello.py Ada` and say ‘Hello, Ada!’ exactly. Reject `python hello.py --help`. " + (
         "In a separate milestone add ‘Goodbye, Ada!’." if milestone_count == 2 else "")
+    dream += " Fixture: " + arm
     brief = ("Let the person choose the name and see the exact punctuation they asked for. "
              "Keep the first command working before offering the second. Give them a guide they can "
              "follow using Python already on this machine. Exercise the command, with its actual "
@@ -1466,23 +1468,21 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, milestone_count):
          "constraints": [], "sources": ["kickoff"]}
         for name, outcome in [("hello", "Hello, Ada!"), ("bye", "Goodbye, Ada!")][:milestone_count]
     ]
-    vision["quality"] = [{"handle": "exact", "criterion": "Use exact punctuation",
-                          "verification": "Compare actual CLI output", "constraints": [], "sources": ["kickoff"]}]
+    vision["quality"] = [{"handle": "exact", "criterion": "Reject an unsupported argument with useful usage",
+                          "verification": "Compare exit status and streams", "constraints": [], "sources": ["kickoff"]}]
     planned = []
-    for index, story in enumerate(vision["stories"], 1):
+    for story in vision["stories"]:
         name = story["handle"]
         expected = story["outcome"]
-        probe = ("import subprocess, sys\n"
-                 f"output = subprocess.check_output([sys.executable, '-B', '{name}.py', 'Ada'], "
-                 "text=True).strip()\n"
-                 f"assert output == {expected!r}, f'Expected {expected}, got {{output}}'\n"
-                 "print(output)")
-        check = {"purpose": f"Open {name} with Ada", "command": [sys.executable, "-B", "-c", probe],
-                 "expectedEvidence": story["outcome"]}
-        planned.append({"outcome": story["outcome"],
-                        "promises": [f"scopeIn:{name}"] + (["quality:exact"] if index == 1 else []),
-                        "spec": {"what": story["outcome"], "how": "Read a positional name in Python.",
-                                 "test": [check]}, "brief": brief + "\n\n" + story["outcome"]})
+        promises = [{"vision": f"scopeIn:{name}", "action": f"Pass Ada to {name}",
+                     "result": f"See {expected}"}]
+        if name == "hello":
+            promises.append({"vision": "quality:exact", "action": "Pass --help",
+                             "result": "Exit 2 with usage on stderr and empty stdout"})
+        planned.append({"outcome": expected, "promises": promises,
+                        "spec": {"what": expected, "how": "Read a positional name in Python.",
+                                 "test": "Observe the exact output, streams and exit status."},
+                        "brief": brief + "\n\n" + expected})
 
     native = tmp_path / "lead_native.py"
     native.write_text(r"""
@@ -1501,35 +1501,77 @@ assert "--ephemeral" not in args and 'sandbox_mode="danger-full-access"' in args
 thread = args[args.index("resume") + 1] if "resume" in args else str(uuid.uuid4())
 print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
 assert Path.cwd().resolve() == Path(facts["Write scope"]).resolve()
-planned, = facts["Approved spec"]["test"]
-expected = planned["expectedEvidence"]
+arm = facts["Owner words"]["Dream"].rsplit(" Fixture: ", 1)[1]
+assert "`python hello.py --help`" in facts["Owner words"]["Dream"]
+if arm == "plan-owner" and "positional" in facts["Approved spec"]["how"]:
+    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(
+        {"answer": {"outcome": "plan correction", "summary": "The approved design has an ambiguous parser."}})}}),
+          flush=True)
+    print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
+    raise SystemExit
+expected = facts["Approved spec"]["what"]
 name = "hello" if expected.startswith("Hello") else "bye"
 path = Path(f"checks/{name}.py")
 path.parent.mkdir(exist_ok=True)
-path.write_text(planned["command"][-1] + "\n", encoding="utf-8")
-check = {**planned, "command": [sys.executable, "-B", path.as_posix()]}
+probe = (
+    "import subprocess, sys\n"
+    f"output = subprocess.check_output([sys.executable, '{name}.py', 'Ada'], text=True).strip()\n"
+    f"assert output == {expected!r}, f'Expected {expected}, got {{output}}'\n"
+    "print(output)\n"
+)
+path.write_text(probe, encoding="utf-8")
+checks = [{"vision": f"scopeIn:{name}", "purpose": f"Run {name} with Ada",
+           "command": [sys.executable, "-B", path.as_posix()], "expectedEvidence": expected}]
 def implement(name, greeting):
-    Path(name + ".py").write_text("import sys\n" + f"print(f'{greeting}, {{sys.argv[1]}}!')\n",
-                                  encoding="utf-8")
+    Path(name + ".py").write_text(
+        "import sys\nif sys.argv[1:] == ['--help']:\n"
+        "    print('Usage: pass a name', file=sys.stderr)\n    sys.exit(2)\n"
+        + f"print(f'{greeting}, {{sys.argv[1]}}!')\n", encoding="utf-8")
 implement(name, expected.split(",")[0])
-if name == "bye":
-    earlier = Path("checks/hello.py")
-    if "resume" in args:
-        assert "Expected Hello, Ada!, got Broken, Ada!" in facts["Exact failure"]
+check_paths = [path.as_posix()]
+if name == "hello":
+    err = Path("checks/usage.py")
+    err.write_text(
+        "import subprocess, sys\n"
+        "r = subprocess.run([sys.executable, 'hello.py', '--help'], capture_output=True, text=True)\n"
+        "assert (r.returncode, r.stdout, r.stderr) == (2, '', 'Usage: pass a name\\n')\n"
+        "print('usage error asserted')\n", encoding="utf-8")
+    checks.append({"vision": "quality:exact", "purpose": "Exercise documented rejection",
+                   "command": [sys.executable, "-B", err.as_posix()], "expectedEvidence": "usage on stderr"})
+    check_paths.append(err.as_posix())
+    import base64
+    Path("preview.png").write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j6ioAAAAASUVORK5CYII="))
+elif "resume" in args:
+    assert "Expected Hello, Ada!, got Broken, Ada!" in facts["Exact failure"]
+    if arm != "unchanged":
         implement("hello", "Hello")
-        previous_probe = next(c["command"][-1] for c in facts["Previous checkpoint"]["checks"].values()
-                              if "-c" in c["command"])
-        earlier.write_text(previous_probe + "\n", encoding="utf-8")
-    else:
-        implement("hello", "Broken")
-        earlier.write_text("print('Hello, Ada!')\n", encoding="utf-8")
+else:
+    implement("hello", "Broken")
+    Path("checks/hello.py").write_text("print('Hello, Ada!')\n", encoding="utf-8")
+if name == "bye":
+    check_paths.append("checks/hello.py")
+    checks.append({"vision": "scopeIn:hello", "purpose": "Proposed replacement",
+                   "command": [sys.executable, "-B", "checks/hello.py"], "expectedEvidence": "Hello, Ada!"})
+    if "resume" in args and arm != "unchanged":
+        checks.pop()
+        check_paths.pop()
+        Path("checks/hello.py").write_text(
+            "import subprocess, sys\n"
+            "output = subprocess.check_output([sys.executable, 'hello.py', 'Ada'], text=True).strip()\n"
+            "assert output == 'Hello, Ada!', f'Expected Hello, Ada!, got {output}'\n"
+            "print(output)\n", encoding="utf-8")
 guide = Path("docs/try-it.md")
 guide.parent.mkdir(exist_ok=True)
-with guide.open("a", encoding="utf-8") as output:
-    if "resume" not in args:
+if "resume" not in args:
+    with guide.open("a", encoding="utf-8") as output:
         output.write(f"\nRun `python {name}.py Ada`. Expect {expected}\n")
-receipt = {"outcome": "done", "summary": f"A visitor can run {name}.", "checks": [check],
-           "checkPaths": [path.as_posix()], "walkthrough": check}
+        if name == "hello":
+            output.write("Run `python hello.py --help`. Expect usage on stderr and exit 2.\n")
+walk = dict(checks[-1] if name == "hello" else checks[0])
+walk.pop("vision")
+receipt = {"outcome": "done", "summary": f"A visitor can run {name}. Resumed: {'resume' in args}.",
+           "checks": checks, "checkPaths": check_paths, "walkthrough": walk}
 print(json.dumps({"type": "item.completed", "item": {"type": "agent_message",
                   "text": json.dumps({"answer": receipt})}}), flush=True)
 print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
@@ -1548,19 +1590,38 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             answer = draft
         elif kind == "MILESTONES":
             assert facts["Dream"] == dream
+            if facts.get("Exact failure"):
+                assert arm == "plan-owner"
+                assert facts["Exact failure"] == "The approved design has an ambiguous parser."
+                planned[0]["spec"]["how"] = "Parse one name and reject extra flags."
             answer = {"milestones": planned}
         elif kind == "REVIEW":
             assert facts["Milestones"] == planned
             answer = {"verdict": "adequate", "gaps": [], "why": "The plan exercises both commands as staged."}
+        elif kind == "DECIDE":
+            assert facts["User's words"] == "yes, please continue"
+            answer = {"choice": "Unclear", "why": "No change to the named input."}
         else:
             assert kind == "JUDGE"
             assert "hello.py" in facts["Code shape (measured)"]
+            assert "checks/kit/browser.cjs" in facts["Candidate file inventory"]
+            assert "preview.png" in facts["Candidate file inventory"] and "preview.png" not in facts["Product files"]
+            assert any(Path(image).read_bytes().startswith(b"\x89PNG") for image in question["images"])
+            green = [row for row in facts["Observations"] if row["purpose"] == "milestone"]
+            assert all(row["cleanCheckout"] and row["executionStarted"] and row["cleanupVerified"]
+                       and row["commit"] == facts["Candidate"] for row in green)
+            assert any(row["requirements"] == ["quality:exact"] and "usage error asserted" in row["stdout"]
+                       and row["exitCode"] == 0 and row["command"][-1] == "checks/usage.py" for row in green)
             assert {row["commit"] for row in facts["Observations"] if row["purpose"] == "milestone"} == {
                 facts["Candidate"]}
             assert any("Hello, Ada!" in row["stdout"] for row in facts["Observations"])
             answer = {"findings": {key: {"verdict": "satisfied", "gaps": [],
                                          "why": "The named CLI action and source support the subject."}
                                    for key in facts["Subjects"]}, "why": "Checked the delivered commands."}
+            if arm == "proof-owner":
+                answer["findings"]["tryItGuide"] = {"verdict": "uncertain",
+                    "why": "No runner observation of the guide lifecycle.",
+                    "neededFacts": ["Runner's documented-step evidence"]}
         return json.dumps({"answer": answer}), None
 
     monkeypatch.setattr(provider, "invoke", scripted)
@@ -1587,6 +1648,8 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
     try:
         assert run.run().state == "B"
         before = run.store.cursor()
+        assert all(isinstance(item["spec"]["test"], str) for item in
+                   run.store.read(before.leadPlan)["milestones"])
         assert before.B is None and gitwork.git(project, "rev-list", "--count", "HEAD") == "1"
         assert not list(run.store.records("lead_assignment"))
         assert not list((tmp_path / "calls").iterdir())
@@ -1597,21 +1660,48 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
     run = Run.reopen(project, provider, user)
     try:
         cursor = run.run()
+        if arm in ("unchanged", "proof-owner"):
+            request = cursor.decision
+            assert request and cursor.state == ("BUILD" if arm == "unchanged" else "PROVE")
+            question = run.store.read(request)
+            assert question["subject"]["inputOwner"] == ("Builder" if arm == "unchanged" else "Seldon")
+            assert question["ask"]["question"].startswith(question["subject"]["inputOwner"] + " owns")
+            assert len(run.store.records("call_session")) == (3 if arm == "unchanged" else 1)
+            work_count = len(run.store.records("call_session"))
+            run.close()
+            run = Run.reopen(project, provider, lambda _: "yes, please continue")
+            assert run.run().decision == request
+            assert len(run.store.records("call_session")) == work_count
+            assert not [q for _, _, q in run.store.records("question") if q["kind"] == "COACH"]
+            if arm == "unchanged":
+                first, repeated = [row for _, _, row in run.store.records("lead_failure")]
+                assert first["tree"] == repeated["tree"]
+                assert "Expected Hello, Ada!, got Broken, Ada!" in question["subject"]["failure"]
+                failed = [run.store.read(ref) for ref in first["evidence"]]
+                assert any(row["check"] == "milestone-1:scopeIn:hello" and row["exitCode"] != 0
+                           for row in failed)
+                assert any(row["check"] == "milestone-2:scopeIn:hello" and row["exitCode"] == 0
+                           for row in failed)
+            return
         assert cursor.state == "SCRIPTED_C", frontdoor.state(str(project))
-        assert displayed == ["A", "B", *(["CHECK-IN"] * milestone_count), "C"]
+        assert displayed == ["A", "B", *(["B"] if arm == "plan-owner" else []),
+                             *(["CHECK-IN"] * milestone_count), "C"]
         assert run.store.read(cursor.kickoff)["mode"] == "lead"
         assignments = run.store.records("lead_assignment")
-        assert len(assignments) == milestone_count
-        assert all(int(ref[1:]) > int(cursor.B[1:]) and row["B"] == cursor.B for ref, _, row in assignments)
+        assert len(assignments) == milestone_count + (arm == "plan-owner")
+        assert all(int(ref[1:]) > int(row["B"][1:]) for ref, _, row in assignments)
+        assert assignments[-1][2]["B"] == cursor.B
+        if arm == "plan-owner":
+            assert assignments[0][2]["B"] != cursor.B
         proofs = [row for _, _, row in run.store.records("milestone_proof")]
         kept = [row for row in questions.observed(run.store, cursor.finalObservations)
-                if row["command"] == planned[0]["spec"]["test"][0]["command"]]
+                if row["requirements"] == ["scopeIn:hello"]]
         assert len(kept) == 1 and kept[0]["commit"] == cursor.candidate
         assert kept[0]["stdout"].strip() == "Hello, Ada!"
         assert gitwork.git(project, "rev-list", "--count", "HEAD") == str(1 + milestone_count)
         sessions = [row["session"] for _, _, row in run.store.records("call_session")]
         if milestone_count == 1:
-            assert len(sessions) == 1
+            assert len(sessions) == (2 if arm == "plan-owner" else 1)
         else:
             assert len(sessions) == 3 and sessions[0] != sessions[1] == sessions[2]
             assert proofs[0]["commit"] != proofs[1]["commit"]
