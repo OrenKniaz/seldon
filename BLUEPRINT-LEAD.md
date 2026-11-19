@@ -1,6 +1,6 @@
 # Seldon Lead blueprint — one builder per milestone
 
-**Working draft v0.1 under the ratified Lead charter v1.0 · 19 November 2026.** Oren ratifies changes. The planning question is “What will the person be able to do after this milestone, and how will we see it still works at the next one?” The execution question belongs to the builder. A promise is an observable commitment in the accepted vision.
+**Working draft v0.2 (Oren 11-19: "planner carries semantics in schema.. he doesn't write code or tests": B binds each promise's action and observable result in words; the builder writes the checks after B; Seldon reviews, retains and replays them) · v0.1 under the ratified Lead charter v1.0 · 19 November 2026.** Oren ratifies changes. The planning question is “What will the person be able to do after this milestone, and how will we see it still works at the next one?” The execution question belongs to the builder. A promise is an observable commitment in the accepted vision.
 
 ## 1. One plan and its records
 
