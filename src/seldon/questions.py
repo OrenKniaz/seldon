@@ -1,6 +1,7 @@
 """C3/C4/I10; R2/R8/R12: human-readable briefs bounded by one unit or one feature."""
 
 import json
+import re
 
 from . import architecture, fixups, gitwork, observations, plan
 from .answers import Mismatch
@@ -230,9 +231,15 @@ def check_align_round(answer, sources):
     constraints = architecture.index(vision["constraints"], "vision.constraints")
     for constraint in constraints.values():
         source = constraint["source"]
-        if source not in sources or constraint["value"] not in sources[source]:
-            raise Mismatch("vision.constraints", f"Constraint {constraint['value']!r} is absent "
-                           f"from source {source!r}. Copy an exact required value from the supplied Sources.")
+        words, value = sources.get(source, ""), constraint["value"]
+        if value in words:
+            continue
+        pattern = r"\s+".join(map(re.escape, value.split()))
+        match = re.search(pattern, words) if pattern else None
+        if not match:
+            raise Mismatch("vision.constraints", f"Constraint {value!r} is absent from source "
+                           f"{source!r}. Copy an exact required value from the supplied Sources.")
+        constraint["value"] = match.group()
     goals = architecture.commitments(vision)
     for entry in [*goals.values(), *vision["scopeOut"]]:
         if unknown := set(entry.get("constraints", [])) - constraints.keys():

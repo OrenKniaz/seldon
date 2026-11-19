@@ -1,0 +1,751 @@
+{
+  "kickoff": "Build Quiet Bench, a noise-cancelling test bench that runs on this PC with no audio hardware. Python 3.12 standard library plus Node 20\nfor the page checks; no third-party runtime packages, no network. I can generate a noise signal (tones, band noise) or import a WAV\nfile; the bench simulates the acoustic path from the noise source to the ear, runs an adaptive canceller (LMS family) against it and\ntells me how much was cancelled in each frequency band. Every session is saved on a small local storage server\n(`python server.py --port PORT --data DIR`) with its settings and results, and a web page on that server lets me start a run, browse\nsaved sessions, reload one and compare two. A command line (`python bench.py run|list|show|export`) does the same without the page.\nA limiter must hold the output inside a safe level when the filter diverges, and a stop switch ends a run at once.\n\nAudience and preferences:\n{\"audience\": \"an audio engineer trying ideas before buying hardware\", \"care\": \"numbers I can trust and a bench that never blasts\", \"tone\": \"calm, exact, instrument-like\", \"platform\": \"local Windows, Python 3.12 stdlib, modern desktop browser\", \"defaults\": \"no accounts, network, deployment or paid assets; ask before scope changes\"}\n\nShared black-box interface:\n{\"note\": \"Black-box fight interface, supplied equally to both contenders; message above is verbatim. No extra runtime dependencies.\", \"cli\": \"bench.py run --data DIR --settings JSON; list --data DIR; show ID --data DIR; export ID --data DIR. run/show emit session JSON; list emits an array; export emits CSV.\", \"api\": \"POST /api/runs with settings -> session (asynchronous allowed); GET /api/sessions -> array; GET /api/sessions/ID -> session; POST /api/runs/ID/stop; GET /api/compare?a=ID&b=ID -> array of bands with low, high, delta_db = b minus a.\", \"settings\": {\"sample_rate\": 8000, \"samples\": 8192, \"signal\": {\"kind\": \"tones\", \"frequencies\": [500, 1500], \"amplitude\": 0.2}, \"path\": [0.8, 0, 0.2], \"filter\": \"lms\", \"step_size\": 0.05, \"limit\": 0.8, \"block_size\": 128, \"bands\": [[0, 1000], [1000, 4000]]}, \"wav\": \"signal = {kind: wav, path: absolute WAV path}; 16-bit mono, same sample rate.\", \"session\": \"id, settings, status (running/completed/stopped), limited (boolean), processed_samples, bands [{low, high, attenuation_db}], desired/residual/output sample arrays (before cancellation, error, limited anti-noise). Preserve this JSON as wave-1 legacy input.\", \"page\": \"Accessible labelled textarea[name=settings] (JSON), Start run button, [data-session-id=ID] saved session buttons, select[name=compare-a], select[name=compare-b], Compare button and [data-comparison] result. Show session id and band numbers. docs/try-it.md gives actual start/stop and CLI commands.\"}",
+  "replanGap": "Wave 1 check 1.bench.1:check:2 failed on the integrated product. Expected: a unit of this wave owns the work it needs; got: its writer hands that work to none, which no unit of this wave holds. Give the work an owner in this wave: bring the commitment that owns it into this wave so a unit builds it. Writer's report and failure: The runner has Node 25.8.0, not the required Node 20. The runner owner needs to supply a Node 20 executable on PATH so Seldon can rerun the existing page check.\n[{'check': '1.bench.1:check:2', 'purpose': 'final', 'command': ['node', 'checks/bench/page.cjs'], 'executionStarted': True, 'timedOut': False, 'cleanupVerified': True, 'exitCode': 1, 'stdout': '', 'stderr': 'Error: Node 20 is required for page checks\\n    at C:\\\\seldon\\\\tests\\\\m1\\\\qbu-cs-7be4158-c01\\\\workers\\\\worker-71e51556d9cf45c29c8bb01b66d3dcd4\\\\checks\\\\bench\\\\page.cjs:3:70\\n    at Object.<anonymous> (C:\\\\seldon\\\\tests\\\\m1\\\\qbu-cs-7be4158-c01\\\\workers\\\\worker-71e51556d9cf45c29c8bb01b66d3dcd4\\\\checks\\\\bench\\\\page.cjs:13:74)\\n    at Module._compile (node:internal/modules/cjs/loader:1831:14)\\n    at Object..js (node:internal/modules/cjs/loader:1971:10)\\n    at Module.load (node:internal/modules/cjs/loader:1552:32)\\n    at Module._load (node:internal/modules/cjs/loader:1354:12)\\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\\n    at node:internal/main/run_main_module:33:47\\n'}]",
+  "r11": {
+    "changed": "Defined Quiet Bench as a local simulation instrument for choosing which cancellation ideas merit further investigation, with bounded output, traceable saved experiments, and honest comparisons rather than claims about hardware performance.",
+    "questions": [],
+    "recommendation": "done",
+    "vision": {
+      "constraints": [
+        {
+          "handle": "runtime",
+          "meaning": "Required implementation and page-check environment; the available Node version differs from the requested version.",
+          "source": "kickoff",
+          "value": "Python 3.12 standard library plus Node 20 for the page checks; no third-party runtime packages, no network."
+        },
+        {
+          "handle": "server",
+          "meaning": "Required local storage server invocation.",
+          "source": "kickoff",
+          "value": "python server.py --port PORT --data DIR"
+        },
+        {
+          "handle": "interfaces",
+          "meaning": "Required command-line interface and output formats.",
+          "source": "kickoff",
+          "value": "bench.py run --data DIR --settings JSON; list --data DIR; show ID --data DIR; export ID --data DIR. run/show emit session JSON; list emits an array; export emits CSV."
+        },
+        {
+          "handle": "api",
+          "meaning": "Required local API and comparison sign convention.",
+          "source": "kickoff",
+          "value": "POST /api/runs with settings -> session (asynchronous allowed); GET /api/sessions -> array; GET /api/sessions/ID -> session; POST /api/runs/ID/stop; GET /api/compare?a=ID&b=ID -> array of bands with low, high, delta_db = b minus a."
+        },
+        {
+          "handle": "example-settings",
+          "meaning": "Supplied interoperable settings example, not an additional operating limit.",
+          "source": "kickoff",
+          "value": "{\"sample_rate\": 8000, \"samples\": 8192, \"signal\": {\"kind\": \"tones\", \"frequencies\": [500, 1500], \"amplitude\": 0.2}, \"path\": [0.8, 0, 0.2], \"filter\": \"lms\", \"step_size\": 0.05, \"limit\": 0.8, \"block_size\": 128, \"bands\": [[0, 1000], [1000, 4000]]}"
+        },
+        {
+          "handle": "wav-format",
+          "meaning": "Required WAV input representation and supported format.",
+          "source": "kickoff",
+          "value": "signal = {kind: wav, path: absolute WAV path}; 16-bit mono, same sample rate."
+        },
+        {
+          "handle": "session-contract",
+          "meaning": "Required persisted and returned session representation, including legacy input compatibility.",
+          "source": "kickoff",
+          "value": "id, settings, status (running/completed/stopped), limited (boolean), processed_samples, bands [{low, high, attenuation_db}], desired/residual/output sample arrays (before cancellation, error, limited anti-noise). Preserve this JSON as wave-1 legacy input."
+        },
+        {
+          "handle": "page-contract",
+          "meaning": "Required accessible page controls, visible results, and practical documentation.",
+          "source": "kickoff",
+          "value": "Accessible labelled textarea[name=settings] (JSON), Start run button, [data-session-id=ID] saved session buttons, select[name=compare-a], select[name=compare-b], Compare button and [data-comparison] result. Show session id and band numbers. docs/try-it.md gives actual start/stop and CLI commands."
+        }
+      ],
+      "quality": [
+        {
+          "constraints": [
+            "runtime",
+            "page-contract"
+          ],
+          "criterion": "The page has a calm, exact instrument-panel direction: high-contrast ink and restrained signal accents, deliberate offline typography, aligned numerical readouts, and generous spacing.",
+          "handle": "instrument-craft",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Open the page in a desktop browser; inspect hierarchy, contrast, keyboard-labelled controls, requested assets, and the browser console."
+        },
+        {
+          "constraints": [
+            "example-settings",
+            "wav-format"
+          ],
+          "criterion": "Band results state their power method, units, sign convention, and simulation limitations; undefined results and incompatible comparisons are not presented as meaningful numbers.",
+          "handle": "measurement-trust",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Run known signals and a no-cancellation baseline, independently check band attenuation, and inspect zero-power and mismatched-band cases and the displayed explanation."
+        },
+        {
+          "constraints": [
+            "session-contract",
+            "api"
+          ],
+          "criterion": "The limiter bounds every simulated output sample, activation is visible, and stopping an active run prevents further processing and preserves a truthful stopped session.",
+          "handle": "bounded-and-stoppable",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Run a divergent configuration and inspect output samples and limiter status; stop a long run and verify its persisted status and processed count."
+        },
+        {
+          "constraints": [
+            "runtime",
+            "server",
+            "interfaces",
+            "page-contract"
+          ],
+          "criterion": "The bench works locally without external services, gives actionable errors, and provides instructions for repeating a run.",
+          "handle": "local-operability",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Follow the documented server and CLI commands on Windows; exercise page and CLI workflows, keyboard operation, and errors. Node 20 page-check compatibility remains unverified because the supplied inventory reports Node 25."
+        }
+      ],
+      "scopeOut": [
+        {
+          "outcome": "Audio playback or capture, hardware calibration, and claims of measured real-world noise reduction.",
+          "sources": [
+            "kickoff"
+          ]
+        },
+        {
+          "outcome": "Accounts, deployment, external services, paid assets, and third-party runtime packages.",
+          "sources": [
+            "kickoff"
+          ]
+        }
+      ],
+      "size": "tiny",
+      "sizeWhy": "The closest comparable work is the specified standard-library signal-processing bench with a page, CLI, and local storage server: one capable plain agent should need minutes in one focused session to build and verify the bounded scope. Hardware integration or deployed multi-user operation would make it bigger. The requested Node 20 page check cannot be verified from the supplied Node 25 inventory alone.",
+      "stories": [
+        {
+          "constraints": [
+            "runtime",
+            "example-settings",
+            "wav-format"
+          ],
+          "feature": "Simulate and measure",
+          "handle": "run-bench",
+          "outcome": "The engineer can test tones, band noise, or an eligible WAV through a simulated acoustic path and LMS-family canceller, then inspect per-band attenuation and signal arrays.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, I choose a signal and simulation settings to judge whether an idea is promising before buying hardware."
+        },
+        {
+          "constraints": [
+            "session-contract",
+            "api"
+          ],
+          "feature": "Limit and stop",
+          "handle": "safety",
+          "outcome": "The simulated anti-noise is bounded even on divergence; the engineer can see limiter activation and stop an active run.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, I need an immediately controllable bench that does not produce unbounded simulated output."
+        },
+        {
+          "constraints": [
+            "server",
+            "session-contract",
+            "api"
+          ],
+          "feature": "Save, reload, and compare",
+          "handle": "repeat-and-compare",
+          "outcome": "Every session retains its settings and results locally; the engineer can reload it tomorrow and compare compatible bands with the specified signed deltas.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, I revisit a result and decide whether a changed setup improved simulated cancellation without losing its provenance."
+        },
+        {
+          "constraints": [
+            "interfaces",
+            "api",
+            "page-contract",
+            "session-contract"
+          ],
+          "feature": "Page and command line",
+          "handle": "operate-and-export",
+          "outcome": "The engineer can run, browse, inspect, compare, and export using the applicable local interfaces, documented commands, and machine-readable contracts.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, I use a browser for exploration or the command line for repeatable local workflows."
+        }
+      ],
+      "understanding": "Quiet Bench is an offline simulation and evidence workbench, not an audio device. The engineer chooses experiments and decides whether simulated improvement warrants further investigation. Acoustic-model assumptions, band-power conventions, limiter activation, incompatible comparisons, and confusing simulation with hardware measurements could mislead that decision. Saved settings, results, sample arrays, and documented commands let the engineer revisit and repeat the experiment tomorrow.",
+      "users": [
+        "An audio engineer exploring noise-cancellation ideas before buying hardware."
+      ]
+    },
+    "why": "The supplied interface and defaults settle the product without a material product choice. The Node-version mismatch is a verification limitation, not a reason to expand scope."
+  },
+  "r26": {
+    "changed": "Quiet Bench is framed as a local simulation instrument for choosing and revisiting cancellation ideas, with explicit safety and measurement limits. The runtime constraint now preserves the Dream’s required line break exactly.",
+    "questions": [],
+    "recommendation": "done",
+    "vision": {
+      "constraints": [
+        {
+          "handle": "runtime",
+          "meaning": "Required implementation and page-check environment; local server communication must remain on this PC.",
+          "source": "kickoff",
+          "value": "Python 3.12 standard library plus Node 20\nfor the page checks; no third-party runtime packages, no network."
+        },
+        {
+          "handle": "legacy",
+          "meaning": "Accept the specified session JSON as wave-1 legacy input.",
+          "source": "kickoff",
+          "value": "Preserve this JSON as wave-1 legacy input."
+        }
+      ],
+      "quality": [
+        {
+          "constraints": [],
+          "criterion": "Measurements distinguish simulated band attenuation from real-world acoustic performance, show the band boundaries, and make limited or stopped runs apparent so the engineer is not misled by an incomplete or clipped result.",
+          "handle": "trust",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Run known tone and path cases, inspect band results and compare direction, then inspect a limited run and a stopped run in both saved results and the page."
+        },
+        {
+          "constraints": [],
+          "criterion": "The anti-noise output stays within the configured limit even on divergence, and stopping a running job promptly ends processing and preserves its stopped status and processed sample count.",
+          "handle": "safety",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Run a deliberately divergent configuration and inspect every output sample; stop a sufficiently long run through the page or API and check the persisted session."
+        },
+        {
+          "constraints": [
+            "runtime"
+          ],
+          "criterion": "The page feels like a calm, exact measuring instrument: a high-contrast dark work surface, precise offline typography, restrained signal-color accents, and clear, accessible controls rather than decorative cards.",
+          "handle": "visual",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Open the served page in a modern desktop browser, inspect its hierarchy and contrast, operate the labelled controls by keyboard, and check for a clean console."
+        },
+        {
+          "constraints": [
+            "runtime",
+            "legacy"
+          ],
+          "criterion": "The page, CLI, storage and API agree on saved sessions and comparisons, including legacy input; invalid settings or incompatible WAV files produce clear errors rather than misleading results.",
+          "handle": "integration",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Create a session through the real run path, reload it through the page and CLI, export it, compare two sessions through the API and page, and exercise legacy input and an invalid WAV."
+        }
+      ],
+      "scopeOut": [
+        {
+          "outcome": "Audio hardware control or claims that simulation predicts a specific real-world cancellation result.",
+          "sources": [
+            "kickoff"
+          ]
+        },
+        {
+          "outcome": "Accounts, deployment, paid assets, third-party runtime packages, and external network services.",
+          "sources": [
+            "kickoff"
+          ]
+        }
+      ],
+      "size": "tiny",
+      "sizeWhy": "Closest comparable work is the specified standard-library signal-processing bench with a page, CLI and local storage server: minutes in one session for one capable plain agent under the supplied sizing convention. Real hardware, deployment, or a multi-service product would make it bigger. Python 3.12 is available, but the inventory reports Node 25 rather than the required Node 20, so verification with the specified page-check runtime remains unproven without access to Node 20.",
+      "stories": [
+        {
+          "constraints": [
+            "runtime"
+          ],
+          "feature": "Simulate and measure cancellation",
+          "handle": "simulate",
+          "outcome": "The engineer can generate tones or band noise or import the specified WAV format, simulate the acoustic path and LMS-family cancellation, and judge attenuation by frequency band without buying hardware.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, I want to run a controlled cancellation experiment so I can decide which ideas merit further investigation."
+        },
+        {
+          "constraints": [
+            "runtime"
+          ],
+          "feature": "Limit and stop safely",
+          "handle": "safety-control",
+          "outcome": "The configured limiter bounds anti-noise output, while an accessible stop switch ends a run promptly and makes its incomplete status visible.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an engineer, I want divergence contained and a run stoppable so I can experiment without mistaking an unsafe or incomplete run for a normal result."
+        },
+        {
+          "constraints": [
+            "runtime",
+            "legacy"
+          ],
+          "feature": "Save, reload and compare",
+          "handle": "sessions",
+          "outcome": "Each session retains settings, status, processed count, limiter state, band results and sample arrays; the engineer can reload it tomorrow and compare two sessions with the specified signed band difference.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an engineer, I want durable, inspectable sessions and comparisons so I can repeat and assess a decision later."
+        },
+        {
+          "constraints": [
+            "runtime"
+          ],
+          "feature": "Page and command-line access",
+          "handle": "interfaces",
+          "outcome": "The local server, accessible page, CLI, API and CSV export implement the supplied black-box contracts, with actual start, stop and CLI commands documented.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an engineer, I want to operate the same bench interactively or from the command line so I can use the workflow that fits the experiment."
+        }
+      ],
+      "understanding": "Put a self-contained simulation bench in front of an audio engineer: they choose signal and filter settings, use bounded output and band measurements to decide which ideas to investigate, and retain enough settings and results to repeat and compare the experiment. Simulation, limiting and early stopping can all affect interpretation; none establishes real-hardware performance.",
+      "users": [
+        "Audio engineer evaluating cancellation ideas before buying hardware"
+      ]
+    },
+    "why": "The stated interfaces, safety behavior and local workflow establish a coherent product without a material unresolved product choice. The required Node version is an execution and verification constraint, not a reason to change the product."
+  },
+  "r38": {
+    "areas": [
+      {
+        "commitments": [
+          "scopeIn:simulate",
+          "scopeIn:safety-control",
+          "scopeIn:sessions",
+          "scopeIn:interfaces",
+          "quality:trust",
+          "quality:safety",
+          "quality:visual",
+          "quality:integration"
+        ],
+        "handle": "bench",
+        "responsibility": "Deliver and verify the complete local simulation bench, its safety controls, durable sessions, interfaces and documentation.",
+        "scope": [
+          "bench.py",
+          "server.py",
+          "quiet_bench/**",
+          "web/**",
+          "checks/bench/**"
+        ]
+      }
+    ],
+    "contracts": [],
+    "decisions": [
+      {
+        "areas": [
+          "bench"
+        ],
+        "choice": "Use one builder and one wave for the complete bench, including wave-1 legacy session input.",
+        "origin": "architecture",
+        "reason": "The accepted tiny effort fits one session; a split would add coordination without a named independent responsibility."
+      },
+      {
+        "areas": [
+          "bench"
+        ],
+        "choice": "Preserve the runtime constraint exactly: Python 3.12 standard library plus Node 20\nfor the page checks; no third-party runtime packages, no network.",
+        "origin": "user",
+        "reason": "The source text and its line break are explicitly required; server communication remains local to this PC."
+      }
+    ],
+    "waves": [
+      {
+        "commitments": [
+          "scopeIn:simulate",
+          "scopeIn:safety-control",
+          "scopeIn:sessions",
+          "scopeIn:interfaces",
+          "quality:trust",
+          "quality:safety",
+          "quality:visual",
+          "quality:integration"
+        ],
+        "goal": "Deliver a runnable local bench from signal input through bounded simulation, saved and reloadable results, comparison, accessible page and CLI; verify the specified integration, safety, measurement and visual checks, including legacy JSON and invalid WAV handling."
+      }
+    ],
+    "why": "One scoped owner can deliver the accepted end-to-end outcome without cross-area agreements. Node 20 page-check verification remains unproven in the reported environment and must be reported honestly if unavailable; no installation or provider launch is authorized by this planning call."
+  },
+  "r44": {
+    "edits": [
+      {
+        "kind": "feature",
+        "targetHandle": "new:simulation",
+        "typedBody": {
+          "acceptance": "An engineer can run a simulated cancellation experiment and inspect its frequency-band attenuation without audio hardware.",
+          "commitments": [
+            "scopeIn:simulate",
+            "quality:trust"
+          ],
+          "story": "As an audio engineer, I want controlled simulated cancellation measurements so I can assess ideas before buying hardware."
+        }
+      },
+      {
+        "kind": "feature",
+        "targetHandle": "new:safety",
+        "typedBody": {
+          "acceptance": "The bench bounds anti-noise output and makes promptly stopped or limited runs apparent.",
+          "commitments": [
+            "scopeIn:safety-control",
+            "quality:safety",
+            "quality:trust"
+          ],
+          "story": "As an engineer, I want divergence contained and runs stoppable so incomplete or limited results are not mistaken for normal ones."
+        }
+      },
+      {
+        "kind": "feature",
+        "targetHandle": "new:sessions",
+        "typedBody": {
+          "acceptance": "Sessions can be saved, reloaded, exported and compared consistently across the bench, including the specified legacy input.",
+          "commitments": [
+            "scopeIn:sessions",
+            "quality:integration"
+          ],
+          "story": "As an engineer, I want durable, inspectable results and comparisons so I can assess experiments later."
+        }
+      },
+      {
+        "kind": "feature",
+        "targetHandle": "new:interfaces",
+        "typedBody": {
+          "acceptance": "The local server, accessible page, CLI, API and documented walkthrough operate the same bench using the supplied contracts.",
+          "commitments": [
+            "scopeIn:interfaces",
+            "quality:visual",
+            "quality:integration"
+          ],
+          "story": "As an engineer, I want to operate the bench interactively or from the command line."
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:runtime",
+        "typedBody": {
+          "acceptance": "The bench and its page checks use the exact constraint \"Python 3.12 standard library plus Node 20\nfor the page checks; no third-party runtime packages, no network.\", with server communication confined to this PC.",
+          "features": [
+            "new:simulation",
+            "new:safety",
+            "new:sessions",
+            "new:interfaces"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:measurement",
+        "typedBody": {
+          "acceptance": "A run accepts generated tones or band noise or a 16-bit mono WAV at the configured sample rate, simulates the configured acoustic path and LMS-family canceller, and reports simulated attenuation with each frequency band's boundaries without claiming real-world performance.",
+          "features": [
+            "new:simulation"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:bounded-stop",
+        "typedBody": {
+          "acceptance": "Every anti-noise output sample remains within the configured limit even during divergence, and an accessible stop control promptly ends a running job while preserving its stopped status and processed sample count.",
+          "features": [
+            "new:safety"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:session-data",
+        "typedBody": {
+          "acceptance": "Each saved session retains its ID, settings, running, completed or stopped status, limiter flag, processed sample count, band results, and desired, residual and limited output arrays, and the specified session JSON is accepted as wave-1 legacy input.",
+          "features": [
+            "new:sessions"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:comparison",
+        "typedBody": {
+          "acceptance": "Reloaded sessions agree across storage, CLI, API and page, and comparisons report matching band boundaries and attenuation differences as session B minus session A.",
+          "features": [
+            "new:sessions",
+            "new:interfaces"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:contracts",
+        "typedBody": {
+          "acceptance": "The local server command, run/list/show/export CLI, run/session/stop/compare API, JSON and CSV outputs, and labelled page controls implement the supplied black-box interface and clearly report invalid settings or incompatible WAV files.",
+          "features": [
+            "new:interfaces"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:page",
+        "typedBody": {
+          "acceptance": "The keyboard-accessible page presents session IDs, band numbers and limited or stopped status on a high-contrast dark instrument-like surface with offline typography and restrained signal colors.",
+          "features": [
+            "new:interfaces",
+            "new:safety",
+            "new:simulation"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:walkthrough",
+        "typedBody": {
+          "acceptance": "The try-it guide provides runnable local server start and stop instructions and CLI commands that demonstrate the actual bench workflow.",
+          "features": [
+            "new:interfaces"
+          ]
+        }
+      }
+    ],
+    "units": [
+      {
+        "dependencies": [],
+        "instructions": "Build the complete bench and its try-it guide as one coherent local product, without audio hardware or external services. Demonstrate the real run-to-storage-to-page and CLI paths, export and signed comparison, legacy input and invalid WAV handling; check known tone and path measurements, divergent limiting, a persisted stopped run, and the accessible served page. Preserve the supplied interface and distinguish simulation from real-world performance. Node 20 is required for page checks; if it is unavailable, report that verification gap rather than installing it or claiming it passed.",
+        "requirements": [
+          "new:runtime",
+          "new:measurement",
+          "new:bounded-stop",
+          "new:session-data",
+          "new:comparison",
+          "new:contracts",
+          "new:page",
+          "new:walkthrough"
+        ],
+        "scope": [
+          "bench.py",
+          "server.py",
+          "quiet_bench/**",
+          "web/**",
+          "checks/bench/**",
+          "docs/try-it.md"
+        ]
+      }
+    ],
+    "verdict": "planned",
+    "why": "The accepted wave assigns the complete bench to one builder; its simulation, persistence and interfaces form one integrated session-sized outcome, and the requested guide is included explicitly."
+  },
+  "r133": {
+    "areas": [
+      {
+        "commitments": [
+          "scopeIn:simulate",
+          "scopeIn:safety-control",
+          "scopeIn:sessions",
+          "scopeIn:interfaces",
+          "quality:trust",
+          "quality:safety",
+          "quality:visual",
+          "quality:integration"
+        ],
+        "handle": "bench",
+        "responsibility": "Retain ownership of the local bench and its checks, including rerunning the existing page check with Node 20 once the runner owner provides that executable on PATH.",
+        "scope": [
+          "bench.py",
+          "server.py",
+          "quiet_bench/**",
+          "web/**",
+          "checks/bench/**"
+        ]
+      }
+    ],
+    "contracts": [],
+    "decisions": [
+      {
+        "areas": [
+          "bench"
+        ],
+        "choice": "Use one builder and one wave for the complete bench, including wave-1 legacy session input.",
+        "origin": "architecture",
+        "reason": "The accepted tiny effort fits one session; a split would add coordination without a named independent responsibility."
+      },
+      {
+        "areas": [
+          "bench"
+        ],
+        "choice": "Preserve the runtime constraint exactly: Python 3.12 standard library plus Node 20\nfor the page checks; no third-party runtime packages, no network.",
+        "origin": "user",
+        "reason": "The source text and its line break are explicitly required; server communication remains local to this PC."
+      },
+      {
+        "areas": [
+          "bench"
+        ],
+        "choice": "Keep the page check and its Node 20 requirement in wave 1; do not substitute Node 25 or change the runtime constraint.",
+        "origin": "architecture",
+        "reason": "The existing check failed before exercising the page because the runner has Node 25. Supplying Node 20 on the runner PATH is an external prerequisite: installs and global changes are prohibited in this call."
+      }
+    ],
+    "waves": [
+      {
+        "commitments": [
+          "scopeIn:simulate",
+          "scopeIn:safety-control",
+          "scopeIn:sessions",
+          "scopeIn:interfaces",
+          "quality:trust",
+          "quality:safety",
+          "quality:visual",
+          "quality:integration"
+        ],
+        "goal": "Deliver a runnable local bench from signal input through bounded simulation, saved and reloadable results, comparison, accessible page and CLI; verify the specified integration, safety, measurement and visual checks, including legacy JSON and invalid WAV handling."
+      }
+    ],
+    "why": "All supplied commitments, including page verification, already belong to bench in wave 1, so moving a commitment cannot supply the missing runtime. The last proven result is that the page check did not run under its required runtime. The next action is for the runner owner to provide Node 20 on PATH, after which the existing check can be rerun. The accepted scope and runtime constraint remain unchanged."
+  },
+  "r139": {
+    "edits": [
+      {
+        "kind": "feature",
+        "targetHandle": "new:simulation",
+        "typedBody": {
+          "acceptance": "An engineer can run a bounded simulated cancellation experiment and inspect clearly identified band measurements and run status.",
+          "commitments": [
+            "scopeIn:simulate",
+            "scopeIn:safety-control",
+            "quality:trust",
+            "quality:safety"
+          ],
+          "story": "As an audio engineer, I want to simulate and safely stop cancellation experiments so I can assess ideas without mistaking incomplete or simulated results for real-world performance."
+        }
+      },
+      {
+        "kind": "feature",
+        "targetHandle": "new:session-workflow",
+        "typedBody": {
+          "acceptance": "An engineer can save, reload, export and compare the same sessions through the local interfaces, including sessions in the specified legacy format.",
+          "commitments": [
+            "scopeIn:sessions",
+            "scopeIn:interfaces",
+            "quality:integration",
+            "quality:visual"
+          ],
+          "story": "As an audio engineer, I want an accessible local bench and durable session workflow so I can inspect and compare experiments later."
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:runtime",
+        "typedBody": {
+          "acceptance": "The bench and its page checks use \"Python 3.12 standard library plus Node 20\nfor the page checks; no third-party runtime packages, no network.\", with server communication confined to this PC.",
+          "features": [
+            "new:simulation",
+            "new:session-workflow"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:measurement",
+        "typedBody": {
+          "acceptance": "A run accepts generated tones or band noise or a compatible 16-bit mono WAV, simulates the configured acoustic path and LMS-family canceller, and reports simulated attenuation with band boundaries without claiming real-world performance.",
+          "features": [
+            "new:simulation"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:safety",
+        "typedBody": {
+          "acceptance": "Every anti-noise sample stays within the configured limit even during divergence, and an accessible stop control promptly ends a running job while preserving its stopped status and processed sample count.",
+          "features": [
+            "new:simulation"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:persistence",
+        "typedBody": {
+          "acceptance": "Saved sessions retain the specified ID, settings, status, limiter flag, processed count, band results and sample arrays, and the specified session JSON is accepted as wave-1 legacy input.",
+          "features": [
+            "new:session-workflow"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:interfaces",
+        "typedBody": {
+          "acceptance": "The local server, CLI, API, JSON and CSV outputs implement the supplied contracts, agree on reloaded sessions, report comparison bands as B minus A, and clearly reject invalid settings or incompatible WAV files.",
+          "features": [
+            "new:session-workflow"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:page",
+        "typedBody": {
+          "acceptance": "The keyboard-accessible page implements the supplied controls and displays session IDs, band boundaries and numbers, and limited or stopped status on a high-contrast dark instrument-like surface with offline typography and restrained signal colors.",
+          "features": [
+            "new:simulation",
+            "new:session-workflow"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:walkthrough",
+        "typedBody": {
+          "acceptance": "The try-it guide and runnable walkthrough demonstrate the actual local server start and stop instructions and CLI session workflow.",
+          "features": [
+            "new:session-workflow"
+          ]
+        }
+      }
+    ],
+    "units": [
+      {
+        "dependencies": [],
+        "instructions": "Own the complete current-wave bench and its checks, preserving existing working behavior and the supplied black-box contracts. Prove the real run-to-storage-to-page and CLI workflow, legacy input, comparison direction, invalid WAV handling, bounded divergence and persisted stopping; inspect the accessible page and rerun its existing served-page check with Node 20 when the runner owner supplies it on PATH. Include the try-it guide and its runnable walkthrough; report the Node 20 check as unperformed if the prerequisite is unavailable, without installing or changing the runner.",
+        "requirements": [
+          "new:runtime",
+          "new:measurement",
+          "new:safety",
+          "new:persistence",
+          "new:interfaces",
+          "new:page",
+          "new:walkthrough"
+        ],
+        "scope": [
+          "bench.py",
+          "server.py",
+          "quiet_bench/**",
+          "web/**",
+          "checks/bench/**",
+          "docs/try-it.md"
+        ]
+      }
+    ],
+    "verdict": "planned",
+    "why": "The accepted complete bench fits one session and has no independent ownership seam; Node 20 on PATH is an external verification prerequisite, not a reason to split the product work."
+  }
+}

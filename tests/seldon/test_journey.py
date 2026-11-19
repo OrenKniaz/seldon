@@ -479,6 +479,122 @@ def test_quietbench_skeleton_commitments_journey(tmp_path, scalar_align, repeat)
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("case", ["align", "redetail", "link", "unlinked"])
+def test_recorded_quiet_bench_planning_journey(tmp_path, monkeypatch, case):
+    """A wrapped literal and a changed DETAIL edit order must reach execution.
+
+    The recorded wave-one replan overwrote live trace links by edit position. Fresh
+    DETAIL journeys never merge those links. A genuinely unlinked feature instead
+    needs a useful correction, followed by planner and user recovery if it repeats.
+    """
+    from dataclasses import replace
+
+    from seldon import decisions, features, recovery, schema
+    from seldon.store import UnitRow
+
+    fixture = Path(__file__).with_name("fixtures") / "quietbench-c01-planning.json"
+    replies = json.loads(fixture.read_text(encoding="utf-8"))
+    monkeypatch.setattr(features, "enabled", {"growAlign", "answerRepair", "sizeFirst"}.__contains__)
+    monkeypatch.setattr(features, "planning_setup", lambda: {"sizeFirst": True, "split": "auto"})
+    parked, corrections, coached = [], [], []
+    previous, commitments = None, []
+
+    def provider(q):
+        strict_schema(q["schema"])
+        kind, facts = q["kind"], q["facts"]
+        if kind == "ALIGN":
+            answer = replies["r11" if case == "align" else "r26"]
+        elif kind == "ARCHITECT":
+            answer = deepcopy(replies["r133" if previous else "r38"])
+            if case == "align":
+                literal = facts["Approved vision"]["constraints"][0]["value"]
+                assert literal in replies["kickoff"] and "Node 20\nfor the page checks" in literal
+                commitments[:] = facts["Commitment handles"]
+                answer["areas"][0]["commitments"] = answer["waves"][0]["commitments"] = commitments
+        elif kind == "DETAIL":
+            answer = deepcopy(replies["r139" if previous else "r44"])
+            if case == "align":
+                for index, edit in enumerate(e for e in answer["edits"] if e["kind"] == "feature"):
+                    edit["typedBody"]["commitments"] = commitments[index::4]
+            if case in ("unlinked", "link"):
+                handle = "new:unlinked-simulation"
+                feature = {**answer["edits"][0], "targetHandle": handle}
+                answer["edits"].append(feature)
+                if case == "link" and "Exact corrections" in facts:
+                    requirement = next(e for e in answer["edits"] if e["kind"] == "requirement")
+                    requirement["typedBody"]["features"].append(handle)
+            if "Exact corrections" in facts:
+                corrections.extend(facts["Exact corrections"][0]["Errors"])
+        elif kind == "COACH":
+            coached.append(facts["Unresolved work"])
+            answer = {"guidance": "Link each feature to the requirement that delivers it.",
+                      "why": "The plan must trace the accepted simulation behavior."}
+        else:
+            assert kind == "REVIEW"
+            answer = {"verdict": "adequate", "gaps": [], "why": "The plan traces the bench."}
+        response = {"answer": answer}
+        schema.validate(response, q["schema"])
+        return json.dumps(response)
+
+    def user(item):
+        if "groups" in item["ask"]:
+            return {"request": item["request"], "replyId": "quiet-bench-lock",
+                    "selections": [{"groupId": "round", "optionId": "done"}]}
+        if "step" in item["subject"]:
+            parked.append(item["ask"])
+            return "Stop"
+        return approve(item)
+
+    run = Run(tmp_path / "product", tmp_path / "workers", replies["kickoff"], {}, provider, user)
+    step = run.step
+
+    def to_execute():
+        nonlocal previous
+        cursor = run.store.cursor()
+        if cursor.state != "EXECUTE":
+            return step()
+        if case != "redetail" or previous:
+            raise decisions.Waiting()
+        # Resume at the recorded integration boundary. The first plan, its B and
+        # the replan from ARCHITECT through REVIEW all use the production controller.
+        previous = run.store.plan(cursor.revision)
+        owner, = plan.select(previous, "unit")
+        run.store.unit(owner, UnitRow(wave=1, state="DONE", integrated=cursor.candidate))
+        run.store.cursor(replace(cursor, state="WAVE-VERIFY"))
+        gap = run.store.record("architecture_gap", {"vision": cursor.vision, "gap": replies["replanGap"]})
+        recovery.planning(run.store, gap, "integrated bench check", "plan-gap", finalCommit=None)
+
+    run.step = to_execute
+    try:
+        result = run.run()
+        faults = [b for _, _, b in run.store.records("step_failure")]
+        failures = [b for _, _, b in run.store.records("consumption_failure")]
+        if case in ("link", "unlinked"):
+            reason = corrections[0]
+            assert all(word in reason for word in ("new:unlinked-simulation", "no requirement", "Send"))
+            assert {failure["field"] for failure in failures} == {"edits.typedBody.features"}
+        if case == "unlinked":
+            assert result.state == "DETAIL" and result.decision
+            assert len(corrections) == 2 and corrections[0] == corrections[1]
+            assert len(coached) == len(parked) == 1
+            assert reason in str(coached[0]) and reason in parked[0]["question"]
+            assert parked[0]["options"][0]["effect"] == "pause"
+        else:
+            assert result.state == "EXECUTE", faults
+            assert not faults and not parked and not coached
+            assert len(failures) == len(corrections) == (1 if case == "link" else 0)
+            if previous:
+                current = run.store.plan(result.revision)
+                for kind in ("feature", "requirement"):
+                    assert plan.select(previous, kind).items() <= plan.select(current, kind).items()
+                assert {"scopeIn:safety-control", "scopeIn:interfaces"} <= {
+                    handle for feature in plan.select(current, "feature").values()
+                    for handle in feature["commitments"]}
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
 @pytest.mark.parametrize("repeat", [False, True])
 def test_answer_consumption_repair_golden(tmp_path, scalar_align, repeat):
     """An unusable but schema-valid architecture is corrected before asking the user.

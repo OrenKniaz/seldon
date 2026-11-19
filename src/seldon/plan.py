@@ -1,7 +1,7 @@
 """C9/C12/I6/I7; R6/R14: scoped unit ownership and check declarations."""
 
 import fnmatch
-from graphlib import TopologicalSorter
+from graphlib import CycleError, TopologicalSorter
 from pathlib import PurePosixPath
 
 from .answers import Mismatch
@@ -237,13 +237,15 @@ def edit_body(edit, grown):
     return body
 
 
-def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=False):
+def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=False,
+          retain_trace=False, record=None):
     """Accumulate one wave; a scope keeps its owner and its earlier requirements."""
     from copy import deepcopy
     from . import architecture as owner
 
     document = deepcopy(previous) if previous else {"nodes": {}}
     nodes = document["nodes"]
+    prior_features = linked_features(document)
     vision = vision_body(vision)
     grown = "stories" in vision
     nodes["vision"] = {"kind": "vision", "body": vision}
@@ -260,24 +262,29 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
             "consumers": [area["handle"] if a in area.get("ancestors", []) else a for a in c["consumers"]]}
             for r, c in owner.index(architecture["contracts"]).items()}
         owner.local_plan(area, local_contracts, answer, vision)
-        handles = {e["targetHandle"]: f"{wave}.{area['handle']}.{e['kind']}{i}"
-                   for i, e in enumerate(answer["edits"], 1)}
-        for edit in answer["edits"]:
-            if edit["kind"] == "feature":
-                key = edit["targetHandle"]
-                prior = feature_handles.setdefault(key, [])
-                shared = next((h for body, h in prior if body == edit["typedBody"]), None)
-                if shared:
-                    handles[key] = shared
-                else:
-                    prior.append((edit["typedBody"], handles[key]))
-        for edit in answer["edits"]:
+        # Requirements use the final feature refs, even if the reply sent them first.
+        handles = {}
+        edits = list(enumerate(answer["edits"], 1))
+        for i, edit in sorted(edits, key=lambda pair: pair[1]["kind"] != "feature"):
+            kind, handle = edit["kind"], edit["targetHandle"]
             body = deepcopy(edit_body(edit, grown))
-            if edit["kind"] == "requirement":
+            if kind == "requirement":
                 body["features"] = [handles[r] for r in body["features"]]
-            ref = handles[edit["targetHandle"]]
-            # A re-detail in this wave replaces its own records, never a finished wave's.
-            nodes[ref] = {"kind": edit["kind"], "body": body}
+            prefix = f"{wave}.{area['handle']}.{kind}"
+            ref = f"{prefix}{i}"
+            node = {"kind": kind, "body": body}
+            if kind == "feature":
+                prior = feature_handles.setdefault(handle, [])
+                ref = next((r for seen, r in prior if seen == body), ref)
+            if retain_trace:
+                # Earlier checks and results still cite these IDs after an in-place replan.
+                while ref in nodes and nodes[ref] != node:
+                    i += 1
+                    ref = f"{prefix}{i}"
+            if kind == "feature":
+                prior.append((body, ref))
+            handles[handle] = ref
+            nodes[ref] = node
         local_units = {}
         for i, unit in enumerate(answer["units"], 1):
             ref = next((r for r, u in units.items()
@@ -350,8 +357,13 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
                         "otherSide": {unit["area"]: unit["scope"], writer["area"]: writer["scope"]}})
     if corrections:
         raise owner.DetailCorrection(corrections)
+    superseded = sorted(prior_features - linked_features(document))
+    for ref in superseded:
+        del nodes[ref]
     document["architecture"] = deepcopy(architecture)
     validate(document)
+    if superseded and record:
+        record("trace_normalisation", {"removed": superseded, "reason": "Replaced draft requirement links"})
     return add_guide(document, wave) if guide in (None, "guide") else document
 
 
@@ -373,40 +385,57 @@ def validate_records(document):
         if kind == "feature" and "commitments" in body:
             validate_schema(body, GROWN_FEATURE, ref)
             if unknown := set(body["commitments"]) - accepted.keys():
-                raise ValueError(f"{ref}: unknown accepted commitments {sorted(unknown)}. "
-                                 f"Use handles from {list(accepted)}.")
+                raise Mismatch("edits.typedBody.commitments", f"Feature {ref!r} cites unknown accepted "
+                    f"commitments {sorted(unknown)}. Use handles from {list(accepted)}.")
             continue
         validate_schema(body, BODIES[kind], ref)
         if kind in relation_types:
             relation, target_kind = relation_types[kind]
-            if any(nodes.get(r, {}).get("kind") != target_kind
-                   for r in body[relation]):
-                raise ValueError(f"{ref}.{relation}: wrong trace target kind")
+            if wrong := [r for r in body[relation] if nodes.get(r, {}).get("kind") != target_kind]:
+                raise Mismatch(relation, f"{ref!r} links {wrong} in {relation}. Expected {target_kind} "
+                    "handles. Send handles of that kind from this plan.")
+
+
+def linked_features(document):
+    return {f for requirement in select(document, "requirement").values() for f in requirement["features"]}
 
 
 def validate_owned_work(document):
     """The same area-owned rules serve DETAIL exact-fix and canonical plan validation."""
     features, requirements, units = (
         select(document, k) for k in ("feature", "requirement", "unit"))
+    if uncovered := sorted(features.keys() - linked_features(document)):
+        raise Mismatch("edits.typedBody.features", f"Features {uncovered} have no requirement links. "
+            "Send requirements that name each feature handle they deliver in typedBody.features.")
     if not all((features, requirements, units)):
-        raise ValueError("Plan requires features, requirements and units")
+        raise Mismatch("edits/units", "The plan needs features, linked requirements and a unit to deliver "
+            "them. Send feature and requirement edits and assign each requirement to one unit.")
     for ref, unit in units.items():
         for pattern in unit["scope"]:
-            safe_path(pattern)
-        if any(d not in units or d == ref for d in unit["dependencies"]):
-            raise ValueError(f"{ref}: unknown or self dependency")
+            try:
+                safe_path(pattern)
+            except ValueError as error:
+                raise Mismatch("units.scope", f"{ref}: got {pattern!r}. Send a project-relative write "
+                    "scope inside the unit's area.") from error
+        if invalid := [d for d in unit["dependencies"] if d not in units or d == ref]:
+            raise Mismatch("units.dependencies", f"{ref} depends on {invalid}. Send positions of other "
+                "units that must finish first, or an empty list if none are needed.")
         for other, owner in units.items():
             if (ref < other and unit["area"] == owner["area"]
                     and overlaps(unit["scope"], owner["scope"])):
-                raise ValueError(f"Scope ownership overlaps: {ref} {unit['scope']} and "
-                                 f"{other} {owner['scope']}; assign disjoint subtrees or literal paths")
+                raise Mismatch("units.scope", f"{ref} {unit['scope']} and {other} {owner['scope']} can "
+                    "both write the same paths. Send disjoint subtrees or literal paths.")
 
     for ref in requirements:
         owners = [u for u, body in units.items() if ref in body["requirements"]]
         if len(owners) != 1:
-            raise ValueError(f"{ref}: needs exactly one unit owner, found {owners}")
-    if set(features) - {f for r in requirements.values() for f in r["features"]}:
-        raise ValueError("Every feature needs a requirement")
+            raise Mismatch("units.requirements", f"Requirement {ref!r} needs one unit owner, got {owners}. "
+                "Send its handle in the requirements list of exactly one unit.")
+    try:
+        tuple(TopologicalSorter({r: u["dependencies"] for r, u in units.items()}).static_order())
+    except CycleError as error:
+        raise Mismatch("units.dependencies", f"These dependencies form a loop: {error.args[1]}. "
+            "Send dependencies that let one unit in the loop start first.") from error
 
 
 def validate(document):
@@ -417,10 +446,10 @@ def validate(document):
         for other, owner in units.items():
             if (ref < other and unit["area"] != owner["area"]
                     and overlaps(unit["scope"], owner["scope"])):
-                raise ValueError(f"Scope ownership overlaps: {ref} and {other}")
+                raise Mismatch("units.scope", f"{ref} and {other} can write the same paths across areas. "
+                    "Assign disjoint scopes with one owner per path.")
     from . import architecture
     architecture.validate(document)
-    tuple(TopologicalSorter({r: u["dependencies"] for r, u in units.items()}).static_order())
     return coverage(document)
 
 
