@@ -974,6 +974,12 @@ def work_brief(store, ref):
         repair, refs = repair_facts(store, assignment)
         if any(g["kind"] != "check" for g in assignment["gaps"]):
             facts.update(repair)
+    elif ref != "guide" and not unit.thread and not unit.failure:
+        facts["Exercise an acceptance path"] = (
+            "Use the assigned requirements and declared checks to choose one concrete path a person relies on. "
+            "Identify the action and the condition it must handle. Exercise it from its real entry point "
+            "before returning and observe the result caused by that action. For Stop or concurrent work, "
+            "first observe the operation running, then assert its terminal state and promised result.")
     if ref == "guide":
         # The walkthrough proves this wave's promises only (M3 rule 10), never the whole dream.
         vision = document["nodes"]["vision"]["body"]
