@@ -9,6 +9,13 @@ from .schema import answer_schema, folded_judge_schema
 from .states import advance
 
 
+WALKTHROUGH_CHECKOUT = (
+    "Each final check starts in a clean Git checkout of the delivered commit, separate from the delivery. "
+    "The recorded command is the check's entry point. Its execution and cleanup establish that the check "
+    "ran in that checkout. Use its observed results to identify the documented steps it exercised."
+)
+
+
 def folded_owner(store, document):
     if owner := plan.sole_owner(document):
         row = store.unit(owner)
@@ -53,6 +60,7 @@ def folded_brief(store, document, owner, observations):
     facts["Guide path"] = plan.GUIDE_PATH
     checks = plan.guide_checks(document)
     facts["Walkthrough checks"] = list(checks)
+    facts["Walkthrough checkout"] = WALKTHROUGH_CHECKOUT
     facts["Delivered execution"] = [{k: body[k] for k in ("check", "cwd", "executionStarted",
                                       "cleanupVerified", "timedOut", "evidenceFiles")}
                                     for ref in observations for body in [store.read(ref)]]
@@ -235,6 +243,7 @@ def brief(store, kind, selected, *, trees=None):
     if artifacts := check_artifacts(store, refs):
         facts["Check artifacts"] = artifacts
     if subject == "tryItGuide":
+        facts["Walkthrough checkout"] = WALKTHROUGH_CHECKOUT
         facts["Guide file"] = {"path": plan.GUIDE_PATH, "commit": cursor.finalCommit,
                                "text": gitwork.git(store.root.parent, "show",
                                                    f"{cursor.finalCommit}:{plan.GUIDE_PATH}")}

@@ -12,8 +12,14 @@ GUIDE_PATH = "docs/try-it.md"
 GUIDE_SCOPE = (GUIDE_PATH, "docs/try-it/**")
 GUIDE_WALKTHROUGH = ("In docs/try-it.md, show how to try every accepted user surface, with one runnable "
                      "example per CLI command when there is a CLI. Supply inputs or show how to create them. "
-                     "Declare a check under docs/try-it/ that runs those documented steps from a clean "
-                     "checkout, checks the promised results and stops anything it starts.")
+                     "Declare a check under docs/try-it/ that uses the same commands in the reader's shell "
+                     "from a clean checkout wherever safe, including input setup, launch and stop. Where "
+                     "practical, have the reader and the check use the same runnable script. Assert the "
+                     "promised results and stop what you start. In SELDON_EVIDENCE_DIR/operation-lifecycle.json, "
+                     "record a JSON array linking each exercised step to the guide with its actual command "
+                     "or interaction and observed result. Use only approved runtimes already available. "
+                     "If the exact runtime is unavailable, preserve it in the guide, record observed=false "
+                     "with the reason for its steps, and exercise the other supported steps.")
 GUIDE_WORK = (GUIDE_WALKTHROUGH + " Use the contracts to walk through this wave's commitments. "
               "Leave unseen forms to the page owner's check and capture relevant visual evidence.")
 
