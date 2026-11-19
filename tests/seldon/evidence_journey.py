@@ -11,7 +11,16 @@ from threading import Event, Thread
 from seldon import features, gitwork, schema
 from seldon.providers import render_question
 from seldon.run import Run
-from test_journey import Scripted, approve, strict_schema
+from test_journey import Scripted, approve, finish, strict_schema
+
+
+CODE_QUALITY_CALLS = {
+    "quiet": ("qbu-ev-3bf204d-e01", "28b916cfd3dd4a6ba20827547f52c5b8",
+              "server.py", "source=signal(s['settings']); event=threading.Event(); save(args.data,s)"),
+    "shelf": ("shelflife-ev-3bf204d-e01", "6c5b2709304249ce8e413687e4a8d672",
+              "web/app.js", "b.disabled=true; try{await api("),
+}
+STYLE_NIT = "Use a trailing comma in the multiline pantry record literal."
 
 
 WALKTHROUGH = r"""
@@ -150,12 +159,17 @@ class EvidenceReplay(Scripted):
             self.packet = q
             findings = {subject: {"verdict": "uncertain", "neededFacts": ["Semantic review"],
                 "why": "This stub establishes packet delivery."} for subject in q["targets"]}
-            if self.product == "quiet" and "codeQuality" in findings:
+            if "codeQuality" in findings:
                 owner = next(iter(facts["Checks"])).split(":", 1)[0]
+                if self.product == "quiet":
+                    correction = "Separate session persistence from Stop cleanup in Store.run."
+                    severity = "must-fix"
+                    why = "One line couples terminal persistence and removal of the active-run event."
+                else:
+                    correction, severity = STYLE_NIT, "nit"
+                    why = "An optional trailing comma has no maintenance consequence."
                 findings["codeQuality"] = {"verdict": "gap", "gaps": [{"target": "codeQuality",
-                    "owners": [owner], "severity": "must-fix",
-                    "correction": "Separate session persistence from Stop cleanup in Store.run."}],
-                    "why": "One line couples terminal persistence and removal of the active-run event."}
+                    "owners": [owner], "severity": severity, "correction": correction}], "why": why}
             answer = {"findings": findings, "why": "This stub establishes packet delivery and owner routing."}
         else:
             return super().invoke(q, started)
@@ -183,11 +197,14 @@ def evidence_journey(slot, monkeypatch, product):
     enabled = features.enabled
     monkeypatch.setattr(features, "enabled", lambda name: name == "judgeEvidence" or enabled(name))
     provider = EvidenceReplay(slot, product)
+    notes = []
 
     def user(item):
         if item["gate"] == "A" and "groups" in item["ask"]:
             return {"request": item["request"], "replyId": "align-done",
                     "selections": [{"groupId": "round", "optionId": "done"}]}
+        if item["gate"] == "C":
+            notes.extend(item["subject"]["notes"])
         return approve(item)
 
     workers = slot / "workers"
@@ -205,13 +222,34 @@ def evidence_journey(slot, monkeypatch, product):
         assert q, run.store.cursor()
         current, = (row for row in q["facts"]["Observations"] if row["purpose"] == "final")
         assert current["commit"] == run.store.cursor().candidate and current["exitCode"] == 0
-        if product == "quiet" and "codeQuality" in q["targets"]:
+        assert "codeQuality" in q["targets"]
+        owner, = run.store.units()
+        if product == "quiet":
             from seldon import fixups
 
-            owner, = run.store.units()
             assert run.store.cursor().state == "EXECUTE"
             assert "Separate session persistence" in fixups.active(run.store, owner)["gaps"][0]["correction"]
+        else:
+            assert not run.store.records("unit_fixup") and not run.store.records("unit_gap")
+            finish(run)
+            assert [(note["severity"], note["correction"]) for note in notes] == [("nit", STYLE_NIT)]
+
+        # Replay each as-of-call packet. Only the coaching changes; the original source and
+        # observations are the facts the next authorized model evaluation would see.
+        recording, call, source, excerpt = CODE_QUALITY_CALLS[product]
+        folder = Path("C:/seldon/tests/m1") / recording / "calls" / f"call-{call}"
+        recorded = json.loads((folder / "question.json").read_bytes())
+        historical = json.loads((folder / "answer.txt").read_bytes())["answer"]["findings"]["codeQuality"]
+        if product == "quiet":
+            assert [gap["severity"] for gap in historical["gaps"]] == ["nit"]
+        else:
+            assert historical["verdict"] == "satisfied" and not historical["gaps"]
+        recorded["facts"]["Subjects"]["codeQuality"] = q["facts"]["Subjects"]["codeQuality"]
         for reviewed in (False, True):
+            replay, _ = render_question(recorded, prompts2=reviewed)
+            assert source in replay and excerpt in replay
+            assert "must-fix when a maintainer would struggle to read or safely change" in replay
+            assert "Formatting preferences alone are nits" in replay
             stdin, _ = render_question(q, prompts2=reviewed)
             if product == "quiet":
                 assert "operationLifecycle" in current, "The passing final check lost the Stop lifecycle evidence."
@@ -219,7 +257,6 @@ def evidence_journey(slot, monkeypatch, product):
                 assert operation["whileRunning"] == operation["after"] == {"status": "running",
                                                                             "processed_samples": 0}
                 assert operation["stop"] == 200 and set(operation["requirements"]) == set(current["requirements"])
-                assert "codeQuality" in q["targets"] and "compressed one-liners" in stdin
                 assert "self.save(sess); self.events.pop" in q["facts"]["Product files"]["quiet_bench/__init__.py"]
             else:
                 assert "browserVisits" in current, "The passing final check lost browser visit evidence."

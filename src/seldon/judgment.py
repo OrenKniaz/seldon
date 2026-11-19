@@ -33,10 +33,16 @@ def folded_brief(store, document, owner, observations):
     if features.enabled("judgeEvidence"):
         subjects_to_judge["codeQuality"] = {
             "criterion": "Main implementation is readable and safe to change.",
-            "verification": "Use the owner's delivered implementation under Product files. Look for "
-                            "readable names and control flow, compressed one-liners hiding logic, "
-                            "and handling of plausible failure paths. Name a concrete maintenance "
-                            "consequence and the smallest correction for a must-fix finding.",
+            "verification": (
+                "Use the owner's delivered implementation under Product files. Mark a defect must-fix "
+                "when a maintainer would struggle to read or safely change the code, even when behavior "
+                "checks pass. Look for packed statements that hide control flow, single-line pages or "
+                "scripts, cryptic names, or validation, persistence and lifecycle tangled in one expression. "
+                "Cite the file or symbol, the concrete maintenance consequence and the smallest correction. "
+                "Formatting preferences alone are nits. For example, a booking handler that tangles "
+                "validation, saving and confirmation is must-fix. Separate those steps so the failed-save "
+                "path is clear. Preferring a trailing comma in a readable record is a nit."
+            ),
         }
     facts["Subjects"] = subjects_to_judge
     facts["Requirement to feature links"] = {

@@ -1609,7 +1609,8 @@ def test_guide_walkthrough_journey(tmp_path, scalar_align):
 def test_recorded_runtime_evidence_reaches_integrated_judge(tmp_path, monkeypatch, product):
     """Passing checks can hide a stalled Stop, browser errors and cleanup locks.
 
-    Screenshots and process exit checks miss both runtime defects and the missing source-quality subject.
+    Screenshots and exit checks miss these defects. The two recorded final packets also catch lost
+    source-quality coaching, a must-fix that never reaches its owner, or a style nit that blocks C.
     """
     from evidence_journey import evidence_journey
 
