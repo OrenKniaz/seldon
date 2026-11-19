@@ -100,20 +100,26 @@ walk().catch(error => { console.error(error); process.exitCode = 1; });
 
 
 class EvidenceReplay(Scripted):
-    def __init__(self, slot, product):
+    def __init__(self, slot, product, recording=None):
         super().__init__(slot)
         self.product = product
         recordings = Path("C:/seldon/tests/m1")
-        self.repository = recordings / {
-            "quiet": "qbu-dbc5db9-s01", "shelf": "shelflife-main-d140427-w01"}[product] / "product"
-        revision = {"quiet": "82fb2ce", "shelf": "9447ee9"}[product]
-        paths = gitwork.paths(self.repository, revision)
-        self.sources = gitwork.blobs(self.repository, revision, [
-            name for name in paths if not name.startswith(("checks/", "docs/try-it/"))])
+        name, revision = recording or {"quiet": ("qbu-dbc5db9-s01", "82fb2ce"),
+                                       "shelf": ("shelflife-main-d140427-w01", "9447ee9")}[product]
+        repository = recordings / name / "product"
+        paths = gitwork.paths(repository, revision)
+        self.sources = gitwork.blobs(repository, revision, [
+            path for path in paths if not path.startswith(("checks/", "docs/try-it/"))
+            and (recording is None or not path.startswith("tests/"))])
         self.scope = [path for path in self.sources if path != "docs/try-it.md"]
         self.story = {"quiet": "Start and stop a bench run and read the saved state.",
                       "shelf": "Open the pantry and read the current inventory."}[product]
         self.packet = None
+
+    def walkthrough(self, facts, requirements):
+        return (WALKTHROUGH.replace("PYTHON", json.dumps(sys.executable))
+                .replace("PRODUCT", json.dumps(self.product)).replace("REQUIREMENTS", json.dumps(requirements))
+                .replace("RECORD_LIFECYCLE", json.dumps("Operation lifecycle walkthrough" in facts)))
 
     def invoke(self, q, started):
         strict_schema(q["schema"])
@@ -127,10 +133,7 @@ class EvidenceReplay(Scripted):
             path = "docs/try-it/evidence.cjs"
             (root / path).parent.mkdir(parents=True, exist_ok=True)
             requirements = list(facts["Requirements"])
-            (root / path).write_text(WALKTHROUGH.replace("PYTHON", json.dumps(sys.executable))
-                .replace("PRODUCT", json.dumps(self.product)).replace("REQUIREMENTS", json.dumps(requirements))
-                .replace("RECORD_LIFECYCLE", json.dumps("Operation lifecycle walkthrough" in facts)),
-                encoding="utf-8")
+            (root / path).write_text(self.walkthrough(facts, requirements), encoding="utf-8")
             answer = {"outcome": "done", "summary": "Deliver the recorded product and observe its walkthrough.",
                 "checkPaths": [path], "checks": [{"purpose": "Exercise the documented page",
                 "command": ["node", path], "requirements": requirements,
@@ -176,6 +179,101 @@ class EvidenceReplay(Scripted):
         response = {"answer": answer}
         schema.validate(response, q["schema"])
         return json.dumps(response), None
+
+
+class CodeShapeReplay(EvidenceReplay):
+    def __init__(self, slot, packed):
+        recording = ("shelflife-both4-8bf8550-b01", "624ca3a") if packed else (
+            "shelflife-cs-7be4158-c01", "c250788")
+        super().__init__(slot, "shelf", recording)
+        self.packed = packed
+        self.correction = "Split the web/app.js submit handler into named validation and save steps."
+
+    def walkthrough(self, facts, requirements):
+        return """
+const assert = require('node:assert/strict');
+const serve = require('../../checks/kit/serve.cjs');
+const browser = require('../../checks/kit/browser.cjs');
+serve([PYTHON, '-B', 'server.py', '--port', '{port}', '--db', '{data}/pantry.db'], async ({url}) => {
+  await browser(url, async ({page}) => {
+    await page.waitForFunction(() => document.querySelector('#count')?.textContent === '0 items');
+    assert.equal(await page.locator('#search').count(), 1);
+  });
+}).catch(error => { console.error(error); process.exitCode = 1; });
+""".replace("PYTHON", json.dumps(sys.executable))
+
+    def invoke(self, q, started):
+        if q["kind"] != "JUDGE":
+            return super().invoke(q, started)
+        strict_schema(q["schema"])
+        self.packet = q
+        facts = q["facts"]
+        findings = {subject: {"verdict": "satisfied", "gaps": [],
+                    "why": "The recorded implementation renders the empty pantry from its server."}
+                    for subject in q["targets"]}
+        if self.packed:
+            owner = next(iter(facts["Checks"])).split(":", 1)[0]
+            shape = facts.get("Code shape (measured)", {}).get("web/app.js", {})
+            findings["codeQuality"] = {"verdict": "gap", "gaps": [{"target": "codeQuality",
+                "owners": [owner], "severity": "must-fix", "correction": self.correction}],
+                "why": f"The {shape.get('longestLineChars')} character line at web/app.js:13 "
+                       "obscures where input validation ends and the server write begins."}
+        answer = {"findings": findings, "why": "The recorded pantry renders. Review its source separately."}
+        return json.dumps({"answer": answer}), None
+
+
+def code_shape_journey(slot, monkeypatch, packed):
+    from seldon import fixups
+
+    monkeypatch.setattr(features, "planning_setup", lambda: {"sizeFirst": True, "split": "auto"})
+    enabled = features.enabled
+    monkeypatch.setattr(features, "enabled", lambda name: name == "judgeEvidence" or enabled(name))
+    provider = CodeShapeReplay(slot, packed)
+
+    def user(item):
+        if item["gate"] == "A" and "groups" in item["ask"]:
+            return {"request": item["request"], "replyId": "align-done",
+                    "selections": [{"groupId": "round", "optionId": "done"}]}
+        return approve(item)
+
+    with closing(Run(slot / "product", slot / "workers", provider.story, provider.setup,
+                     provider, user, capacity=1)) as run:
+        for _ in range(15):
+            run.step()
+            if provider.packet:
+                break
+        q = provider.packet
+        assert q, run.store.cursor()
+        facts = q["facts"]
+        final, = (row for row in facts["Observations"] if row["purpose"] == "final")
+        assert final["commit"] == run.store.cursor().candidate and final["exitCode"] == 0
+        shape = facts["Code shape (measured)"]
+        assert "docs/try-it/evidence.cjs" not in shape
+        app = shape["web/app.js"]
+        for reviewed in (False, True):
+            prompt, _ = render_question(q, prompts2=reviewed)
+            assert "Code shape (measured)" in prompt
+            assert "Use measured code shape as evidence" in prompt
+        owner, = run.store.units()
+        if packed:
+            assert (app["lineCount"], app["longestLineChars"], app["linesOver160Chars"]) == (16, 1075, 8)
+            longest = app["longestLines"]
+            assert [row["line"] for row in longest] == [13, 12, 10]
+            assert longest[0]["utf8Bytes"] == 1077 and len(longest[0]["prefix"]) == 120
+            assert longest[0]["prefix"].startswith("form.addEventListener('submit'")
+            assert app["linesWithMultipleStatements"] > 1
+            assert shape["server.py"]["linesWithMultipleStatements"] > 0
+            assert run.store.cursor().state == "EXECUTE"
+            gap, = fixups.active(run.store, owner)["gaps"]
+            assert gap["correction"] == provider.correction
+            judgment, = (body for _, _, body in run.store.records("unit_verdict")
+                         if body["commit"] == final["commit"])
+            assert "1075 character line at web/app.js:13" in judgment["findings"]["codeQuality"]["why"]
+        else:
+            assert (app["lineCount"], app["longestLineChars"], app["linesOver160Chars"]) == (149, 122, 0)
+            assert app["linesWithMultipleStatements"] == 1  # An inline guard remains readable.
+            assert not run.store.records("unit_fixup")
+            finish(run)
 
 
 def hold_sqlite(workers, stop):

@@ -1,12 +1,52 @@
-"""C14/C26, R9: runtime facts collected from a check's isolated checkout and evidence directory."""
+"""C14/C26/I9, R9: measured facts from check execution and delivered source."""
 
+import ast
 import hashlib
 import json
 import os
+import re
+from collections import Counter
+from heapq import nlargest
 from pathlib import Path
 
 from . import gitwork
 from .store import encode
+
+
+_JS_NON_CODE = re.compile(
+    r"""//.*|/\*.*?\*/|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`""")
+_JS_MORE_CODE = re.compile(r";\s*[\w$({\[]|}\s*(?!(?:else|catch|finally)\b)[\w$]")
+
+
+def _statement_lines(path, text, lines):
+    suffix = Path(path).suffix.lower()
+    if suffix == ".py":
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError, RecursionError):
+            return None
+        counts = Counter(node.lineno for node in ast.walk(tree) if isinstance(node, ast.stmt))
+        return sum(count > 1 for count in counts.values())
+    if suffix in {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"}:
+        return sum(bool(_JS_MORE_CODE.search(_JS_NON_CODE.sub(" ", line))) for line in lines)
+    return None
+
+
+def code_shape(product_files):
+    """Describe the same delivered text the judge sees. Statement counts for JS are estimates."""
+    facts = {}
+    for path, text in product_files.items():
+        lines = text.splitlines()
+        longest = nlargest(3, enumerate(lines, 1), key=lambda row: len(row[1]))
+        facts[path] = {
+            "lineCount": len(lines),
+            "longestLineChars": len(longest[0][1]) if longest else 0,
+            "linesOver160Chars": sum(len(line) > 160 for line in lines),
+            "linesWithMultipleStatements": _statement_lines(path, text, lines),
+            "longestLines": [{"line": n, "chars": len(line), "utf8Bytes": len(line.encode("utf-8")),
+                              "prefix": line[:120]} for n, line in longest],
+        }
+    return facts
 
 
 def runtime_file(name):

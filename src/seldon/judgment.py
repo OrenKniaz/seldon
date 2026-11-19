@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import architecture, features, fixups, gitwork, inference, plan, proof, questions
+from .observations import code_shape
 from .schema import answer_schema, folded_judge_schema
 from .states import advance
 
@@ -31,6 +32,7 @@ def folded_brief(store, document, owner, observations):
     subjects_to_judge = folded_subjects(document)
     facts = question["facts"]
     if features.enabled("judgeEvidence"):
+        facts["Code shape (measured)"] = code_shape(facts["Product files"])
         subjects_to_judge["codeQuality"] = {
             "criterion": "Main implementation is readable and safe to change.",
             "verification": (
@@ -41,7 +43,8 @@ def folded_brief(store, document, owner, observations):
                 "Cite the file or symbol, the concrete maintenance consequence and the smallest correction. "
                 "Formatting preferences alone are nits. For example, a booking handler that tangles "
                 "validation, saving and confirmation is must-fix. Separate those steps so the failed-save "
-                "path is clear. Preferring a trailing comma in a readable record is a nit."
+                "path is clear. Preferring a trailing comma in a readable record is a nit. "
+                "Use measured code shape as evidence and decide maintainability from the implementation."
             ),
         }
     facts["Subjects"] = subjects_to_judge

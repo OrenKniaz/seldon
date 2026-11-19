@@ -1841,6 +1841,19 @@ def test_recorded_runtime_evidence_reaches_integrated_judge(tmp_path, monkeypatc
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("packed", [True, False], ids=["packed", "readable"])
+def test_recorded_code_shape_reaches_integrated_judge(tmp_path, monkeypatch, packed):
+    """Passing pantry checks leave maintainability to the judge using measured evidence.
+
+    Prior quality journeys supply source and rubric alone, so they miss missing measurements,
+    check source leaking into those facts, or a cited shape finding losing its owner.
+    """
+    from evidence_journey import code_shape_journey
+
+    code_shape_journey(tmp_path, monkeypatch, packed)
+
+
+@pytest.mark.fast
 @pytest.mark.parametrize("surface", ["browser", "broken-guide"])
 def test_check_kit_golden(tmp_path, scalar_align, surface, monkeypatch):
     """Worker-authored real browser/server checks retain baseline helpers and clean descendants.
