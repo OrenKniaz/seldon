@@ -263,7 +263,7 @@ def edit_body(edit, grown):
 
 
 def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=False,
-          retain_trace=False, record=None):
+          retain_trace=False, completed=(), record=None):
     """Accumulate one wave; a scope keeps its owner and its earlier requirements."""
     from copy import deepcopy
     from . import architecture as owner
@@ -310,13 +310,19 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
                 prior.append((body, ref))
             handles[handle] = ref
             nodes[ref] = node
-        local_units = {}
+        local_units, continued = {}, set()
         for i, unit in enumerate(answer["units"], 1):
             scope = unit["scope"]
             owners = {r: [p for p in u["scope"] if r != folded or p not in GUIDE_SCOPE]
                       for r, u in units.items() if u["area"] == area["handle"]
                       and r not in local_units.values()}
             ref = next((r for r, paths in owners.items() if set(paths) == set(scope)), None)
+            if ref is None:
+                containing = [r for r, paths in owners.items()
+                              if all(any(contains(old, p) for old in paths) for p in scope)]
+                if len(containing) == 1 and containing[0] in completed:
+                    ref, = containing
+                    continued.add(ref)
             if ref is None:
                 covered = [r for r, paths in owners.items() if paths
                            and all(any(contains(p, old) for p in scope) for old in paths)]
@@ -342,7 +348,9 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
                                                          *(handles[r] for r in unit["requirements"])])),
                         dependencies=list(dict.fromkeys([*before["dependencies"],
                                                          *(local_units[d] for d in unit["dependencies"])])))
-            if ref == folded:
+            if ref in continued:
+                body["scope"] = before["scope"]
+            elif ref == folded:
                 body["scope"].extend(GUIDE_SCOPE)
             nodes[ref] = {"kind": "unit", "body": body}
             units[ref] = body

@@ -147,7 +147,9 @@ def step(store, provider, capacity):
     leaves, failures = collect(pending, review_correction)
     if leaves is None:
         return
-    retain_trace = any(unit.wave == cursor.wave for unit in store.units().values())
+    rows = store.units()
+    retain_trace = any(unit.wave == cursor.wave for unit in rows.values())
+    completed = {ref for ref, unit in rows.items() if unit.state == "DONE" and unit.wave < cursor.wave}
     normalised = []
     while True:
         normalised.clear()
@@ -155,7 +157,8 @@ def step(store, provider, capacity):
             if failures:
                 raise architecture.DetailCorrection(failures)
             compiled = plan.merge(vision, outline, leaves, previous, cursor.wave, fold_guide=fold_guide,
-                retain_trace=retain_trace, record=lambda kind, body: normalised.append((kind, body)))
+                retain_trace=retain_trace, completed=completed,
+                record=lambda kind, body: normalised.append((kind, body)))
             compiled["areaDetails"] = {**previous.get("areaDetails", {}),
                 **{a["handle"]: done[a["handle"]]["answer"] for a, _ in leaves}}
             break
