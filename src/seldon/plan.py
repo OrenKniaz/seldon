@@ -4,7 +4,7 @@ import fnmatch
 from graphlib import CycleError, TopologicalSorter
 from pathlib import PurePosixPath
 
-from .answers import Mismatch
+from .answers import Mismatch, links, normalised, recorder
 from .schema import BODIES, GROWN_FEATURE, vision_body, vision_contract
 from .schema import validate as validate_schema
 
@@ -55,15 +55,16 @@ def overlaps(left, right):
 def product_scope(scope, field, subject, record=None):
     """Reserve the guide before checking or binding planner-proposed ownership."""
     guide_dir = GUIDE_SCOPE[1].removesuffix("**")
-    remaining = [p for p in scope if p not in (guide_dir, guide_dir.rstrip("/"))
-                 and not overlaps([safe_path(p)], GUIDE_SCOPE)]
+    remaining = list(dict.fromkeys(p for p in scope if p not in (guide_dir, guide_dir.rstrip("/"))
+                 and not overlaps([safe_path(p)], GUIDE_SCOPE)))
     if not remaining:
         raise Mismatch(field, f"{subject}: expected a product write scope; got {scope}, "
                        f"which overlaps {GUIDE_PATH} or docs/try-it/ reserved for the walkthrough owner. "
                        "Send at least one project-relative product path or narrower pattern outside the guide.")
     if record and remaining != scope:
         record("scope_normalisation", {"field": field, "subject": subject,
-            "removed": [p for p in scope if p not in remaining], "remaining": remaining})
+            "removed": [p for p in scope if p not in remaining], "remaining": remaining,
+            "summary": f"Kept the distinct product paths for {subject}: {remaining}."})
     return remaining
 
 
@@ -118,27 +119,50 @@ def saved_checks(declaration, ref, requirements):
             for i, check in enumerate(checks, 1)}, len(checks) + 1
 
 
+def trace_requirements(features, requirements):
+    trace = {}
+    for ref, requirement in requirements.items():
+        for feature in requirement["features"]:
+            for handle in [feature, *features[feature].get("commitments", [])]:
+                trace.setdefault(handle, []).append(ref)
+    return trace
+
+
+def check_requirements(document, ref):
+    if ref == "guide":
+        # The walkthrough checks the built product. It owns the check, not its requirements.
+        return list(select(document, "requirement"))
+    return select(document, "unit")[ref]["requirements"]
+
+
 def work_checks(store, ref, report, answer):
     document = store.plan(store.cursor().revision)
-    requirements = select(document, "unit")[ref]["requirements"]
-    prior = next((b for _, _, b in reversed(store.records("worker_checks")) if b["unit"] == ref),
-                 {"checks": [], "checkPaths": []})
+    requirements = check_requirements(document, ref)
+    all_requirements = select(document, "requirement")
+    trace = trace_requirements(select(document, "feature"), {r: all_requirements[r] for r in requirements})
+    record = recorder(store)
+    history = [b for _, _, b in store.records("worker_checks") if b["unit"] == ref]
+    prior = history[-1] if history else {"checks": [], "checkPaths": []}
     checks, next_check = saved_checks(prior, ref, requirements)
     known = set(checks)
     for edit in answer["checks"]:
         handle = edit.get("retire") or edit.get("update")
         if handle and handle not in known:
+            if "retire" in edit and any(handle in saved_checks(b, ref, requirements)[0] for b in history):
+                normalised(record, "checks.retire", handle, None, f"Check {handle} was already retired.")
+                continue
             raise ValueError(f"Check {handle!r} is not owned by this unit. Use an Existing checks handle "
                              "to update or retire it, or omit the handle to add a check.")
         if "retire" in edit:
             checks.pop(handle, None)
             continue
-        links = list(dict.fromkeys(edit["requirements"] if "requirements" in edit else acceptance(document, ref)))
-        if unknown := set(links) - set(requirements):
+        traced = links(edit.get("requirements", acceptance(document, ref)), requirements, via=trace,
+                       record=record, field="checks.requirements", subject=edit["purpose"])
+        if unknown := set(traced) - set(requirements):
             raise ValueError(f"Check {edit['purpose']!r} names unassigned requirements {sorted(unknown)}. "
                              "Use the handles under Requirements for the behaviour it proves.")
         check = {k: v for k, v in edit.items() if k != "update"}
-        check["requirements"] = links
+        check["requirements"] = traced
         if handle:
             checks[handle] = check
         elif not any(c["command"] == check["command"] for c in checks.values()):
@@ -162,8 +186,9 @@ def execution(store):
                           if d["owner"] != ref}
         unit["checkPaths"] = [p for p in declaration["checkPaths"] if matches(p, unit["scope"])]
         checks, _ = saved_checks(declaration, ref, unit["requirements"])
+        eligible = check_requirements(document, ref)
         for handle, check in checks.items():
-            links = [r for r in check["requirements"] if r in unit["requirements"]
+            links = [r for r in check["requirements"] if r in eligible
                      and document["nodes"].get(r, {}).get("kind") == "requirement"]
             if links or not check["requirements"]:
                 document["nodes"][handle] = {"kind": "check", "body": {
@@ -261,7 +286,7 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
             "provider": area["handle"] if c["provider"] in area.get("ancestors", []) else c["provider"],
             "consumers": [area["handle"] if a in area.get("ancestors", []) else a for a in c["consumers"]]}
             for r, c in owner.index(architecture["contracts"]).items()}
-        owner.local_plan(area, local_contracts, answer, vision)
+        owner.local_plan(area, answer, vision)
         # Requirements use the final feature refs, even if the reply sent them first.
         handles = {}
         edits = list(enumerate(answer["edits"], 1))

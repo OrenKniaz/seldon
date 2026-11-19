@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import replace
 
 from . import architecture, inference, plan, questions, recovery
+from .answers import recorder
 from .states import advance
 
 
@@ -27,9 +28,12 @@ def step(store, provider, capacity):
     pending = architecture.detail_areas(outline, cursor.wave, baseline)
     # Make newly written contract text canonical before any consumer plans against it.
     updated = deepcopy(previous)
+    contracts = architecture.index(outline["contracts"])
     for ref, contract in plan.select(updated, "contract").items():
-        current = architecture.index(outline["contracts"])[ref]
-        contract.update(kind=current["kind"], text=current["text"])
+        if ref in contracts:
+            contract.update(kind=contracts[ref]["kind"], text=contracts[ref]["text"])
+        else:
+            del updated["nodes"][ref]  # A runtime assumption has no unit endpoint.
     if updated != previous:
         with store.transaction():
             revision = store.revision(updated, cursor.revision)
@@ -80,9 +84,9 @@ def step(store, provider, capacity):
 
             def validate(answer):
                 if answer.get("verdict") == "subdivide":
-                    architecture.expand(outline, area, answer, record=store.record)
+                    architecture.expand(outline, area, answer, record=recorder(store))
                 elif answer.get("verdict") == "planned":
-                    architecture.local_plan(area, local, answer, vision, record=store.record)
+                    architecture.local_plan(area, answer, vision, record=recorder(store))
 
             body = {"revision": cursor.revision, "area": area["handle"], "basis": basis, "resume": resumed,
                     "correction": correction[0] if correction else None}

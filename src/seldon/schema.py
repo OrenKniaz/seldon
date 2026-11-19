@@ -54,7 +54,7 @@ POSITION = {"type": "integer", "minimum": 1}
 BODIES = {
     "area": obj(responsibility=TEXT, scope=array(TEXT, 1)),
     "contract": obj(kind=TEXT, text=TEXT, provider=TEXT, consumers=REFS),
-    "decision": obj(choice=TEXT, reason=TEXT, origin=choice("architecture", "research", "user"),
+    "decision": obj(choice=TEXT, reason=TEXT, origin=choice("architecture", "research", "user", "environment"),
                     areas=array(TEXT, 1)),
     "feature": obj(**FEATURE["properties"], vision=array(choice("vision"), 1)),
     "requirement": obj(acceptance=TEXT, features=array(TEXT, 1)),
@@ -82,10 +82,11 @@ ARCHITECT = obj(areas=array(AREA), contracts=array(AREA_CONTRACT),
 
 
 def detail_plan(feature):
+    unit = {**PLANNED_UNIT["properties"], "requirements": REFS}
     return obj(verdict=choice("planned"), edits=array({"anyOf": [
         obj(kind=choice("feature"), targetHandle=TEXT, typedBody=feature),
         obj(kind=choice("requirement"), targetHandle=TEXT, typedBody=PLAN_BODIES["requirement"])]}, 1),
-        units=array({"anyOf": [PLANNED_UNIT, obj(**PLANNED_UNIT["properties"], provides=REFS)]}, 1))
+        units=array({"anyOf": [obj(**unit), obj(**unit, provides=REFS)]}, 1))
 
 
 DETAIL_PLAN = detail_plan(FEATURE)

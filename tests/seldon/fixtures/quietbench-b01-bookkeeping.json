@@ -1,0 +1,33 @@
+{
+  "r114": {
+    "checkPaths": [
+      "docs/try-it/walkthrough.py"
+    ],
+    "checks": [
+      {
+        "command": [
+          "python",
+          "docs/try-it/walkthrough.py"
+        ],
+        "expectedEvidence": "A reference run produces the requested sample arrays and bands, can be listed and shown, and exports CSV. The lifecycle evidence records the page run as unobserved pending integrated verification.",
+        "purpose": "Exercise the documented CLI workflow with clean temporary data",
+        "requirements": [
+          "scopeIn:simulate"
+        ]
+      }
+    ],
+    "discoveries": [],
+    "outcome": "done",
+    "summary": "Added a fresh-checkout guide and CLI walkthrough. The walkthrough compiled locally and reported that bench.py is absent; no product behavior was exercised.",
+    "why": "Integrated WAVE-VERIFY must run the walkthrough against the product, inspect the page and save visual evidence, observe the active-run stop lifecycle, and verify band-noise and eligible WAV inputs."
+  },
+  "r378.runtime-verification": {
+    "consumers": [
+      "quiet-bench"
+    ],
+    "handle": "runtime-verification",
+    "kind": "environment",
+    "provider": "environment",
+    "text": "Use Python 3.12 standard library and Node 20 for page checks, with no third-party runtime packages or network. The owner may look for an existing Node 20 runtime; Node v25.8.0 does not satisfy this requirement. If Node 20 is unavailable, report page checks unverified and request environment provision."
+  }
+}

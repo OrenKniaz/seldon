@@ -5,7 +5,7 @@ from pathlib import Path
 import traceback
 
 from . import features, inference, plan, questions, recovery
-from .answers import ConsumptionFailure
+from .answers import ConsumptionFailure, recorder
 from .providers import ProviderFailure
 from .states import advance
 
@@ -261,7 +261,12 @@ def request(store, gate, subject, *, ask=None):
         if gate in ("A", "B"):
             vision = subject.get("round", cursor.vision)
             summary = [b["summary"] for _, _, b in store.records("answer_normalisation")
-                       if b["answer"] == vision]
+                       if b.get("answer") == vision]
+        if gate in ("A", "B", "CHECK-IN"):
+            stages = {"A": {"A"}, "B": {"ARCHITECT", "DETAIL", "REVIEW"},
+                      "CHECK-IN": {"ARCHITECT", "DETAIL", "REVIEW", "EXECUTE", "WAVE-VERIFY"}}[gate]
+            summary.extend(b["summary"] for _, _, b in store.records("answer_normalisation")
+                if b.get("vision") == cursor.vision and b.get("wave") == cursor.wave and b.get("stage") in stages)
         if gate in ("B", "CHECK-IN"):
             summary.extend(b["summary"] for _, _, b in store.records("scope_normalisation")
                            if b.get("wave") == cursor.wave and "summary" in b)
@@ -410,7 +415,7 @@ def decide_round(store, provider, ref, item, reply):
                 "the round's Other when it fits no product group. If a material request or the user's "
                 "intent to accept the remaining defaults is ambiguous, do not select done.")
             brief["facts"]["Retained choices"] = item["ask"]["retained"]
-            inference.call(store, provider, brief, check=lambda a: questions.check_batch_decide(a, words),
+            inference.call(store, provider, brief, check=lambda a: questions.check_batch_decide(a, words, record=recorder(store)),
                 consume=lambda source, a: fold_round(store, ref, item, reply, a["selections"], source),
                 binding=ref, field="selections")
         else:

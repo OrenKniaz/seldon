@@ -18,6 +18,38 @@ def render_constraint_values(decoded):
     return changes
 
 
+def normalised(record, field, before, after, summary):
+    if record is not None and before != after:
+        record("answer_normalisation", {"field": field, "original": before,
+                                       "value": after, "summary": summary})
+    return after
+
+
+def recorder(store):
+    cursor = store.cursor()
+
+    def record(kind, body):
+        store.record(kind, {"vision": cursor.vision, "wave": cursor.wave, "stage": cursor.state, **body})
+
+    return record
+
+
+def links(refs, targets, *, via=None, record=None, field, subject):
+    """Prefer canonical handles, then explicit trace links or an unambiguous bare handle."""
+    trace = via or {}
+    aliases = {}
+    for handle in dict.fromkeys([*targets, *trace]):
+        aliases.setdefault(handle.split(":", 1)[-1], []).append(handle)
+    resolved = []
+    for ref in refs:
+        if ref not in targets and ref not in trace and len(aliases.get(ref, ())) == 1:
+            ref, = aliases[ref]
+        # Retain unresolved references for the owning boundary to explain.
+        resolved.extend([ref] if ref in targets else trace.get(ref, [ref]))
+    result = list(dict.fromkeys(resolved))
+    return normalised(record, field, refs, result, f"Resolved {field} for {subject}: {refs} → {result}.")
+
+
 class Mismatch(ValueError):
     def __init__(self, field, reason):
         self.field, self.reason = field, reason

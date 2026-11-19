@@ -5,7 +5,7 @@ import re
 from difflib import SequenceMatcher
 
 from . import architecture, fixups, gitwork, observations, plan
-from .answers import Mismatch, render_constraint_values
+from .answers import Mismatch, links, normalised, render_constraint_values
 from .schema import ALIGN_ROUND, answer_schema, batch_decision, obj, validate, vision_body
 from . import features
 
@@ -229,10 +229,18 @@ def align_round_brief(facts, *, sources, size_first=False):
 
 def check_align_round(answer, sources):
     vision = vision_body(answer)
-    constraints = architecture.index(vision["constraints"], "vision.constraints")
-    goals = architecture.commitments(vision)
-    cited = {ref for entry in goals.values() for ref in entry.get("constraints", [])}
     dropped, changes = set(), []
+    def record(kind, body):
+        changes.append(body)
+
+    constraints = architecture.index(vision["constraints"], "vision.constraints", record=record)
+    for field in ("stories", "quality"):
+        vision[field][:] = architecture.index(vision[field], f"vision.{field}", record=record).values()
+    goals = architecture.commitments(vision)
+    for ref, entry in goals.items():
+        entry["constraints"] = links(entry["constraints"], constraints, record=record,
+                                     field="vision.constraints", subject=ref)
+    cited = {ref for entry in goals.values() for ref in entry.get("constraints", [])}
     for handle, constraint in constraints.items():
         source, value = constraint["source"], constraint["value"]
         canonical = source if source in sources else re.split(r"[:;]", source, maxsplit=1)[0].strip()
@@ -277,7 +285,7 @@ def check_align_round(answer, sources):
         if unknown := set(entry.get("constraints", [])) - constraints.keys():
             raise Mismatch("vision.constraints", f"Unknown constraint handles {sorted(unknown)}. "
                            f"Use these declared handles: {list(constraints)}.")
-        valid = [ref for ref in entry["sources"] if ref in sources]
+        valid = list(dict.fromkeys(ref for ref in entry["sources"] if ref in sources))
         if valid != entry["sources"] or not valid:
             label = entry.get("handle", entry.get("outcome"))
             kept = valid or ["kickoff"]
@@ -287,10 +295,9 @@ def check_align_round(answer, sources):
             entry["sources"] = kept
     subjects = {"vision", "size", "scopeOut", *goals, *constraints}
     for ask in answer["questions"]:
-        if ask["affects"] not in subjects:
-            raise Mismatch("questions.affects", f"{ask['question']!r} cites {ask['affects']!r}. "
-                           f"Use an affected part of this proposal: {sorted(subjects)}.")
-        if ask["affects"] in dropped:
+        ask["affects"], = links([ask["affects"]], subjects, record=record,
+                                field="questions.affects", subject=ask["question"])
+        if ask["affects"] not in subjects or ask["affects"] in dropped:
             changes.append({"subject": ask["affects"], "action": "question", "question": ask["question"],
                             "summary": "Kept the open question attached to the vision."})
             ask["affects"] = "vision"
@@ -310,7 +317,7 @@ def batch_decide_brief(groups, words):
         obj(answer=batch_decision(groups)), [example])
 
 
-def check_batch_decide(answer, words):
+def check_batch_decide(answer, words, *, record=None):
     for group, selection in answer["selections"].items():
         text = selection["text"]
         if selection["optionId"] == "other":
@@ -318,9 +325,8 @@ def check_batch_decide(answer, words):
                 continue
             raise Mismatch("selections", f"Other for {group!r} contains {text!r}. "
                            "Copy the exact direction from the user's words, or use Unclear.")
-        if text:
-            raise Mismatch("selections", f"Selection {selection['optionId']!r} for {group!r} "
-                           "needs empty text. Copy the user's words only for Other.")
+        selection["text"] = normalised(record, "selections", text, "",
+            f"Removed redundant text from option {selection['optionId']!r} for {group!r}.")
 
 
 def tiny_round_example():
@@ -799,7 +805,7 @@ def reviewed_brief(question, stdin_instruction, image_directions):
     if repairs := take(facts, "Exact corrections", "Exact failure"):
         opening.update(repairs)
     keys = ("Write scope", "Requirements", "Subjects", "Contract authority", "Contracts provided",
-            "Contracts consumed", "Area contracts", "Planned contracts", "Decisions", "Runtime",
+            "Contracts consumed", "Area contracts", "Planned contracts", "Decisions", "Runtime", "Runtime assumptions",
             "Execution facts", "Existing checks", "Correction owners", "Crossed contracts",
             "Wave-start observations", "Observations", "Final observations", "Check artifacts")
     evidence = {**take(facts, *keys), **dict(sorted(facts.items()))}
@@ -897,6 +903,10 @@ def work_brief(store, ref):
         facts = {k: facts[k] for k in ("Exact failure", "Write scope", "Correction owners", "Existing checks",
                                      "Correction observations") if k in facts}
     facts["Runtime"] = runtime(setup)
+    assumptions = [d["choice"] for d in plan.select(document, "decision").values()
+                   if d["origin"] == "environment" and (ref == "guide" or contract["area"] in d["areas"])]
+    if assumptions:
+        facts["Runtime assumptions"] = assumptions
     if ref != "guide" and plan.guide_owner(document) == ref:
         facts["Try-it guide"] = plan.GUIDE_WALKTHROUGH
     if plan.guide_owner(document) == ref and features.enabled("judgeEvidence"):

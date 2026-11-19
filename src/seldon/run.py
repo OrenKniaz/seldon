@@ -22,6 +22,7 @@ from . import (
     units,
     wave_verify,
 )
+from .answers import normalised, recorder
 from .states import advance
 from .store import RunRow, Store, UnitRow
 
@@ -171,7 +172,7 @@ class Run:
             brief["facts"].update(architecture.planning_approach(
                 setup, vision, continuing=bool(gaps or built)))
             inference.call(store, self.provider, brief,
-                check=lambda a: architecture.outline(a, vision, record=store.record),
+                check=lambda a: architecture.outline(a, vision, record=recorder(store)),
                 consume=consume, field="areas/contracts/decisions/waves")
         elif state == "DETAIL":
             detail.step(store, self.provider, self.capacity)
@@ -262,11 +263,13 @@ class Run:
                 facts["Owner size override"] = size
 
         def check(answer):
-            actual = answer["vision"]["size"]
-            if size and size != "other" and actual != size:
-                raise ValueError(f"Expected the owner's size {size!r}; got {actual!r}. "
-                                 "Send the proposal with the selected size.")
-            return questions.check_align_round(answer, sources)
+            vision = answer["vision"]
+            changes = questions.check_align_round(answer, sources)
+            if size and size != "other" and vision["size"] != size:
+                vision["size"] = normalised(lambda kind, body: changes.append(body), "vision.size",
+                    vision["size"], size, f"Used the size selected by the owner: {size}.")
+                vision["sizeWhy"] = f"The owner selected {size} for planning."
+            return changes
 
         def display(ref, answer):
             advance(store, "aligned", ref, requestedChange=None)

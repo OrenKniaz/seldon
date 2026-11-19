@@ -22,7 +22,33 @@ class Waves(Scripted):
         if q["kind"] == "WORK" and q["facts"]["Write scope"] == ["unit-003/**"] and marker.exists():
             marker.unlink()
             os._exit(71)  # Kill the controller after the native reply, before it records the report.
-        return result
+        retirement = self.slot / "repeat-retirement"
+        if q["kind"] != "WORK" or q["facts"]["Write scope"] != ["unit-001/**"] or not retirement.exists():
+            return result
+        raw, thread = result
+        envelope = json.loads(raw)
+        answer = envelope["answer"]
+        requirements = str(q["facts"]["Requirements"])
+        wave = 3 if "extension-3.txt" in requirements else 2 if "extension-2.txt" in requirements else 1
+        if wave == 1:
+            path = "unit-001/check_initial_format.py"
+            (Path(q["execution"]["cwd"]) / path).write_text(
+                "from pathlib import Path\nassert Path('unit-001/format.txt').read_text() == '1'\n",
+                encoding="utf-8")
+            answer["checkPaths"].append(path)
+            answer["checks"].append({"purpose": "Read the initial saved format",
+                "command": [sys.executable, "-B", path], "expectedEvidence": "The initial file uses format 1",
+                "requirements": []})
+        elif wave == 2:
+            handle, = [r for r, c in q["facts"]["Existing checks"].items()
+                       if c["purpose"] == "Read the initial saved format"]
+            retirement.write_text(handle, encoding="utf-8")
+            answer["checks"].append({"retire": handle})
+        else:
+            handle = retirement.read_text(encoding="utf-8")
+            assert handle not in q["facts"]["Existing checks"]
+            answer["checks"].append({"retire": handle})
+        return json.dumps(envelope), thread
 
     def __call__(self, q):
         kind, facts = q["kind"], q["facts"]
@@ -109,6 +135,10 @@ def prepared(slot, fault):
 def journey(slot, fault):
     run, provider = prepared(slot, fault)
     answered, steered = False, False
+    retirement = slot / "repeat-retirement"
+    if not fault:
+        # Keep the scripted arm through the real controller kill/reopen.
+        retirement.touch()
 
     def user(item):
         nonlocal steered
@@ -183,6 +213,11 @@ run.step()
             assert "reader cannot read the new format" in str(assignment["gaps"])
             assert run.store.unit(unchanged).state == "REWORK"
         finish(run)
+        if not fault:
+            handle = retirement.read_text(encoding="utf-8")
+            assert handle not in plan.select(plan.execution(run.store), "check")
+            assert any(b.get("field") == "checks.retire" and b["original"] == handle
+                       for _, _, b in run.store.records("answer_normalisation"))
         assert (run.project / "unit-003/value.txt").read_text() == "value-003"
         assert (run.project / "unit-001/extension-2.txt").read_text() == "extended"
         if fault:

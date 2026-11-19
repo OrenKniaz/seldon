@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 from . import architecture, features, questions
-from .answers import ConsumptionFailure, Mismatch
+from .answers import ConsumptionFailure, Mismatch, normalised, recorder
 from .providers import Deadline, ProviderFailure, ResumeUnavailable, role_for
 
 
@@ -72,11 +72,12 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
             # Only answer-to-record work belongs here; provider calls and execution stay outside.
             # Roll back partial records so an exact correction never applies an answer twice.
             with store.transaction():
+                record = recorder(store)
                 if kind == "ARCHITECT" and original["facts"].get("Previous architecture") and "scope" not in answer:
                     facts = original["facts"]
                     previous = facts["Previous architecture"]
                     finished = len(previous["waves"]) - len(facts.get("Remaining waves", previous["waves"]))
-                    answer = {**architecture.merge(previous, answer, completed=previous["waves"][:finished]),
+                    answer = {**architecture.merge(previous, answer, completed=previous["waves"][:finished], record=record),
                               "why": answer["why"]}
                     current = store.cursor().wave
                     if len(answer["waves"]) < current:
@@ -85,7 +86,9 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                         planned = {c for w in answer["waves"] for c in w["commitments"]}
                         open_ = sorted({c for a in answer["areas"] for c in a["commitments"]} - planned)
                         if open_:
-                            answer["waves"].append({"goal": "Deliver the requested change", "commitments": open_})
+                            wave = {"goal": "Deliver the requested change", "commitments": open_}
+                            answer["waves"].append(normalised(record, "waves", None, wave,
+                                "Added a wave for the unplanned commitments."))
                         else:
                             raise Mismatch("waves", f"Seldon has closed {current - 1} wave(s) and is planning "
                                 f"wave {current}, but your waves list has {len(answer['waves'])}. Add the "
@@ -95,8 +98,9 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                         raise Mismatch("gaps", "Seldon expected the corrections behind a gap verdict; "
                             "got an empty gaps list. Send the gaps, or a satisfied verdict.")
                     if "gaps" in answer:
-                        answer = {**answer, "verdict": ("gap" if questions.must_fix(answer) else
-                                  "adequate" if kind == "REVIEW" else "satisfied")}
+                        verdict = "gap" if questions.must_fix(answer) else "adequate" if kind == "REVIEW" else "satisfied"
+                        answer = {**answer, "verdict": normalised(record, "verdict", answer["verdict"], verdict,
+                            f"Used the recorded findings to set the {kind} verdict to {verdict}.")}
                     checked = check(answer)
                     if kind == "ALIGN" and checked:
                         changes.extend(checked)

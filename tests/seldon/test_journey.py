@@ -214,9 +214,10 @@ def test_grow_align_receipt_and_lock_journey(tmp_path, monkeypatch):
     Scalar approval tests miss the interruption between receiving several choices and
     folding them, and cannot catch a draft reaching ARCHITECT or B as the accepted vision.
     """
-    from seldon import architecture, decisions, frontdoor, schema
+    from seldon import architecture, decisions, features, frontdoor, schema
 
-    monkeypatch.delenv("SELDON_OFF", raising=False)
+    enabled = {"growAlign", "sizeFirst", "answerRepair"}
+    monkeypatch.setattr(features, "enabled", enabled.__contains__)
     # Verbatim excerpts from Quiet Bench d56dc7b call-f5f75800. At r10 the recorded
     # simulator said "Build this". The grouped planner and owner replies are counterfactual.
     launch = "python server.py --port PORT --data DIR"
@@ -259,9 +260,10 @@ def test_grow_align_receipt_and_lock_journey(tmp_path, monkeypatch):
                 printing = replies["Other"]
                 assert "Compare shared interval" in facts["Sources"][interval]
                 assert facts["Sources"][printing] == mixed
-                revised["vision"].update(size="medium", sizeWhy="The owner chose a medium split")
+                revised["vision"].update(size="medium", sizeWhy="The owner selected medium for planning.")
                 revised["vision"]["stories"][0].update(outcome=changed, sources=[interval, printing])
-                answer = revised
+                answer = deepcopy(revised)
+                answer["vision"].update(size="large", sizeWhy="The draft still assumes large effort.")
         elif kind == "DECIDE":
             assert facts["User's verbatim words"] == mixed
             picks = {g["id"]: {"optionId": "unclear", "text": ""} for g in facts["Displayed groups"]}
@@ -335,13 +337,14 @@ def test_grow_align_receipt_and_lock_journey(tmp_path, monkeypatch):
         with pytest.raises(KeyboardInterrupt):
             run.step()
         run.close()
-        monkeypatch.setenv("SELDON_OFF", "growAlign")  # An open round keeps its stored shape.
+        enabled.remove("growAlign")  # An open round keeps its stored shape.
         run = Run.reopen(product, provider, lambda _: reply)
         assert frontdoor.state(product)["waitingFor"] == partial
         assert run.step() == "ALIGN"
         assert run.step() == "A"
         shown = frontdoor.state(product)["waitingFor"]
         assert shown["subject"]["vision"] == revised["vision"]
+        assert any("size selected by the owner" in note for note in shown["subject"]["normalisations"])
         with pytest.raises(decisions.Waiting):
             run.step()  # Transport redelivery of the superseded request.
         assert shown["request"] in frontdoor.state(product)["reason"]
@@ -3254,3 +3257,164 @@ def test_recorded_shelflife_detail_owner_journey(tmp_path, monkeypatch, collisio
         assert any("import_items.py" in note for note in request["subject"]["normalisations"])
         assert any(b.get("action") == "extended_owner" for _, _, b in store.records("scope_normalisation"))
         assert not store.records("detail_correction") and not store.records("step_failure")
+
+@pytest.mark.fast
+@pytest.mark.parametrize("case", ["work", "runtime", "references", "ownership", "subdivision", "missing-scope"])
+def test_answer_bookkeeping_journey(tmp_path, monkeypatch, case):
+    """The recorded guide check reaches integrated proof and the external contract reaches WORK.
+
+    Legacy journeys cite canonical requirement IDs or internal providers. The reference
+    twin adds redundant shapes through A/B. A subdivision must carry its normalised
+    links through both DETAIL passes, and missing scope still asks the planner.
+    """
+    from seldon import features, schema
+
+    monkeypatch.setattr(features, "enabled", {"growAlign", "answerRepair"}.__contains__)
+    monkeypatch.setattr(features, "planning_setup", lambda: {})
+    fixture = json.loads((Path(__file__).parent / "fixtures/quietbench-b01-bookkeeping.json")
+                         .read_text(encoding="utf-8"))
+    slot = tmp_path / "bookkeeping"
+    run, _ = prepare(slot)
+    shown, reasks = [], []
+    commitment, quality = "scopeIn:simulate", "quality:clear"
+
+    class Planner(Scripted):
+        def __call__(self, q):
+            kind, facts = q["kind"], q["facts"]
+            if "Exact corrections" in facts:
+                reasks.extend(facts["Exact corrections"][0]["Errors"])
+            if kind == "ALIGN":
+                answer = questions.tiny_round_example()
+                story = answer["vision"]["stories"][0]
+                story.update(handle="simulate", feature="Reference run", outcome="Read the saved result")
+                if case == "references":
+                    constraint = {"handle": "constraint:result", "source": "kickoff",
+                                  "value": "Read named values", "meaning": "Keep named output"}
+                    answer["vision"]["constraints"] = [constraint, deepcopy(constraint)]
+                    story["constraints"] = ["result", "result"]
+                    answer["questions"] = [{"affects": "simulate", "question": "Keep the saved result?",
+                        "options": [{"label": "Keep", "means": "Keep the named output"},
+                                    {"label": "Revise", "means": "Change the output"}]}]
+            elif kind == "ARCHITECT":
+                area = {"handle": "area:quiet-bench" if case == "references" else "quiet-bench",
+                        "responsibility": "Deliver the reference run", "scope": ["unit-001/**"],
+                        "commitments": [commitment, quality]}
+                answer = {"areas": [area], "contracts": [], "decisions": [],
+                          "waves": [{"goal": "Observe the reference run", "commitments": [commitment, quality]}]}
+                if case == "runtime":
+                    answer["contracts"].append(deepcopy(fixture["r378.runtime-verification"]))
+                if case == "subdivision":
+                    area["scope"].append("unit-002/**")
+                if case == "references":
+                    area["scope"].append(area["scope"][0])
+                    area["commitments"] = ["simulate", "simulate"]
+                    answer["areas"].append(deepcopy(area))
+                    answer["waves"][0]["commitments"] = ["simulate"]
+                    answer["decisions"] = [{"choice": "Keep one writer", "reason": "One scope",
+                                            "origin": "architecture", "areas": ["quiet-bench", "quiet-bench"]}]
+            elif kind == "DETAIL" and case == "subdivision" and facts["Area"]["handle"] == "quiet-bench":
+                result_area = {"handle": "result", "responsibility": "Write the result",
+                               "scope": ["unit-001/**"], "commitments": ["simulate"]}
+                display_area = {"handle": "display", "responsibility": "Present the result clearly",
+                                "scope": ["unit-002/**"], "commitments": ["clear"]}
+                answer = {"verdict": "subdivide", "subareas": [result_area, display_area, deepcopy(result_area)],
+                          "contracts": []}
+            elif kind == "DETAIL":
+                answer = json.loads(super().__call__(q))["answer"]
+                feature, requirement = answer["edits"]
+                feature["targetHandle"] = "feature:reference"
+                feature["typedBody"]["commitments"] = list(facts["Accepted commitments"]) if (
+                    case == "subdivision") else ["simulate" if case == "references" else commitment]
+                requirement["typedBody"]["features"] = [commitment if case == "references" else "feature:reference"]
+                if case == "references":
+                    answer["edits"].append(deepcopy(feature))
+                    answer["units"][0].update(requirements=["feature:reference"], dependencies=[1, 1])
+                if case == "ownership":
+                    answer["units"][0]["requirements"] = []
+                if case == "missing-scope" and "Exact corrections" not in facts:
+                    answer["units"][0]["scope"] = ["docs/try-it.md"]
+                if case == "runtime":
+                    assert fixture["r378.runtime-verification"]["text"] in str(facts["Decisions"])
+            elif kind == "DECIDE" and "Displayed groups" in facts:
+                answer = {"selections": {group["id"]: {
+                    "optionId": "done" if group["id"] == "round" else group["default"],
+                    "text": "The selected option and explanation"} for group in facts["Displayed groups"]}}
+            else:
+                return super().__call__(q)
+            result = {"answer": {"why": "Deliver the accepted result", **answer}}
+            schema.validate(result, q["schema"])
+            return json.dumps(result)
+
+        def invoke(self, q, started):
+            if case == "runtime" and q["kind"] == "WORK":
+                assert q["facts"]["Runtime assumptions"] == [fixture["r378.runtime-verification"]["text"]]
+            raw, thread = super().invoke(q, started)
+            if case == "work" and q["kind"] == "WORK" and "Readers" in q["facts"]:
+                directory = Path(q["execution"]["cwd"]) / "docs/try-it"
+                (directory / "check.py").rename(directory / "walkthrough.py")
+                reply = deepcopy(fixture["r114"])
+                reply["checks"][0]["command"][0] = sys.executable
+                return json.dumps({"answer": reply}), thread
+            return raw, thread
+
+    def user(item):
+        shown.append(item)
+        if "groups" in item["ask"]:
+            if case == "references":
+                return {"request": item["request"], "replyId": "bookkeeping-words",
+                        "words": "Keep the saved result, and alignment is done."}
+            return {"request": item["request"], "replyId": "bookkeeping-lock",
+                    "selections": [{"groupId": "round", "optionId": "done"}]}
+        return approve(item)
+
+    run.provider, run.user = Planner(slot), user
+    try:
+        while run.store.cursor().state != "EXECUTE":
+            run.step()
+        if case == "missing-scope":
+            assert len(reasks) == 1 and "Send at least one project-relative product path" in reasks[0]
+            assert plan.approved(run.store)
+            return
+        assert not reasks
+        request_b = next(item["subject"] for item in shown if item["gate"] == "B")
+        if case == "references":
+            request_a = next(item["subject"] for item in shown if item["gate"] == "A")
+            assert any("identical entries" in note for note in request_a["normalisations"])
+            assert any("questions.affects" in note for note in request_a["normalisations"])
+            document = request_b["plan"]
+            owner = next(u for r, u in plan.select(document, "unit").items() if r != "guide")
+            assert owner["dependencies"] == [] and len(owner["requirements"]) == 1
+            assert set(document["architecture"]["waves"][0]["commitments"]) == {commitment, quality}
+            assert any("redundant dependencies" in note for note in request_b["normalisations"])
+            assert any("distinct product paths" in note for note in request_b["normalisations"])
+            assert any("redundant text" in b["summary"] for _, _, b in run.store.records("answer_normalisation"))
+            return
+        if case == "subdivision":
+            areas = {a["handle"]: a for a in request_b["plan"]["architecture"]["areas"]}
+            assert {ref: a["commitments"] for ref, a in areas.items()} == {
+                "result": [commitment], "display": [quality]}
+            assert any("identical entries in subareas" in note for note in request_b["normalisations"])
+            return
+        if case == "ownership":
+            unit = next(u for r, u in plan.select(request_b["plan"], "unit").items() if r != "guide")
+            assert unit["requirements"] == list(plan.select(request_b["plan"], "requirement"))
+            assert any("omitted requirements" in note for note in request_b["normalisations"])
+            return
+        if case == "runtime":
+            assert not plan.select(request_b["plan"], "contract")
+            assert any("runtime assumption" in note for note in request_b["normalisations"])
+        run.step()
+        assert not run.store.records("consumption_failure"), [
+            b["reason"] for _, _, b in run.store.records("consumption_failure")]
+        finish(run)
+        if case == "work":
+            document = plan.execution(run.store)
+            check, = plan.guide_checks(document).values()
+            assert check["requirements"] == list(plan.select(document, "requirement"))
+            assert any("walkthrough.py" in run.store.read(ref)["command"][-1]
+                       for ref in run.store.cursor().finalObservations)
+            request = next(item for item in shown if item["gate"] == "CHECK-IN")
+            assert any(commitment in note for note in request["subject"]["normalisations"])
+        assert not run.store.records("consumption_failure")
+    finally:
+        run.close()
