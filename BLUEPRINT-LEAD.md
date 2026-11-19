@@ -1,0 +1,70 @@
+# Seldon Lead blueprint — one builder per milestone
+
+**Working draft v0.1 under the ratified Lead charter v1.0 · 19 November 2026.** Oren ratifies changes. The planning question is “What will the person be able to do after this milestone, and how will we see it still works at the next one?” The execution question belongs to the builder. A promise is an observable commitment in the accepted vision.
+
+## 1. One plan and its records
+
+Use the existing run store. Keep records immutable, plan revisions parent-linked, and a typed cursor for the current transition. IDs, references, candidate identity and legal moves belong to code. The following are logical records, several of which fit existing record kinds.
+
+| Record | Contents and writer | Next reader |
+|---|---|---|
+| Kickoff / dream | Front door records the owner's verbatim words, chosen mode, provider pins, settings and user origin. | ALIGN and every reopen |
+| Vision and decisions | The planner proposes people, ranked stories, commitments, exact constraints, quality criteria, exclusions and size. A captured reply binds the owner, origin, request, displayed revision, selection or exact words, rationale where given and resulting change. A locks the agreed proposal. | Plan review, B, later scope decisions and C |
+| Milestone plan | For each ordered milestone, the planner proposes an outcome, its promises and requirements, how the result will be realized, any boundary it establishes, dependencies, owner role and real checks. B binds vision, reviewed revision, accepted promises and staging. Later details can evolve with reasons. | Brief writer, proof runner, board |
+| Brief | Seldon freezes the mission, milestone and plan revision, base commit, decisions, carried promises, proof obligations and guide ownership. A repair adds the observed failure and expected behavior. | One builder session |
+| Builder session / return | Code records attempt, provider/model, workspace, base, provider session ID when known, disposition and cleanup. The builder returns changed paths, how to exercise them, discovered issues and open questions. Seldon records the actual diff and candidate Git commit independently. | Integration, recovery and proof |
+| Check, observation and judgment | Each check links a requirement to an action and observable result. Seldon records invocation, base/candidate, exit, cleanup and evidence. A separate read-only judge records subject, evidence refs, finding, severity, rationale and limits. | Milestone checkpoint, drift comparison and C |
+| Memory / check-in | Seldon records accepted decision refs, previous and current results per promise, assumptions, gaps, next action, owner and why. Check-in binds this summary to the candidate. The owner's answer or earlier waiver is recorded separately. | Next planning call, next builder, chat/page and reopen |
+
+Use one check at the strongest real boundary for a behavior. A single checkout walkthrough can cover several promises when each has an observable outcome. Brownfield starts by mapping existing behavior and evidence. Open-loop milestones carry the agreed metric, measurement history and stop condition.
+
+## 2. The loop
+
+| Step | What Seldon does | Exit or return |
+|---|---|---|
+| Grow → A | Share R18 ALIGN. Grow the dream around the user's exact values, show proposed defaults and changes, ask several material questions together. R17 gives 2–4 options, recommendation first, plus Other. | Repeat on the user's words until they explicitly finish alignment on the displayed vision. |
+| Plan → B | Outline milestones at the scale of the dream. Detail the next outcome. Trace every commitment to a milestone, including guide and walkthrough. Get independent plan review with the actual model/provider independence label. | Resolve a coverage gap, then show the reviewed plan in chat for B. Changes to accepted experience return to the owner. |
+| Brief → build | Code hands the approved brief to a single strong builder in an isolated product workspace. The builder chooses tools, skills and native parallelism. Seldon records the parent session. | A return offers a candidate, asks a question or reports a blocker. An exact-fix turn may repair the receipt without rebuilding the product. |
+| Integrate → prove | Wait for the writing session and helpers to finish. Seldon captures the patch against the named base, validates scope, records publication intent and integrates the candidate. Run ordinary checks in disposable checkouts, observe RED against the base for new behavior and GREEN on the candidate. Run cumulative real-path proof below. | Failed execution or a missing witness has a named owner and next action. Preserve the integrated revision and proof history through repair. |
+| Judge → remember | Give an independent judge the promised experience, actual source/meaningful tests as needed, and relevant observations on the integrated candidate. Assess completeness, usability and maintainability. Store the disposition and regenerate the baton. | A must-fix returns with the reproduction to the same builder. A nit stays visible. A planner resolves ambiguity or proposes a decision. |
+| Check in → replan | Show what became possible, what still works, what regressed, limitations and the next proposed outcome. Record each check-in, including a valid waiver. Keep the completed prefix. Replan the unfinished horizon from this candidate and the user's decisions. | Start the next milestone once dependencies and decisions allow. A scope change always waits. Pause only the work that depends on an answer. |
+| C | Read the current reviewed plan, cumulative observations, explicit quality and completeness judgments, last check-in and observed fresh-copy guide. Offer the demo, try-it instructions and residual evidence limits. | The actual owner's answer on that candidate records acceptance. Record scripted C separately. Revision or decline follows the user's words. |
+
+### What the builder sees
+
+Lead with the person and the action they need. For example, “A bench engineer who stops a measurement needs to reopen the partial result and see exactly how much was measured. Deliver that journey from capture through restart. Preserve the comparison rule the owner chose at A.” Then give the relevant verbatim decision, base, changed behavior, existing interfaces, quality bar, allowed workspace, checks and guide. End with the small typed return. The provider enforces its shape. Internal IDs appear only where a response must link to them.
+
+One parent owns the result and repairs across the whole product slice, including both ends of an interface. Internal helper reports can guide implementation. A builder question goes to the planner with the original decision and observed product first. Give routine answers directly. Send choices that change the owner's experience through the front door. Detached writers, an unreconciled session or uncertain cleanup prevent a second writer from starting.
+
+### What changes proof
+
+At milestone M, take the union of promises delivered through M from the accepted trace, including preserved brownfield behavior. Check the resulting set against actual observations on M's integrated commit. Future promises remain visibly planned. For each previously delivered promise keep its old witness beside the fresh one. Missing coverage is visible even if the builder deletes a test or changes what its assertion means. Review changed checks against the approved behavior. Code owns observed execution. A judge interprets whether RED showed the right failure and whether GREEN demonstrates the promise.
+
+For example, milestone 1 makes a saved item survive restart. Milestone 2 adds filtering. Start from clean data, save, restart, filter and inspect what the user sees. If the item disappears, keep milestone 1's historic pass, mark the promise failing on milestone 2, and send the exact action and candidate to milestone 2's builder. Re-exercise on the repaired candidate. Seldon owns the replay of the accepted action independently of checks supplied in the patch.
+
+Rerun behavioral witnesses on every milestone candidate. Reuse an independent source verdict only for the same Git tree and the same explicit subject. Bound a judgment by its subject and supply evidence that can answer it. For a UI use actual browser interaction and the relevant screenshots or console. For persistence inspect state after restart. A missing device or inaccessible environment gets an explicit unverified observation with a reason. A limited criterion can be disclosed under v1.15 R9. An accepted core promise lacking its witness needs further proof or an explicit owner decision to revise scope. Show genuine product failure, proof-environment failure and an unobserved result distinctly.
+
+### Memory that survives the session
+
+Render `AGENDA.md` (accepted horizon and next outcome) and `HANDOVER.md` (where to resume and why) in the run's Seldon-owned memory directory, outside the builder's writable product checkout. Link to the locked vision, exact decision words, current brief, candidate and proof. Supply read-only copies or excerpts to the builder. Keep long evidence by reference. Update after a decision, return, proof, pause or check-in that changes the next safe action. Rebuild missing or stale files from the store on open. An edited Markdown file has no transition authority. The ladder's files illustrate the handoff pattern and remain development artifacts.
+
+On reopen, read the stored mode, pending decision and last durable attempt/publication. Reconcile the provider receipt, candidate and process cleanup before choosing resume, replacement or pause. Preserve the same logical owner and brief lineage across a necessary replacement. A pause names the fault, triggering condition, next actor and next action. Provider availability can resume eligible work. A disconnected decision stays pending until the matching reply arrives. A change to accepted scope stale-marks affected briefs and judgments before further writing.
+
+## 3. Where the current core fits
+
+Inspected the semantic-cc checkout at HEAD `8bf8550531fcb13b5397d43636202362665b1fa9`. These are implementation seams for a proposal.
+
+| Reuse | Lead-specific work |
+|---|---|
+| `run.Run.align`, grouped questions, `decisions.py`, `frontdoor.py`, `inference.py`, schema validation and recorded provider calls | After A route the stored mode to milestone planning. Bind B, check-ins and C to their Lead subjects through the same chat decision writer. |
+| `store.py` transactions, immutable records, artifacts and controller lease, plus `states.py` transitions | Add milestone cursor/records and revision invalidation. Current `Store.revision` calls area/unit stale logic. Select the affected promises for Lead at that owning boundary. |
+| `providers.py`, `claude.py`, process lifecycle, Git candidate and publication primitives | Current Codex invocation disables multi-agent and skills. Claude safe mode suppresses skills. Change only the Lead builder invocation and instructions. Preserve provider protections. Verify effective helper scope, termination and approved skill availability per provider. If unavailable, disclose single-session capability. If isolation or quiescence cannot be established, pause before granting write access. |
+| `proof.observe`, `observations.py`, Git checkouts, independent judgment questions, verdict freshness and recovery patterns | Pass walkthrough/check ownership explicitly at the proof boundary. Current final proof looks it up on the unit plan. Current `gitwork.publish` advances a unit, and `run.eligible` expects unit judgments and a wave check-in. Bind publication and eligibility to the real milestone and candidate. |
+
+Lead skips ARCHITECT/area DETAIL fan-out, unit worker queues, peer mail, unit contracts/scopes as a scheduling mechanism, and WAVE-VERIFY/fixup-unit dispatch. It keeps real interface decisions, scope enforcement, integrated proof, review and repair. Never manufacture a unit or wave to satisfy an old gate. The builder and its descendants get product write access only. The authority store, decision ingress and proof collector must stay outside their effective write permissions, including when exercising builder-provided checks. A different working directory and prompt instructions alone do not establish that boundary.
+
+## 4. Cost model
+
+Per run, count growth rounds, milestone plan/review, builder starts and resumed turns, independent judgment, repair and replan calls. Add provider-native helper usage where the provider reports it. Count shared parent/child totals once and label missing usage unknown. Add machine proof time, per-promise observations, wall time, human wait and recovery. Report comparable billing where available or fresh tokens (input minus cached input plus output) as a proxy.
+
+Growth and A/B are mostly fixed costs. Builder work scales with milestones and rework. With one distinct witness per new promise, cumulative replay costs the sum of all delivered witnesses at each checkpoint. Shared journeys and parallel isolated checks can reduce wall time while retaining current evidence for each promise. Lead saves Seldon scheduling and peer coordination only if those savings exceed native delegation, context handoff and repeated proof. Compare paired measurements. Costs are development evidence and never terminate a product run.

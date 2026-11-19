@@ -1,0 +1,38 @@
+# Seldon Lead charter v1.0 — delta to CHARTER v1.8
+
+**RATIFIED by Oren · 19 November 2026** ("ok I ratify"). The owner offers two shapes, chosen at kickoff (C27). CHARTER v1.8 and BLUEPRINT v1.15 govern Orchestrator; this delta governs Lead. Only Oren ratifies changes. Clause numbers below retain their original subjects.
+
+## 1. The goal
+
+A person can bring Seldon a rough dream, shape it with a cofounder, and come back many sessions later to a working product that still honors the original choices. In Lead, Seldon plans and independently proves the work. One strong Codex or Claude builder takes responsibility for delivering each milestone. The person can always see which promises work today, what changed, and which decision needs them.
+
+## 2. Core pieces
+
+**Carry over in full:** C2–C4 (determinism, semantics, typed answers), C6–C7 (improve the dream, research), C10–C11 (living trace, independent plan review), C14 (meaningful RED/GREEN), C20–C24 (provider chat and read-only page, Vision Lock, open-loop work, continuity, brownfield), and C26 (real-path evidence states). For C20 the inspectable execution actor is the milestone builder. The following replacements apply in Lead.
+
+| # | Core piece | Means | Verify by |
+|---|---|---|---|
+| C1 | Seldon drives the loop | Code alone schedules Seldon calls and transitions. Each planner, reviewer and judge answers one typed question. Code hands one mission to one builder and collects a typed return. **Only inside that assignment**, the builder may use provider-native sub-agents, parallel threads and coding skills. Their authority ends at its product workspace and its lifetime. Seldon retains the sole writer for plan, decisions, memory and proof. The person decides A, B, scope and C. | A builder returning “approved,” including through a helper, can supply a candidate only. Seldon independently obtains observations and the bound user reply. |
+| C5 | Size the dream | At ALIGN recommend micro, small, medium or big by expected single-agent effort. The owner may override. One-session work ordinarily has one milestone. Owner-requested staging and new evidence can change the horizon. Mode is the owner's kickoff choice. | Hello reaches the ordinary gates with one milestone. A requested second checkpoint survives planning. |
+| C8 | User decisions | A locks the grown vision. B approves the milestone plan. Show and record each milestone check-in. Later replies can be waived in the owner's words. A changed promise always waits for the owner. C follows the integrated live walkthrough and try-it guide. | Reopen a waived check-in beside a proposed scope change. Only the latter still requires a reply. A scripted C has its own label. |
+| C9 | V-model trace | Preserve what, how and test at every size. Link the user's words to features, stories, requirements, milestone design, checks, candidate code and observed outcomes. Record an interface agreement where a later milestone relies on it. | From a failed user action, reach the requirement, accountable session, exact candidate and originating decision in either direction. |
+| C12 | One accountable builder | One active product-writing session owns the milestone end to end. It chooses its native division of labor inside the brief. Provider pins hold. Seldon assigns outcomes at milestone boundaries. | One brief, one writer of record and one candidate even when the provider uses several threads. |
+| C13 | Builder writes product and tests | Implementation, semantic checks and the usable guide belong to the builder. The planner sets the mission and proof obligations. Seldon runs proof and commissions the independent judgment. | Inspect the candidate, check sources and independent records on the same revision. |
+| C15 | Prove the dream through time | At every milestone, independently exercise its new promises and every earlier delivered promise on the current integrated product. At C cover the whole accepted trace, source completeness (including stubs/mocks/missing behavior), Vision Lock quality bar and fresh-copy guide. Return a concrete gap to its owner. | Remove a first-milestone behavior during the second. Its former pass becomes historical, the checkpoint shows the regression and C stays closed pending repair. |
+| C16 | Planner steers | The planner settles build questions from the vision, decisions and product evidence, and revises unfinished milestones. Scope changes require a user-bound decision with the impact visible. | A repair within scope resumes the builder. A request to drop a promise reaches the owner. |
+| C17 | Milestones | Plan usable outcomes in the order the person values. End each with an integrated candidate, proof, judgment, memory and a check-in. Plan the next brief from that product. Honor user-dictated staging. | The next brief names the prior candidate, observed results and decisions it must preserve. |
+| C18 | Resumable ownership | Reconcile the attempt and its descendants before resuming or replacing its writer. Apply the shared bounded recovery and planner-first steering rule. A provider outage pauses with a reason and a condition for resumption. | Kill the controller around delivery and reopen. Recover the same candidate or one safe next attempt with a recorded handoff. |
+| C19 | Durable memory and handoff | The store keeps decisions, proof and their provenance. Seldon renders human-readable project memory files for builder handoff and user inspection. Carry forward advisory lessons with sources. A builder may propose a discovery in its return. Seldon alone can adopt it into the plan or memory. | Delete the rendered handoff, switch builder sessions and regenerate it. The same commitments, open question and next action return from the store. |
+| C25 | User control | Chat can pause, resume, stop or reprioritize. Show the accountable session, milestone, progress and evidence. Show helper detail only as reported by the provider. Control covers the whole writing session. | Pause mid-build. Observe cleanup, retain partial work and resume without a second active writer. |
+
+**New C27 · Choose the shape once.** Kickoff records Lead or Orchestrator and presents what Seldon will manage. Every restart uses that record. A saved run predating the choice reopens as Orchestrator. Verify by changing the environment between a pause and reopen.
+
+## 3. Invariants and journey
+
+I2–I9 carry over. For I1, code schedules milestones and proves their state. For I10, each Seldon-initiated semantic call keeps its one-question contract. The builder's internal work is provider-owned. Its return crosses that boundary once per attempt. A child session cannot answer a Seldon question on the user's behalf.
+
+Grow with grouped choices and Other → **A** → milestone plan and independent review → **B** → brief → build → integrate → prove and judge → remember → **check-in** → replan → live walkthrough and guide → **C**. Failed proof returns to the same milestone. Changes to accepted scope go back to the person with their consequences.
+
+## 4. Ratification
+
+Three decisions travel together: permit native delegation inside C1, replace Seldon's bead/wave ownership with the milestone charter in C5/C8/C9/C12/C13/C16–C18/C25/C27, and require cumulative independent proof plus Seldon-owned memory in C15/C19. The existing deviation register remains evidence about its named implementation. A Lead capability earns its own evidence.
