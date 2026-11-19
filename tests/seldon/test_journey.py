@@ -1368,6 +1368,7 @@ def journey(slot, mode="normal", count=1):
             assert not run.store.records("unit_fixup")
             assert not any(b.get("next") == "REWORK" for _, _, b in run.store.records("transition"))
             import re
+            from seldon import providers
             from seldon.store import encode
 
             for _, _, question in run.store.records("question"):
@@ -1387,6 +1388,12 @@ def journey(slot, mode="normal", count=1):
                 if question["kind"] == "FLOW":
                     assert prompt.index("\n\nCrossed contracts\n") < prompt.index("\n\nFinal observations\n")
                 assert json.loads((folder / "question.json").read_text("utf-8")) == question
+                context = question.get("renderContext", {})
+                if (question["kind"] == "WORK" and context.get("soleOwner") is False
+                        and context.get("guideRole") != "separate"):
+                    # Split builders need the craft bar even though someone else owns integration.
+                    trial, _ = providers.render_question(question, prompts2=True)
+                    assert "Prove the failure paths and edge cases the requirements imply" in trial
         if mode == "review-gap":
             assert provider.calls.count("REVIEW") == 2
             b = next(b for _, _, b in run.store.records("decision_request") if b["gate"] == "B")

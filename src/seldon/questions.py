@@ -518,10 +518,17 @@ def reviewed_work(question, facts, context):
              "Write code a senior engineer can trace, debug and change. Use names from the product, "
              "give each decision one clear home, and keep error paths legible. Make your side of each "
              "public agreement usable by the next owner.")
+    craft += (" Prove the failure paths and edge cases the requirements imply, such as invalid input, "
+              "empty states, limits and conflicts.")
     craft = "\n\n".join(filter(None, (craft, labelled(take(facts, "Quality bar",
                                                          "Design guidance used by UI workers")))))
+    user_words = take(facts, "User's words")
+    if user_words:
+        user_words["Exact product wording"] = (
+            "Use the person's exact words, labels, commands, field names and numbers verbatim in the product. "
+            "Apply craft to everything around them.")
     opening = {**({"Accepted audience": audience} if audience else {}),
-               **take(facts, "User's words"),
+               **user_words,
                **({"Current wave": wave} if wave else {}),
                **take(facts, "This wave's commitments", "Unit"),
                **({"Accepted stories and results": context["stories"]} if context.get("stories") else {}),

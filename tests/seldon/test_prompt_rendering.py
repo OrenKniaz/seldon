@@ -26,7 +26,7 @@ def receipt_at_end(prompt, question):
 
 
 def test_first_work_reaches_native_preparation_in_both_arms(tmp_path, monkeypatch):
-    """A schema-only or provider-only rewrite would miss the first assignment or duplicate instructions."""
+    """First WORK must reach native preparation with trial coaching confined to the trial arm."""
     monkeypatch.setattr(features, "planning_setup", lambda: {"sizeFirst": True, "split": "auto"})
     monkeypatch.setattr(features, "enabled", lambda name: name != "growAlign")
     run, scripted = prepare(tmp_path / "journey")
@@ -74,8 +74,12 @@ def test_first_work_reaches_native_preparation_in_both_arms(tmp_path, monkeypatc
                 assert "--output-schema" in invocation["command"]
                 assert any("model_instructions_file=" in arg for arg in invocation["command"])
             if arm:
-                ordered(prompt, "Build the current wave", "Accepted audience", "User's words", "Current wave",
-                        "Write code a senior engineer", "docs/try-it.md", "Assignment facts",
+                ordered(prompt, "Build the current wave", "Accepted audience",
+                        questions.labelled({"User's words": question["facts"]["User's words"]}),
+                        "Exact product wording", "words, labels, commands, field names and numbers verbatim",
+                        "Apply craft to everything around them", "Current wave", "Write code a senior engineer",
+                        "Prove the failure paths and edge cases the requirements imply",
+                        "invalid input, empty states, limits and conflicts", "docs/try-it.md", "Assignment facts",
                         "After the work", "Illustration from another assignment", "Answer schema")
                 assert prompt.count(instructions) == (1 if name == "claude" else 0)
                 if name == "claude":
@@ -87,6 +91,8 @@ def test_first_work_reaches_native_preparation_in_both_arms(tmp_path, monkeypatc
                 ordered(prompt, instructions, question["prompt"], "Answer schema", "Example", "User's words")
                 assert "Accepted audience\n" not in prompt
                 assert "Write code a senior engineer" not in prompt
+                assert "Exact product wording\n" not in prompt
+                assert "Prove the failure paths and edge cases" not in prompt
             for key in ("Requirements", "Write scope", "Existing checks", "Correction owners", "Runtime"):
                 assert questions.labelled({key: question["facts"][key]}) in prompt
 
