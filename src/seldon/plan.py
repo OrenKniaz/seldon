@@ -404,7 +404,10 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
     validate(document)
     if superseded and record:
         record("trace_normalisation", {"removed": superseded, "reason": "Replaced draft requirement links"})
-    return add_guide(document, wave) if guide in (None, "guide") else document
+    if guide in (None, "guide"):
+        guide_brief = next((answer["guideBrief"] for _, answer in leaves if "guideBrief" in answer), "")
+        return add_guide(document, wave, brief=guide_brief)
+    return document
 
 
 def validate_records(document):
@@ -493,7 +496,7 @@ def validate(document):
     return coverage(document)
 
 
-def add_guide(document, wave=1):
+def add_guide(document, wave=1, *, brief=""):
     from copy import deepcopy
     result = deepcopy(document)
     previous = select(result, "unit").get("guide")
@@ -512,7 +515,8 @@ def add_guide(document, wave=1):
     result["nodes"]["guide"] = {"kind": "unit", "body": {
         "scope": list(GUIDE_SCOPE), "requirements": [],
         "area": area, "dependencies": [],
-        "instructions": GUIDE_WORK + "\nThis wave: " + document["architecture"]["waves"][wave - 1]["goal"]}}
+        "instructions": GUIDE_WORK + "\nThis wave: " + document["architecture"]["waves"][wave - 1]["goal"],
+        **({"brief": brief} if brief else {})}}
     return result
 
 

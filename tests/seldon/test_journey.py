@@ -23,7 +23,7 @@ def test_quiet_bench_size_calibration_journey(tmp_path, monkeypatch):
     """
     from seldon import features, frontdoor, schema
 
-    monkeypatch.setattr(features, "enabled", lambda name: True)
+    monkeypatch.setattr(features, "enabled", lambda name: name != "plannerBrief")
     monkeypatch.setattr(features, "planning_setup", lambda: {"sizeFirst": True, "split": "auto"})
     fixture = Path(__file__).with_name("fixtures") / "quietbench-q01-align.json"
     recorded = json.loads(fixture.read_text(encoding="utf-8"))
@@ -105,7 +105,7 @@ def test_recorded_quiet_bench_guide_scope_journey(tmp_path, monkeypatch, guide_o
     from dataclasses import replace
     from seldon import decisions, features, schema
 
-    monkeypatch.setattr(features, "enabled", lambda _: True)
+    monkeypatch.setattr(features, "enabled", lambda name: name != "plannerBrief")
     replies = json.loads((Path(__file__).parent / "fixtures/quietbench-q01-guide-scopes.json")
                          .read_text(encoding="utf-8"))
     round_answer = questions.tiny_round_example()
@@ -1361,6 +1361,83 @@ def finish(run):
     gitwork.unchanged(run.project, cursor.candidate)
     assert not run.store.records("outcome")[-1][2]["accepted"]
     return cursor, run.store.records(), run.store.units()
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("arm", ["planner", "off", "retained", "continuation"])
+def test_planner_brief_golden(tmp_path, monkeypatch, arm):
+    """Catch lost or rewritten DETAIL prose at the native worker boundary.
+
+    The existing prompt journeys cannot detect a planner answer dropped during compilation,
+    a separate guide handed a product brief, or an old plan refused on reopen.
+    """
+    from seldon import features, providers
+
+    active = arm in ("planner", "continuation")
+    enabled = features.enabled
+    monkeypatch.setattr(features, "enabled", lambda name: active if name == "plannerBrief"
+                        else False if name in ("prompts2", "growAlign") else enabled(name))
+    monkeypatch.setattr(features, "planning_setup", lambda: {})
+    briefs = {f"unit-{i:03}/**": (
+        f"  For the reader of value {i}, \"Read named values\" means seeing the saved result.\n\n"
+        "Keep one readable path from the reader to the persisted value.  ") for i in (1, 2)}
+    guide = ("Help a new reader try the saved values from a clean checkout.\n"
+             "Run the documented steps and verify the value they see.")
+    scripted_answer = Scripted.__call__
+
+    def answer(self, q):
+        result = scripted_answer(self, q)
+        if q["kind"] == "DETAIL" and active:
+            response = json.loads(result)
+            for unit in response["answer"]["units"]:
+                unit["brief"] = briefs[unit["scope"][0]]
+            if "Separate walkthrough" in q["facts"]:
+                response["answer"]["guideBrief"] = guide
+            return json.dumps(response)
+        return result
+
+    monkeypatch.setattr(Scripted, "__call__", answer)
+    slot = tmp_path / arm
+    mode = "wave-fault" if arm == "continuation" else "parallel-contract"
+    run, scripted = prepare(slot, mode, 2)
+    try:
+        if arm == "retained":
+            while run.store.cursor().state != "EXECUTE":
+                run.step()
+            run.close()
+            active = True
+            run = Run.reopen(slot / "product", scripted, approve)
+        finish(run)
+    finally:
+        run.close()
+
+    assigned = set()
+    continued = False
+    for folder in (slot / "calls").glob("call-*"):
+        q = json.loads((folder / "question.json").read_bytes())
+        if q["kind"] != "WORK":
+            continue
+        prompt = (folder / "prompt.txt").read_text("utf-8")
+        if q["execution"]["session"]:
+            assert "Exact failure" in q["facts"]
+            assert prompt == providers.render_question(q, planner_brief=False)[0]
+            continued = True
+        elif arm in ("planner", "continuation"):
+            scope = q["facts"]["Write scope"][0]
+            brief = guide if scope == plan.GUIDE_PATH else briefs[scope]
+            assert prompt.startswith(brief + "\n\nWrite scope\n")
+            assert prompt.index("Person's exact words\nRead named values\n") < prompt.index("Answer schema\n")
+            assert "Write code a senior engineer" not in prompt
+            assert "Deliver your part through its real entry point" not in prompt
+            if mode == "parallel-contract":
+                side = "Contracts provided" if scope == "unit-001/**" else "Contracts consumed"
+                assert prompt.index(side) < prompt.index("Person's exact words")
+            assigned.add(scope)
+        else:
+            assert prompt == providers.render_question(q, planner_brief=False)[0]
+    if arm in ("planner", "continuation"):
+        assert assigned == {*briefs, plan.GUIDE_PATH}
+    assert continued == (arm == "continuation")
 
 
 def journey(slot, mode="normal", count=1):

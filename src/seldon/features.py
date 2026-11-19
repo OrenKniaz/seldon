@@ -12,12 +12,13 @@ sizeFirst (new kickoffs record effort-based planning and the SELDON_SPLIT experi
 prompts2 (mission-first briefs; off = original provider rendering). OFF BY DEFAULT until its replay
 A/B decides: SELDON_ON=prompts2 turns it on.
 judgeEvidence (documented operation observations and an explicit folded code-quality finding).
+plannerBrief (planner-authored WORK briefs; opt in with SELDON_ON=plannerBrief).
 """
 import os
 
 
 # Features still on trial: off unless SELDON_ON names them (an A/B has not decided yet).
-TRIAL = {"prompts2", "judgeEvidence"}
+TRIAL = {"prompts2", "judgeEvidence", "plannerBrief"}
 
 
 def _names(var):

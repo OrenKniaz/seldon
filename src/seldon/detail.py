@@ -44,6 +44,7 @@ def step(store, provider, capacity):
     setup = store.read(cursor.kickoff)["setup"]
     fold_guide = setup.get("sizeFirst") is True and setup.get("split") == "auto"
     guide = plan.guide_owner(previous)
+    guide_area = pending[0]["handle"] if pending and guide in (None, "guide") else None
     resumed = next((b["words"] for _, _, b in reversed(store.records("approval"))
                     if "step" in b["subject"] and b["choice"] in ("approve", "revise")), None)
     done, refs = {}, []
@@ -53,7 +54,9 @@ def step(store, provider, capacity):
 
     def ask(area, correction=None):
         try:
-            question = questions.detail_brief(store, outline, area)
+            question = questions.detail_brief(store, outline, area,
+                guide_brief=area["handle"] == guide_area,
+                may_fold_guide=fold_guide and len(outline["areas"]) == len(outline["waves"]) == 1)
             if existing := question["facts"]["What exists here"].get(guide):
                 existing["scope"] = [p for p in existing["scope"] if p not in plan.GUIDE_SCOPE]
             local = {r: {**c,
@@ -107,7 +110,7 @@ def step(store, provider, capacity):
             store.close()
 
     def collect(pending, correction=None):
-        nonlocal outline
+        nonlocal outline, guide_area
         leaves, failures, gaps = [], {}, {}
         if correction and "architecture" in correction[1]:
             pending, gaps = [], correction[1]
@@ -130,6 +133,8 @@ def step(store, provider, capacity):
                         if answer["verdict"] == "subdivide":
                             recovery.planning(store, ref, answer)
                             outline = architecture.expand(outline, area, answer)
+                            if area["handle"] == guide_area:
+                                guide_area = answer["subareas"][0]["handle"]
                             pending.extend(a for a in outline["areas"]
                                            if a["handle"] in architecture.index(answer["subareas"]))
                         else:

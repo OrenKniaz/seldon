@@ -241,8 +241,11 @@ def local_plan(area, answer, vision, *, record=None):
     """Check ownership before merging; canonical trace validation runs on the merged document."""
     vision = vision_body(vision)
     grown = "stories" in vision
-    validate_schema({k: v for k, v in answer.items() if k != "why"},
-                    GROWN_DETAIL_PLAN if grown else DETAIL_PLAN)
+    structure = {k: v for k, v in answer.items() if k not in ("why", "guideBrief")}
+    if "units" in structure:
+        structure["units"] = [{k: v for k, v in unit.items() if k != "brief"}
+                              for unit in structure["units"]]
+    validate_schema(structure, GROWN_DETAIL_PLAN if grown else DETAIL_PLAN)
     edits = index(answer["edits"], "edits.targetHandle", key="targetHandle", record=record)
     answer["edits"] = list(edits.values())
     features = {r: e["typedBody"] for r, e in edits.items() if e["kind"] == "feature"}

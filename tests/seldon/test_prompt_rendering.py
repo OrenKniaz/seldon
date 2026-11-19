@@ -28,7 +28,7 @@ def receipt_at_end(prompt, question):
 def test_first_work_reaches_native_preparation_in_both_arms(tmp_path, monkeypatch):
     """First WORK must reach native preparation with trial coaching confined to the trial arm."""
     monkeypatch.setattr(features, "planning_setup", lambda: {"sizeFirst": True, "split": "auto"})
-    monkeypatch.setattr(features, "enabled", lambda name: name != "growAlign")
+    monkeypatch.setattr(features, "enabled", lambda name: name not in ("growAlign", "plannerBrief"))
     run, scripted = prepare(tmp_path / "journey")
     invoke = scripted.invoke
 

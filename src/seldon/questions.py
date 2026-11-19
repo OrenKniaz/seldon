@@ -159,7 +159,7 @@ def question(kind, prompt, facts, schema, examples, targets=(), execution=None, 
 
 
 def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grown=False,
-          coach_contracts=False, sole_work=False, context=None):
+          coach_contracts=False, sole_work=False, context=None, planner_brief=False, guide_brief=False):
     if kind in ("ARCHITECT", "DETAIL", "WORK", "COACH") and not (kind == "WORK" and execution.get("session") and facts.get("Exact failure")):
         facts = {**facts, "Available tools and skills": AVAILABLE_TOOLS}
     if kind == "ALIGN":
@@ -169,7 +169,7 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grow
                   "scopeIn": ["Greet a supplied name"], "scopeOut": [], "improvements": [],
                   "quality": [{"criterion": "Clear output", "verification": "Run with a name"}],
                   "alternatives": [{"label": "Greet everyone", "means": "Use a greeting without a name"}]},
-        "ARCHITECT": example_architecture(grown), "DETAIL": example_detail(grown),
+        "ARCHITECT": example_architecture(grown), "DETAIL": example_detail(grown, planner_brief, guide_brief),
         "REVIEW": {"verdict": "adequate", "gaps": []},
         "DECIDE": {"choice": next(iter(targets), "Unclear")},
         "COACH": {"guidance": "Use the declared contract and write a check of the acceptance sentence."},
@@ -203,7 +203,7 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grow
                    "guidance did not resolve it, describe the gap and what the planner must settle. "
                    "Use ask for decisions that require the user.")
     return question(kind, prompt, facts, answer_schema(kind, targets, owners, grown=grown,
-                    coach_contracts=coach_contracts),
+                    coach_contracts=coach_contracts, planner_brief=planner_brief, guide_brief=guide_brief),
                     [example], targets, execution, images, context=context)
 
 
@@ -399,12 +399,33 @@ def example_architecture(grown=False):
                                     "commitments": ["scopeIn:1", "quality:1"]}]}
 
 
-def example_detail(grown=False):
+BRIEF_EXAMPLE = (
+    'People staffing the equipment desk said, "I need to know who has a key before I close up." '
+    "Give them a way to record a key checkout from the desk screen and see the borrower's name when "
+    "they reopen it. The tricky bit is when two people try to lend the same key. Keep the first checkout "
+    "and tell the second person who already has it. The returns screen and staff sign-in have their own "
+    "owners. Keep the checkout rule in one place, use names from the desk, and give each step room to read "
+    "at a normal line length. Show this from the desk screen with two open sessions, then reopen the "
+    "record and check that the first borrower still appears.")
+
+
+def example_detail(grown=False, planner_brief=False, guide_brief=False):
     example = example_plan()
     if grown:
         example["edits"][0]["typedBody"]["commitments"] = ["scopeIn:greeting"]
+    units = [{k: v for k, v in u.items() if k != "area"} for u in example["units"]]
+    if planner_brief:
+        feature, requirement = (e["typedBody"] for e in example["edits"][:2])
+        feature.update(story="Lend a key from the desk", acceptance="Reopen a key checkout")
+        if grown:
+            feature["commitments"] = ["scopeIn:key-checkout"]
+        requirement["acceptance"] = "Reopening a checkout shows the first borrower's name."
+        units[0].update(scope=["key-desk/**"], instructions="Deliver key checkout", brief=BRIEF_EXAMPLE)
     return {"verdict": "planned", "edits": [e for e in example["edits"] if e["kind"] != "area"],
-            "units": [{k: v for k, v in u.items() if k != "area"} for u in example["units"]]}
+            "units": units, **({"guideBrief": "Help a new desk worker try a key checkout from a clean "
+                               "start and reopen it to see who has the key. Walk through the documented "
+                               "steps and check the name they see."}
+                              if guide_brief else {})}
 
 
 def user_words(store):
@@ -437,7 +458,7 @@ def architect_brief(vision, words, gap=None, previous=None, built=None):
     return build("ARCHITECT", facts, grown="stories" in vision)
 
 
-def detail_brief(store, outline, area):
+def detail_brief(store, outline, area, *, guide_brief=False, may_fold_guide=False):
     cursor = store.cursor()
     vision = vision_body(store.read(cursor.vision)["answer"])
     participants = [area["handle"], *area.get("ancestors", [])]
@@ -487,7 +508,28 @@ def detail_brief(store, outline, area):
         relevant = {handle for r in commitments for handle in goals[r]["constraints"]}
         facts["Applicable constraints"] = {c["handle"]: c for c in vision["constraints"]
                                            if c["handle"] in relevant or c["handle"] not in attached}
-    return build("DETAIL", facts, grown=grown, context={"audience": vision["users"]})
+    planner_brief = features.enabled("plannerBrief")
+    guide_brief = planner_brief and guide_brief
+    if planner_brief:
+        facts["Writing the brief"] = (
+            "Write each unit's brief in 120–400 words, like a tech lead talking to a strong engineer. "
+            "Say who needs the work and why, using their own words. Describe what done looks like to "
+            "them, the tricky part, what belongs to another owner or is out of scope, and one real user "
+            "path that proves it works. Say what readable, maintainable code looks like for this work: "
+            "normal line lengths and one home for each behavior. Give the engineer the intent and room "
+            "to make ordinary implementation choices. Keep agreed product wording exact. "
+            "The sample answer includes an example brief.")
+        if may_fold_guide:
+            facts["Writing the brief"] += ("\n\nIf one unit owns the whole outcome, also brief it on the "
+                                          "fresh-checkout walkthrough. " + plan.GUIDE_WALKTHROUGH)
+        if guide_brief:
+            facts["Separate walkthrough"] = (
+                "Write guideBrief in the same voice for the separate walkthrough owner. Cover this "
+                "wave's outcome from a new reader's point of view. " + plan.GUIDE_WORK)
+            facts["Walkthrough outcomes"] = {r: goals[r] for r in outline["waves"][cursor.wave - 1]["commitments"]
+                                             if not r.startswith("quality:")}
+    return build("DETAIL", facts, grown=grown, context={"audience": vision["users"]},
+                 planner_brief=planner_brief, guide_brief=guide_brief)
 
 
 def labelled(facts):
@@ -719,7 +761,8 @@ def reviewed_decision(question, facts, context):
                     "later ones as handles and a sentence. In a multi-wave plan start with a runnable slice.")
     elif kind == "DETAIL":
         mission = "What should the user be able to do through this area in the current wave?"
-        opening.update(take(facts, "Current wave", "Area", "Applicable constraints"))
+        opening.update(take(facts, "Current wave", "Area", "Applicable constraints",
+                            "Writing the brief", "Separate walkthrough"))
         task = ("Describe the features and give each requirement one observable acceptance sentence. Trace "
                 "commitments and exact constraints. Give the work and its checks to one session-sized owner "
                 "unless another unit can build an independent piece now. Reserve dependencies for actual "
@@ -822,6 +865,33 @@ def reviewed_brief(question, stdin_instruction, image_directions):
         "Answer schema\n" + encode(question["schema"]))))
 
 
+def planner_work(question, brief, instruction, image_directions):
+    from .store import encode
+
+    facts = dict(question["facts"])
+    context = question.get("renderContext", {})
+    words = facts.pop("User's words", None) or context.get("guideWords", {})
+    appendix = [words["Dream"], *words.get("Requested change", [])] if words else []
+    for key in ("Unit", "Readers", "This wave's commitments", "Quality bar",
+                "Design guidance used by UI workers", "Try-it guide"):
+        facts.pop(key, None)
+    structure = take(facts, "Write scope", "Contract authority", "Contracts provided",
+                     "Contracts consumed", "Area contracts", "Planned contracts")
+    if "Execution facts" in facts:
+        facts["Execution facts"] = {k: v for k, v in facts["Execution facts"].items() if k != "Execution"}
+    if constraints := context.get("constraints"):
+        facts["Applicable exact constraints"] = constraints
+    return "\n\n".join(filter(None, (
+        brief, labelled(structure),
+        "Call instruction\n" + instruction if instruction else "",
+        labelled(facts), image_directions.strip(),
+        "Save visual evidence in SELDON_EVIDENCE_DIR when the proof uses a visual surface.",
+        WORK_OUTPUT,
+        "Illustrative receipt\n" + encode({"answer": WORK_RECEIPT}),
+        "Person's exact words\n" + "\n\n".join(appendix) if appendix else "",
+        "Answer schema\n" + encode(question["schema"]))))
+
+
 def runtime(setup):
     return {k: setup[k] for k in ("python", "node", "nodeVersion") if k in setup}
 
@@ -918,6 +988,10 @@ def work_brief(store, ref):
                "guideRole": "separate" if ref == "guide" else
                             "owned" if plan.guide_owner(document) == ref else "",
                "wave": {"number": unit.wave, "goal": wave[unit.wave - 1]["goal"]} if wave else {}}
+    if (brief := contract.get("brief")) and brief.strip():
+        context["plannerBrief"] = brief
+        if ref == "guide":
+            context["guideWords"] = user_words(store)
     return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
                  images=images(store, refs), owners=facts["Correction owners"], sole_work=sole,
                  context=context)

@@ -426,10 +426,11 @@ def test_answer_file_continuity_journey(tmp_path, scalar_align, fault):
                         request = await wait(gate)
                         await call('answer', request=request, words='Yes, I accept')
                     with anyio.fail_after(40):
-                        while (await call('state'))['controller'] != 'idle':
+                        accepted = await call('state')
+                        while accepted['controller'] != 'idle' or accepted['status'] != 'ACCEPTED':
                             await anyio.sleep(.02)
-                    accepted = await call('state')
-                    assert accepted['status'] == 'ACCEPTED' and accepted['units']['1.area-1.2']['state'] == 'DONE'
+                            accepted = await call('state')
+                    assert accepted['units']['1.area-1.2']['state'] == 'DONE'
                     assert (Path(run) / 'unit-002/value.txt').read_text() == 'value-002'
                     with opened(run) as store:
                         assert not any(row['event'] == 'reopen' and row['unit'] == '1.area-1.2'
