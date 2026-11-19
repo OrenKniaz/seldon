@@ -353,11 +353,11 @@ def step(store, provider):
     done = {store.read(r)["subject"] for r in cursor.qualityVerdicts}
     groups = {}
     for subject, body in subjects(document, kind).items():
-        groups.setdefault(body.get("area", subject), []).append(subject)
-    selected = {area: ss for area, ss in groups.items() if set(ss) - done}
+        if subject not in done:
+            groups.setdefault(body.get("area", subject), []).append(subject)
     gaps = []
     def consume(area, result, answer):
-        ss = selected[area]
+        ss = groups[area]
         if answer["verdict"] == "uncertain":
             answer = {**answer, "verdict": "not judged", "gaps": []}
         result = store.record("area_verdict", {"area": area, "source": result, "answer": answer,
@@ -365,8 +365,6 @@ def step(store, provider):
                              if store.read(r)["check"] in trace(document, kind, ss[0])]})
         local_gaps = corrections(store, area, result, answer)
         for subject in ss:
-            if subject in done:
-                continue
             targeted = [g for g in answer["gaps"] if g["target"] == subject]
             individual = {**answer, "gaps": targeted, "verdict": (
                 "not judged" if answer["verdict"] == "not judged" else
@@ -381,7 +379,7 @@ def step(store, provider):
         gaps.extend(local_gaps)
 
     inference.batch(store, provider, {
-        area: brief(store, kind, ss, trees=trees) for area, ss in selected.items()},
+        area: brief(store, kind, ss, trees=trees) for area, ss in groups.items()},
         consume=consume, field="gaps.target/owners")
     if contracted := [g for g in gaps if g["kind"] == "contract"]:
         return fixups.replan(store, contracted)

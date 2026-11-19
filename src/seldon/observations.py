@@ -1,10 +1,12 @@
 """C14/C26, R9: runtime facts collected from a check's isolated checkout and evidence directory."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
 
 from . import gitwork
+from .store import encode
 
 
 def runtime_file(name):
@@ -83,5 +85,22 @@ def _delete_access(path):
     return 0
 
 
+def _lifecycle_facts(value):
+    if isinstance(value, dict):
+        return {key: _lifecycle_facts(item) for key, item in value.items()}
+    if isinstance(value, list) and value:
+        if all(type(item) in (int, float) for item in value):
+            # Lifecycle judgment needs the shape and bounds of a series. The observation
+            # record retains the complete values for checks that need individual samples.
+            return {"count": len(value), "min": min(value), "max": max(value),
+                    "first": value[0], "last": value[-1],
+                    "sha256": hashlib.sha256(encode(value).encode()).hexdigest()}
+        return [_lifecycle_facts(item) for item in value]
+    return value
+
+
 def judge_fields(body):
-    return {key: body[key] for key in ("browserVisits", "fileCleanup", "operationLifecycle") if key in body}
+    facts = {key: body[key] for key in ("browserVisits", "fileCleanup") if key in body}
+    if "operationLifecycle" in body:
+        facts["operationLifecycle"] = _lifecycle_facts(body["operationLifecycle"])
+    return facts

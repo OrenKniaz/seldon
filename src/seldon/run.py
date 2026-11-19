@@ -282,7 +282,7 @@ class Run:
     def run(self, wait=None):
         import time
 
-        from .providers import ProviderFailure
+        from .providers import InputRejected, ProviderFailure
 
         wait = wait or time.sleep
         delay = 60
@@ -293,6 +293,11 @@ class Run:
                     self.step()
                 except decisions.Waiting:
                     break
+                except InputRejected as error:
+                    if self.store.cursor().decision:
+                        break
+                    decisions.step_fault(self.store, self.provider, error)
+                    cursor = self.store.cursor()
                 except (ProviderFailure, proof.UncertainCleanup) as error:
                     receipt = getattr(error, "receipt", None)
                     reason = str(error) + (f"; receipt: {receipt}" if receipt else "")

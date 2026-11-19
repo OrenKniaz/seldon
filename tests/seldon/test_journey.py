@@ -1726,6 +1726,107 @@ def test_guide_walkthrough_journey(tmp_path, scalar_align):
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("unprojectable", [False, True])
+def test_product_judge_converges_after_guide_repair(tmp_path, monkeypatch, unprojectable):
+    """Quiet Bench r497/r535: green walkthroughs can still overload final judgment.
+
+    Small guide journeys miss a repair adding full simulation responses to the observation.
+    A rejection must keep its cause across new native threads and reach a resumable question.
+    """
+    from collections import Counter
+    from seldon import features
+    from seldon.providers import render_question
+
+    enabled = features.enabled
+    arms = {"prompts2": True, "judgeEvidence": True, "growAlign": False, "sizeFirst": False}
+    monkeypatch.setattr(features, "enabled", lambda name: arms[name] if name in arms else enabled(name))
+    slot = tmp_path / "product-loop"
+    run, provider = prepare(slot, "contracts", 2)
+    native = slot / "native.py"
+    code = native.read_text(encoding="utf-8")
+    rejection = """
+if q['kind'] == 'PRODUCT':
+    print(json.dumps({'type': 'thread.started', 'thread_id': str(uuid.uuid4())}), flush=True)
+    print('Error: turn/start: turn/start failed: Input exceeds the maximum length of 1048576 characters.'
+          ' (code -32602), data: {"input_error_code":"input_too_large","max_chars":1048576}',
+          file=sys.stderr)
+    sys.exit(1)
+"""
+    code = code.replace("facts = q['facts']", rejection + "\nfacts = q['facts']", 1)
+    start = code.index("    Path('docs/try-it/check.py').write_text")
+    end = code.index("    answer['checkPaths']", start)
+    native.write_text(code[:start] + r"""
+    output = (
+        "import json, math, os\n"
+        "from pathlib import Path\n"
+        "assert Path('unit-001/value.txt').read_text() == 'value-001'\n"
+        "print('observed value-001')\n"
+    )
+    if turn > 1:
+        output += (
+            "series = [math.sin(i) for i in range(16000)]\n"
+            "rows = [{'operation': name, 'observed': True, 'documentation': 'docs/try-it.md#page',"
+            " 'after': {'status': 'completed', 'processed_samples': len(series),"
+            " 'desired': series, 'residual': series, 'output': series}}"
+            " for name in ('band-noise simulation', 'wav simulation')]\n"
+            "Path(os.environ['SELDON_EVIDENCE_DIR'], 'operation-lifecycle.json')"
+            ".write_text(json.dumps(rows))\n"
+        )
+    Path('docs/try-it/check.py').write_text(output)
+""" + code[end:], encoding="utf-8")
+    calls = Counter()
+    largest = []
+    seen_operations = set()
+    original = provider.invoke
+
+    def invoke(question, started):
+        if question["kind"] != "PRODUCT":
+            return original(question, started)
+        facts = question["facts"]
+        calls.update((facts["Final observations"][0]["commit"], target) for target in question["targets"])
+        lifecycle = [row for obs in facts["Final observations"]
+                     for row in obs.get("operationLifecycle", ()) if row.get("observed")]
+        if lifecycle:
+            prompt, _ = render_question(question)
+            largest.append(len(prompt))
+            if unprojectable or len(prompt) > 1_048_576:
+                return provider.native.invoke(question, started)
+            seen_operations.update(
+                row["operation"] for row in lifecycle
+                if row["after"]["status"] == "completed"
+                and row["after"]["processed_samples"] == row["after"]["output"]["count"] == 16000
+                and -1 <= row["after"]["output"]["min"] < row["after"]["output"]["max"] <= 1
+            )
+        if not lifecycle and question["targets"] == ["tryItGuide"]:
+            return json.dumps({"answer": {"verdict": "gap", "why": "Examples were not executed",
+                "gaps": [{"target": "tryItGuide", "owners": ["guide"], "severity": "must-fix",
+                          "correction": "Run the band-noise and eligible WAV examples."}]}}), None
+        return original(question, started)
+
+    provider.invoke = invoke
+    try:
+        cursor = run.run()
+        assert largest
+        repeats = {subject: n for subject, n in calls.items() if n > 1}
+        if unprojectable:
+            request = run.store.read(cursor.decision)
+            assert request["gate"] == "PRODUCT-JUDGE"
+            assert "Seldon" in request["ask"]["question"]
+            assert sum("COACH" == call for call in provider.calls) == 1
+            assert repeats and max(repeats.values()) == 2
+        else:
+            assert not repeats, repeats
+            assert cursor.state == "SCRIPTED_C"
+            assert seen_operations == {"band-noise simulation", "wav simulation"}
+            assert [b["owner"] for _, _, b in run.store.records("unit_fixup")] == ["guide"]
+            assert sum(
+                target.startswith("quality:") and target.endswith(":area-2") for _, target in calls
+            ) == 1
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
 @pytest.mark.skipif(sys.platform != "win32", reason="Recorded product faults use Windows file sharing")
 @pytest.mark.parametrize("product", ["quiet", "shelf"])
 def test_recorded_runtime_evidence_reaches_integrated_judge(tmp_path, monkeypatch, product):
@@ -2719,7 +2820,7 @@ def test_scale_five_wave_golden(tmp_path, scalar_align):
 
     slot = tmp_path / "scale-five"
     command = [sys.executable, "-B", str(Path(__file__).with_name("scale_journey.py")), str(slot)]
-    deadline = time.monotonic() + 290  # requested hang guard, never a product assertion
+    hang_guard = 290  # Each controller launch has its own hang guard.
     log = tmp_path / "scale.log"
 
     def start(extra=()):
@@ -2734,6 +2835,7 @@ def test_scale_five_wave_golden(tmp_path, scalar_align):
 
     with log.open("wb") as output:
         child = start()
+        deadline = time.monotonic() + hang_guard
         try:
             while not (slot / "kill-wave3").exists():
                 if child.poll() is not None:
@@ -2751,7 +2853,7 @@ def test_scale_five_wave_golden(tmp_path, scalar_align):
                 db.close()
             stop(child)
             child = start(["--resume"])
-            child.wait(timeout=max(1, deadline-time.monotonic()))
+            child.wait(timeout=hang_guard)
             assert child.returncode == 0, log.read_text("utf-8")
             db = sqlite3.connect((slot / "product/.seldon/state.sqlite3").as_uri()+"?mode=ro",uri=True)
             try:

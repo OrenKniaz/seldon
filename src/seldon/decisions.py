@@ -6,7 +6,7 @@ import traceback
 
 from . import features, inference, plan, questions, recovery
 from .answers import ConsumptionFailure, recorder
-from .providers import ProviderFailure
+from .providers import InputRejected, ProviderFailure
 from .states import advance
 
 
@@ -209,7 +209,10 @@ def step_fault(store, provider, error):
     recovery.failed(store, cause, shape=shape)
     subject = {"step": step, "tried": [failure], "failure": failure}
     if repeated:
-        subject["ask"] = pause_ask(str(error))
+        if isinstance(error, InputRejected):
+            subject["ask"] = pause_ask(f"{failure} Seldon owns preparing a smaller evidence packet.")
+        else:
+            subject["ask"] = pause_ask(str(error))
     else:
         subject = coach(store, provider, subject)
     if subject:

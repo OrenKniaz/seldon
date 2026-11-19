@@ -51,6 +51,10 @@ class ResumeUnavailable(ProviderFailure):
     pass
 
 
+class InputRejected(ProviderFailure):
+    """The native adapter refused this packet before starting a turn."""
+
+
 class Deadline(ProviderFailure):
     """Seldon's WORK deadline, the only provider failure charged to the unit."""
 
@@ -260,7 +264,8 @@ class Provider:
         if used := native.usage(output):
             receipt["usage"] = used
         (folder / "result.json").write_text(encode(receipt), encoding="utf-8")
-        diagnostics = output + "\n" + result["stderr"].decode("utf-8", errors="replace")
+        stderr = result["stderr"].decode("utf-8", errors="replace")
+        diagnostics = output + "\n" + stderr
         try:
             if result["timedOut"] or not result["cleanupVerified"]:
                 raise RuntimeError("Provider cleanup unverified" if not result["cleanupVerified"]
@@ -268,6 +273,11 @@ class Provider:
             raw = native.answer(output)
         except RuntimeError as error:
             failures = "\n".join(native.errors(output)).lower()
+            if (name == "codex" and result["cleanupVerified"] and not result["timedOut"]
+                    and '"input_error_code":"input_too_large"' in stderr.replace(" ", "")):
+                # The fresh thread ID in the native stream is receipt data, not a new failure.
+                raise InputRejected(f"Codex rejected the {question['kind']} question as too large.",
+                                    False, True, str(folder / "result.json")) from error
             paused = not result["timedOut"] and any(word in failures for word in PAUSE_WORDS)
             unavailable = question.get("execution", {}).get("session") and any(
                 term in diagnostics.lower() for term in ("session not found", "no session found",
