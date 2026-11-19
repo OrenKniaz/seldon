@@ -1,6 +1,6 @@
 # SELDON CHARTER v1.8 — the hard goal
 
-> **Second shape: Seldon Lead.** CHARTER-LEAD.md v1.0, RATIFIED by Oren 2026-11-19 ("ok I ratify"): native delegation inside C1, milestone ownership, cumulative independent proof + Seldon-owned memory, C27 shape chosen once at kickoff. This charter governs Orchestrator.
+> **Second shape: Seldon Lead.** CHARTER-LEAD.md v1.1, RATIFIED by Oren 2026-11-19: native delegation inside C1, milestone ownership, cumulative independent proof + Seldon-owned memory, C27 shape chosen once at kickoff, C28 spec before code (planning may use sub-agents and research; coding only after B). This charter governs Orchestrator.
 > **Status: RATIFIED v1.8 by Oren, 2026-11-13 ("Ok, I accept both re. 15 and process.py changes").** C8: later check-ins may be waived in the user's own words; scope changes always wait (M3 design, REC-15). v1.7 text below stands.
 > **Status: RATIFIED v1.7 by Oren, 2026-11-12 ("ok option B, but ... use from within the app's browser (so narrow clean detailed view (openable to full screen)").** C20: chat acts, one read-only page shows, built for the app's browser pane. v1.6 text below stands.
 > **Status: RATIFIED v1.6 by Oren, 2026-11-12 ("you can ratify").** Rewords C5 to match Blueprint R1 and updates the §8 register after the old core was deleted. v1.5 text below stands.

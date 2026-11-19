@@ -1,6 +1,6 @@
-# Seldon Lead charter v1.0 — delta to CHARTER v1.8
+# Seldon Lead charter v1.1 — delta to CHARTER v1.8
 
-**RATIFIED by Oren · 19 November 2026** ("ok I ratify"). The owner offers two shapes, chosen at kickoff (C27). CHARTER v1.8 and BLUEPRINT v1.15 govern Orchestrator; this delta governs Lead. Only Oren ratifies changes. Clause numbers below retain their original subjects.
+**RATIFIED v1.1 by Oren · 19 November 2026** (C28: "coding should start once spec is done"). **RATIFIED v1.0 · 19 November 2026** ("ok I ratify"). The owner offers two shapes, chosen at kickoff (C27). CHARTER v1.8 and BLUEPRINT v1.15 govern Orchestrator; this delta governs Lead. Only Oren ratifies changes. Clause numbers below retain their original subjects.
 
 ## 1. The goal
 
@@ -26,6 +26,8 @@ A person can bring Seldon a rough dream, shape it with a cofounder, and come bac
 | C25 | User control | Chat can pause, resume, stop or reprioritize. Show the accountable session, milestone, progress and evidence. Show helper detail only as reported by the provider. Control covers the whole writing session. | Pause mid-build. Observe cleanup, retain partial work and resume without a second active writer. |
 
 **New C27 · Choose the shape once.** Kickoff records Lead or Orchestrator and presents what Seldon will manage. Every restart uses that record. A saved run predating the choice reopens as Orchestrator. Verify by changing the environment between a pause and reopen.
+
+**New C28 · Spec before code.** Planning stages (grow/align, milestone plan, design, architecture, UI/UX, research, brainstorming) may use provider-native sub-agents and online research inside their typed question. No product code is written until the owner approves the milestone plan and its spec (what, how and test) at B. Only then does code hand the milestone to its builder. Verify: the product workspace has no builder commits before the B record; a planning helper's output reaches the plan only through Seldon's typed answer.
 
 ## 3. Invariants and journey
 
