@@ -163,6 +163,8 @@ def milestone_checks(store, previous, milestone, current, subjects, receipt, can
     if (not set(current).issubset(declared) or len(declared) != len(set(declared))
             or any(key not in subjects for key in declared)):
         raise ValueError(f"Supply one check per new promise: {', '.join(current)}.")
+    if not receipt["walkthrough"]:
+        raise ValueError("Supply an unattended walkthrough of the try-it guide.")
     root = store.root.parent
     # Older stores mixed plan commands and builder witnesses. Recover only commands the accepted
     # builder actually declared, using its receipt and candidate rather than the planner's list.

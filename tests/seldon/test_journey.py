@@ -1433,11 +1433,12 @@ def approve(request):
 
 
 @pytest.mark.fast
-@pytest.mark.parametrize("arm", ["hello-reopen", "cumulative-repair", "unchanged", "proof-owner", "plan-owner"])
+@pytest.mark.parametrize("arm", ["hello-reopen", "cumulative-repair", "unchanged", "proof-owner", "plan-owner",
+                                 "lh01", "lh02", "explicit-question"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
-    A replacement check can hide a regression, and a proof fault can send a builder back to work.
+    A replacement check can hide a regression, and a receipt can stall proof or lose a genuine question.
     Wave journeys never exercise Lead's B-bound spec, durable witness or owner-specific repair.
     """
     from types import SimpleNamespace
@@ -1445,7 +1446,7 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     from seldon import frontdoor, lead
     from seldon.decisions import Waiting
 
-    milestone_count = 1 if arm in ("hello-reopen", "proof-owner", "plan-owner") else 2
+    milestone_count = 2 if arm in ("cumulative-repair", "unchanged") else 1
     dream = "Run `python hello.py Ada` and say ‘Hello, Ada!’ exactly. Reject `python hello.py --help`. " + (
         "In a separate milestone add ‘Goodbye, Ada!’." if milestone_count == 2 else "")
     dream += " Fixture: " + arm
@@ -1505,7 +1506,8 @@ arm = facts["Owner words"]["Dream"].rsplit(" Fixture: ", 1)[1]
 assert "`python hello.py --help`" in facts["Owner words"]["Dream"]
 if arm == "plan-owner" and "positional" in facts["Approved spec"]["how"]:
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(
-        {"answer": {"outcome": "plan correction", "summary": "The approved design has an ambiguous parser."}})}}),
+        {"answer": {"outcome": "plan correction", "summary": "The approved design has an ambiguous parser.",
+                    "checks": [], "checkPaths": [], "walkthrough": {}, "question": ""}})}}),
           flush=True)
     print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
     raise SystemExit
@@ -1568,10 +1570,28 @@ if "resume" not in args:
         output.write(f"\nRun `python {name}.py Ada`. Expect {expected}\n")
         if name == "hello":
             output.write("Run `python hello.py --help`. Expect usage on stderr and exit 2.\n")
+for check in checks:
+    check["expectedExit"] = 0
 walk = dict(checks[-1] if name == "hello" else checks[0])
 walk.pop("vision")
 receipt = {"outcome": "done", "summary": f"A visitor can run {name}. Resumed: {'resume' in args}.",
-           "checks": checks, "checkPaths": check_paths, "walkthrough": walk}
+           "checks": checks, "checkPaths": check_paths, "walkthrough": walk, "question": ""}
+# Retained e2dc3f5 lh01 r57 and lh02 r40, with the fixture's runnable witnesses attached.
+if arm == "lh01":
+    receipt.update(outcome="question", summary=(
+        "Planner-owned blocker: the active response schema does not require or explicitly forbid the requested "
+        "check details, but the preceding receipt incorrectly claimed a mismatch. The implementation and "
+        "Windows Python 3.12.7 checks were reported passing; no checks were rerun."))
+if arm == "lh02":
+    receipt.update(outcome="proof fault", summary=(
+        "The CLI, behavioral check, and try-it guide were written in the assigned workspace. On Windows "
+        "Python 3, the greeting, usage-error, combined contract, and walkthrough checks each printed “passed.” "
+        "However, the reported test command ran them in sequence without independently capturing each check’s "
+        "process exit status, so the unattended check outcomes were not fully proven. Browser testing is not "
+        "applicable because this product has no browser path. The next step is to rerun each check while "
+        "asserting its exit status is 0."))
+if arm == "explicit-question":
+    receipt["question"] = "Which of the two Windows Python runtimes should the guide target?"
 print(json.dumps({"type": "item.completed", "item": {"type": "agent_message",
                   "text": json.dumps({"answer": receipt})}}), flush=True)
 print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
@@ -1603,6 +1623,8 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             answer = {"choice": "Unclear", "why": "No change to the named input."}
         else:
             assert kind == "JUDGE"
+            if arm in ("lh01", "lh02"):
+                assert ("Planner-owned blocker" if arm == "lh01" else "process exit status") in facts["Builder notes"]
             assert "hello.py" in facts["Code shape (measured)"]
             assert "checks/kit/browser.cjs" in facts["Candidate file inventory"]
             assert "preview.png" in facts["Candidate file inventory"] and "preview.png" not in facts["Product files"]
@@ -1660,6 +1682,13 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
     run = Run.reopen(project, provider, user)
     try:
         cursor = run.run()
+        if arm == "explicit-question":
+            assert cursor.state == "BUILD" and cursor.decision
+            ask = run.store.read(cursor.decision)["subject"]
+            assert ask["inputOwner"] == "Planner"
+            assert ask["question"] == "Which of the two Windows Python runtimes should the guide target?"
+            assert not run.store.records("observation")
+            return
         if arm in ("unchanged", "proof-owner"):
             request = cursor.decision
             assert request and cursor.state == ("BUILD" if arm == "unchanged" else "PROVE")
@@ -1684,6 +1713,8 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                            for row in failed)
             return
         assert cursor.state == "SCRIPTED_C", frontdoor.state(str(project))
+        if arm in ("lh01", "lh02"):
+            assert not run.store.records("lead_failure")
         assert displayed == ["A", "B", *(["B"] if arm == "plan-owner" else []),
                              *(["CHECK-IN"] * milestone_count), "C"]
         assert run.store.read(cursor.kickoff)["mode"] == "lead"

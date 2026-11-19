@@ -32,7 +32,7 @@ def folded_subjects(document):
     }
 
 
-def milestone(store, provider, commit, subjects, checks, refs, walks):
+def milestone(store, provider, commit, subjects, checks, refs, walks, notes):
     root = store.root.parent
     files, images = proof.candidate_files(store, root, commit)
     subjects = {**subjects, "tryItGuide": "The documented steps work from a fresh checkout.",
@@ -41,12 +41,14 @@ def milestone(store, provider, commit, subjects, checks, refs, walks):
     facts = {"Candidate": commit, "Subjects": subjects, "Candidate file inventory": gitwork.paths(root, commit),
              "Product files": files, "Candidate images": images, "Code shape (measured)": code_shape(files),
              "Walkthrough checks": walks, "Observations": proof.account(store, refs, commit),
+             "Builder notes": notes,
              "Checks": {key: {k: v for k, v in check.items() if k != "command"}
                         for key, check in checks.items()}}
     example = {key: {"verdict": "satisfied", "gaps": [], "why": "Observed the approved action and result."}
                for key in subjects}
     question = questions.question("JUDGE",
-        "Judge each approved action and result from the runner's observations. Each new or replacement "
+        "Judge each approved action and result from the runner's observations. Builder notes are context. "
+        "Each new or replacement "
         "check must exercise its original promise against actual product behavior. Confirm that RED "
         "fails for the right reason, and that retained checks still exercise the product on this candidate. "
         "For the guide, judge the steps actually observed. Name concrete product fixes or the evidence "

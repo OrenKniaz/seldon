@@ -11,26 +11,29 @@ from .schema import REFS, TEXT, answer_schema, array, choice, obj, validate
 from .states import advance
 from .store import encode
 
-CHECK = obj(purpose=TEXT, command=array(TEXT, 1), expectedEvidence=TEXT)
+CHECK = obj(purpose=TEXT, command=array(TEXT, 1),
+            expectedEvidence={**TEXT, "description": "What the command asserts about the product."},
+            expectedExit={"type": "integer", "enum": [0]})
 MILESTONE = obj(outcome=TEXT, promises=array(obj(vision=TEXT, action=TEXT, result=TEXT), 1),
                 spec=obj(what=TEXT, how=TEXT, test=TEXT), brief=TEXT)
 PLAN = obj(answer=obj(milestones=array(MILESTONE, 1)))
-RECEIPT = obj(answer={"anyOf": [
-    obj(outcome=choice("done"), summary=TEXT, checks=array(obj(vision=TEXT, **CHECK["properties"]), 1),
-        checkPaths=REFS, walkthrough=CHECK),
-    obj(outcome=choice("question", "plan correction", "proof fault"), summary=TEXT),
-]})
+RECEIPT = obj(answer=obj(
+    outcome=choice("done", "question", "plan correction", "proof fault"),
+    summary=TEXT, checks=array(obj(vision=TEXT, **CHECK["properties"])),
+    checkPaths=REFS, walkthrough={"anyOf": [CHECK, obj()]}, question={"type": "string"}))
 WRITE_RULES = (
-    "Write only in the assigned product workspace. Preserve accepted behavior. Write semantic checks and "
-    "a try-it guide. You may use provider-native sub-agents and skills within this assignment; wait for "
-    "them to finish before returning. Keep Seldon's store, decisions and proof untouched. Do not commit "
-    "or change global settings. Return one unattended assertion command per new vision handle and an "
-    "asserting walkthrough of the guide. Assert expected errors, including exit and streams, inside "
-    "a check that exits zero when the behavior is correct. Exercise browser paths headlessly. "
-    "List the exact check-only files and helpers needed to replay your checks. Leave earlier witnesses intact."
+    "Write the product, semantic checks and try-it guide in the assigned workspace. Preserve accepted "
+    "behavior and earlier witnesses. You may use provider-native sub-agents and skills within this "
+    "assignment; wait for them to finish. Keep Seldon's store, decisions and proof untouched. Do not "
+    "commit or change global settings. For each promise, return one unattended check with its command, "
+    "what it asserts and expectedExit 0. Return a check that walks through the guide in the same format. "
+    "Assert any expected product error inside its check. Use a headless browser for any browser paths. "
+    "List the check-only files and helpers in checkPaths. Return done when the work is written. "
+    "Seldon runs every check itself. Put any doubts in summary. Leave question empty unless you need "
+    "an answer you cannot find yourself. If you cannot supply a walkthrough, return an empty object."
 )
 EXAMPLE_CHECK = {"purpose": "Greet a named visitor", "command": ["python", "checks/greet.py"],
-                 "expectedEvidence": "The process prints Hello, Ada!"}
+                 "expectedEvidence": "The process prints Hello, Ada!", "expectedExit": 0}
 EXAMPLE_BRIEF = (
     "Give a visitor a greeting they can personalize. A first-time user should be able to run the "
     "command from a new checkout with the available Python interpreter. They pass a name and see "
@@ -240,7 +243,7 @@ def build(store, provider, cursor):
             facts["Exact failure"] = cursor.failure
         if cursor.requestedChange:
             facts["Owner direction"] = store.read(cursor.requestedChange)["words"]
-        example = {"outcome": "done", "summary": "A visitor can greet Ada.",
+        example = {"outcome": "done", "summary": "A visitor can greet Ada.", "question": "",
                    "checks": [{**EXAMPLE_CHECK, "vision": next(iter(facts["Promises"]))}],
                    "checkPaths": ["checks/greet.py"], "walkthrough": EXAMPLE_CHECK}
         question = questions.question("WORK", WRITE_RULES, facts, RECEIPT, [example],
@@ -262,10 +265,14 @@ def build(store, provider, cursor):
             return
         cursor = store.cursor()
     answer = store.read(cursor.leadReturn)["answer"]
-    if answer["outcome"] != "done":
-        owner = {"question": "Planner", "plan correction": "Planner", "proof fault": "Seldon"}[answer["outcome"]]
+    question = answer.get("question", "").strip()
+    if question or not answer.get("checks"):
+        owner = "Planner" if question else {
+            "question": "Planner", "plan correction": "Planner", "proof fault": "Seldon",
+        }.get(answer["outcome"], "Builder")
         _, candidate, _ = gitwork.snapshots(assignment["workspace"], assignment["base"], ["**"], [], cursor.scratch)
-        fail(store, cursor, answer["summary"], owner, candidate=candidate, replan=answer["outcome"] == "plan correction")
+        fail(store, cursor, question or answer["summary"], owner, candidate=candidate,
+             replan=not question and answer["outcome"] == "plan correction")
         return
     advance(store, "returned", cursor.leadReturn, requestedChange=None)
 
@@ -326,7 +333,7 @@ def prove(store, provider, cursor):
         {key: check for key, check in new.items() if key not in walks
          and check["requirements"][0] in current}, "milestone-red")
     judge, fixes, missing = judgment.milestone(store, provider, candidate, subjects, checks | new,
-                                              red_refs + green, walks)
+                                              red_refs + green, walks, receipt["summary"])
     if fixes or missing:
         fail(store, cursor, "\n".join(fixes or missing), "Builder" if fixes else "Seldon",
              candidate=candidate, evidence=[judge, *green],

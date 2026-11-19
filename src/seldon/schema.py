@@ -161,6 +161,8 @@ def validation_errors(value, contract, path="answer"):
     if type(value) is not expected:
         return [f"{path}: expected {kind}"]
     errors = []
+    if "enum" in contract and value not in contract["enum"]:
+        errors.append(f"{path}: expected one of {contract['enum']}")
     if kind == "object":
         fields = contract["properties"]
         errors += [f"{path}.{key}: required field missing" for key in fields.keys() - value.keys()]
@@ -173,8 +175,6 @@ def validation_errors(value, contract, path="answer"):
         for index, child in enumerate(value):
             errors += validation_errors(child, contract["items"], f"{path}[{index}]")
     elif kind == "string":
-        if "enum" in contract and value not in contract["enum"]:
-            errors.append(f"{path}: expected one of {contract['enum']}")
         if len(value) < contract.get("minLength", 0):
             errors.append(f"{path}: invalid text length")
     elif kind == "integer" and value < contract.get("minimum", value):
