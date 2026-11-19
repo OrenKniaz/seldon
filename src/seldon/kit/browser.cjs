@@ -54,7 +54,7 @@ module.exports = async function browser(url, check, {viewports = [{width: 1280, 
   if (!root) throw new Error('Install Playwright locally before running browser checks');
   const instance = await require(root).chromium.launch(
     {channel: 'msedge', headless: true, timeout: deadline});
-  let timer, visits;
+  let timer, visits, failed = false;
   try {
     const page = await instance.newPage({viewport: viewports[0]}), errors = [];
     visits = await observe(page);
@@ -70,18 +70,37 @@ module.exports = async function browser(url, check, {viewports = [{width: 1280, 
       }
       await page.setViewportSize(viewports[0]);
     };
-    return await Promise.race([(async () => { await page.goto(url); return check({page, shot, errors}); })(),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('Browser deadline')), deadline); })]);
+    let operation = `navigating to ${url}`;
+    const deadlineReached = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const pageError = visits.at(-1)?.console.findLast(entry => entry.level === 'pageerror');
+        const detail = pageError ? `; last page error: ${pageError.text}` : '';
+        const state = `page: ${page.url()}${detail}`;
+        reject(new Error(`Browser deadline after ${deadline} ms while ${operation}; ${state}`));
+      }, deadline);
+    });
+    const proof = async () => {
+      await page.goto(url);
+      operation = 'running the check callback';
+      return check({page, shot, errors});
+    };
+    return await Promise.race([proof(), deadlineReached]);
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
     clearTimeout(timer);
-    try { await instance.close(); }
-    finally {
-      const folder = process.env.SELDON_EVIDENCE_DIR;
-      if (folder && visits?.length) {
-        fs.mkdirSync(folder, {recursive: true});
-        fs.writeFileSync(path.join(folder, `browser-visits-${randomUUID()}.json`), JSON.stringify(visits));
-      }
+    try {
+      await instance.close().finally(() => {
+        const folder = process.env.SELDON_EVIDENCE_DIR;
+        if (folder && visits?.length) {
+          fs.mkdirSync(folder, {recursive: true});
+          fs.writeFileSync(path.join(folder, `browser-visits-${randomUUID()}.json`), JSON.stringify(visits));
+        }
+      });
+    } catch (error) {
+      if (!failed) throw error;
+      console.error('Browser cleanup or evidence write failed:', error);
     }
   }
 };
