@@ -152,6 +152,10 @@ def codex_command(setup, config, folder, worker, session, images):
     options += [key + '=false' for key in ('skills.include_instructions', 'skills.bundled.enabled',
         'plugins._default.enabled', 'features.apps', 'features.multi_agent', 'features.memory_tool',
         'features.sleep_tool', 'tools.update_plan.enabled')]
+    if config.get("lead"):
+        native = ('features.multi_agent', 'skills.include_instructions', 'skills.bundled.enabled')
+        options = [opt for opt in options if opt.partition("=")[0] not in native]
+        options.extend(key + '=true' for key in native)
     if not worker:
         command += ["--ephemeral"]
         options += ['features.shell_tool=false', 'features.code_mode_host=false']
@@ -179,6 +183,9 @@ def render_question(question, provider="codex", images=(), *, prompts2=None, pla
     """
     from .questions import labelled, planner_work, reviewed_brief  # imported through recovery
     image_directions = NATIVE[provider].prompt(images)
+    if question["execution"].get("lead"):
+        from .lead import render_builder
+        return render_builder(question)
     if prompts2 is None:
         prompts2 = features.enabled("prompts2")
     if planner_brief is None:
@@ -231,9 +238,12 @@ class Provider:
         worker = question["kind"] == "WORK"
         if worker:
             cwd = Path(question["execution"]["cwd"])
-            config["effort"] = ("medium" if "Guide path" in question["facts"]
-                or question["facts"].get("Exact failure") else
-                self.setup["providers"].get("worker_first_effort", config["effort"]))
+            if question["execution"].get("lead"):
+                config["lead"] = True
+            else:
+                config["effort"] = ("medium" if "Guide path" in question["facts"]
+                    or question["facts"].get("Exact failure") else
+                    self.setup["providers"].get("worker_first_effort", config["effort"]))
         # The control arm uses producer order within each group of facts; keep it in the replay record.
         (folder / "question.json").write_text(
             json.dumps(question, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")

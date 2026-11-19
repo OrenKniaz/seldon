@@ -225,5 +225,10 @@ def publish(project, store):
     with store.transaction():
         store.record("integration", {"publication": cursor.publication, **intent})
         store.cursor(replace(store.cursor(), candidate=intent["commit"], publication=None))
-        advance(store, "integrated", cursor.publication, unit=intent["unit"],
-                integrated=intent["commit"], failure="")
+        if "milestone" in intent:
+            advance(store, "proved-milestone", cursor.publication, failure="",
+                    finalCommit=intent["commit"], finalObservations=intent["observations"],
+                    productVerdict=intent["verdict"])
+        else:
+            advance(store, "integrated", cursor.publication, unit=intent["unit"],
+                    integrated=intent["commit"], failure="")

@@ -7,6 +7,11 @@ RUN = {
     "NEW": {"start": "ALIGN"},
     "ALIGN": {"aligned": "A"},
     "A": {"approve": "ARCHITECT", "revise": "ALIGN"},
+    "MILESTONES": {"planned": "LEAD-REVIEW"},
+    "LEAD-REVIEW": {"reviewed": "B", "repair-plan": "MILESTONES"},
+    "BUILD": {"returned": "PROVE"},
+    "PROVE": {"proved-milestone": "CHECK-IN", "repair-build": "BUILD"},
+    "LEAD-NEXT": {"next-milestone": "BUILD", "last-milestone": "C"},
     "ARCHITECT": {"outlined": "DETAIL", "scope": "ALIGN"},
     "DETAIL": {"detailed": "REVIEW", "contract-gap": "ARCHITECT"},
     "REVIEW": {"reviewed": "B", "planned": "EXECUTE", "gap": "REPAIR"},
@@ -19,6 +24,14 @@ RUN = {
     "PRODUCT-JUDGE": {"plan-gap": "ARCHITECT", "satisfied": "C", "gap": "EXECUTE"},
     "C": {"approve": "ACCEPTED", "scripted": "SCRIPTED_C"},
     "ACCEPTED": {}, "SCRIPTED_C": {}, "STOPPED": {},
+}
+LEAD = {
+    ("A", "approve"): "MILESTONES",
+    ("B", "approve"): "BUILD",
+    ("B", "revise"): "MILESTONES",
+    ("CHECK-IN", "approve"): "LEAD-NEXT",
+    ("CHECK-IN", "steer"): "MILESTONES",
+    ("C", "steer"): "MILESTONES",
 }
 UNIT = {
     "NEW": {"create": "WAITING"},
@@ -44,6 +57,10 @@ def advance(store, event, cause, unit=None, **updates):
                   "ARCHITECT" if not unit and event == "steer" and row.state in
                   ("ARCHITECT", "DETAIL", "REVIEW", "REPAIR", "PRODUCT-JUDGE", "C") else
                   table[row.state].get(event))
+        if not unit and (row.state, event) in LEAD and store.read(row.kickoff).get("mode") == "lead":
+            target = LEAD[row.state, event]
+            if event == "steer":
+                updates.update(wave=row.wave + 1, B=None, repairs=0, leadBuild=None, leadReturn=None)
         if target is None:
             raise ValueError(f"Illegal {'unit' if unit else 'run'} move: {row.state} + {event}")
         if "state" in updates:

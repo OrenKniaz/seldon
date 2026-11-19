@@ -25,7 +25,7 @@ class Failed(ValueError):
         self.checks = sorted({body["check"] for body in failed})
 
 
-def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None):
+def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None, *, walkthroughs=()):
     observations = []
     if not declarations:
         return observations
@@ -39,7 +39,8 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
     else:
         gitwork.checkout(checkout, commit)
     cleanup_verified, dirty = True, False
-    walkthroughs = plan.guide_checks(plan.execution(store)) if purpose == "final" else ()
+    if purpose == "final":
+        walkthroughs = plan.guide_checks(plan.execution(store))
     try:
         for ref, check in declarations.items():
             if checkout is None:

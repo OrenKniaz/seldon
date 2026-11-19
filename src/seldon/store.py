@@ -22,6 +22,9 @@ class RunRow:
     lineage: str = ""
     state: str = "NEW"
     kickoff: str = ""
+    leadPlan: str | None = None
+    leadBuild: str | None = None
+    leadReturn: str | None = None
     scratch: str = ""
     candidate: str = ""
     waveStart: str = ""
@@ -96,6 +99,9 @@ def checked(value, model):
 def decoded(body, model):
     value = json.loads(body)
     value.setdefault("lineage", "")
+    if model is RunRow:
+        for key in ("leadPlan", "leadBuild", "leadReturn"):
+            value.setdefault(key, None)
     if set(value) != {f.name for f in fields(model)}:
         raise ValueError(f"Stored {model.__name__} has unknown or missing fields")
     result = model(**value)

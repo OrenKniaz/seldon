@@ -14,6 +14,7 @@ from . import (
     gitwork,
     inference,
     judgment,
+    lead,
     plan,
     plan_review,
     proof,
@@ -30,6 +31,8 @@ TERMINAL = {"ACCEPTED", "SCRIPTED_C", "STOPPED"}
 
 
 def eligible(store):
+    if lead.enabled(store):
+        return lead.eligible(store)
     cursor = store.cursor()
     document = plan.execution(store)
     checkin = store.read(cursor.checkin)["subject"] if cursor.checkin else {}
@@ -68,7 +71,7 @@ def eligible(store):
 
 class Run:
     """The front door owns only its dependencies; modules receive the store and subjects explicitly."""
-    def __init__(self, project, scratch, dream, setup, provider, user, capacity=None):
+    def __init__(self, project, scratch, dream, setup, provider, user, capacity=None, *, mode=None):
         self.project = Path(project)
         self.project.mkdir()
         Path(scratch).mkdir()
@@ -82,6 +85,7 @@ class Run:
         with self.store.transaction():
             kickoff = self.store.record("kickoff", {"words": dream,
                                                     "setup": {**setup, **features.planning_setup()},
+                                                    "mode": lead.kickoff_mode(mode),
                                                     "capacity": self.capacity})
             self.store.cursor(RunRow(kickoff=kickoff, scratch=str(Path(scratch).resolve()),
                                      candidate=candidate, waveStart=candidate))
@@ -98,6 +102,8 @@ class Run:
         if self.store.cursor().state in TERMINAL:
             return self
         gitwork.publish(self.project, self.store)
+        if lead.enabled(self.store):
+            return self
         for ref, row in self.store.units().items():
             if row.state == "WORKING":
                 units.thread_from_recording(self.store, ref)
@@ -111,6 +117,8 @@ class Run:
         state = cursor.state
         if state in TERMINAL:
             return state
+        if state not in ("ALIGN", "A") and lead.enabled(store):
+            return lead.step(store, self.provider, self.user)
         if state in ("A", "B", "C") and not cursor.decision:
             subject = ({"vision": store.read(cursor.vision)["answer"]} if state == "A" else
                        {"revision": cursor.revision, "vision": cursor.vision,

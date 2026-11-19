@@ -12,7 +12,7 @@ from functools import wraps
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
-from . import decisions, providers
+from . import decisions, lead, providers
 from .decisions import Waiting
 from .run import TERMINAL, Run
 from .store import Store
@@ -104,7 +104,8 @@ def state(run: str):
                 "controller": "running" if active else "idle", "waitingFor": waiting,
                 "units": {ref: {key: getattr(row, key) for key in ("state", "waiting", "failure")}
                           for ref, row in store.units().items()},
-                "outcome": outcomes[-1][2] if outcomes else None, "next": next_step}
+                "outcome": outcomes[-1][2] if outcomes else None, "next": next_step,
+                **(lead.progress(store) if lead.enabled(store) else {})}
 
 
 def spawn(run):

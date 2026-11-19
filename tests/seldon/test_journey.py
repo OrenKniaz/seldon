@@ -1387,6 +1387,196 @@ def approve(request):
     return {"request": request["request"], "subject": request["subject"], "choice": "approve"}
 
 
+@pytest.mark.fast
+@pytest.mark.parametrize("milestone_count", [1, 2], ids=["hello-reopen", "cumulative-repair"])
+def test_lead_milestones_golden(tmp_path, monkeypatch, milestone_count):
+    """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
+
+    A builder returning done can ship a regression, or a resumed controller can switch modes.
+    Wave journeys never issue a milestone brief or retain a Lead check across builder sessions.
+    """
+    from types import SimpleNamespace
+
+    from seldon import frontdoor, lead
+    from seldon.decisions import Waiting
+
+    dream = "Say ‘Hello, Ada!’ exactly. " + (
+        "In a separate milestone add ‘Goodbye, Ada!’." if milestone_count == 2 else "")
+    brief = ("Let the person choose the name and see the exact punctuation they asked for. "
+             "Keep the first command working before offering the second. Give them a guide they can "
+             "follow using Python already on this machine. Exercise the command, with its actual "
+             "argument and output, from a fresh checkout. Preserve the user’s exact greeting. "
+             "The visitor should be able to run the tool without setup or persistent state. "
+             "Keep the program readable and let the person see the command and resulting text together. "
+             "When writing the check, run the real program and compare the entire line of output, "
+             "including its punctuation, so an accidental wording change can be caught at a later "
+             "milestone. Return a useful walkthrough of what now works.")
+    draft = questions.consequential_round_example()
+    draft.update(questions=[], recommendation="done")
+    vision = draft["vision"]
+    vision.update(size="tiny", sizeWhy="A small command-line experience.", understanding=dream,
+                  constraints=[], scopeOut=[])
+    vision["stories"] = [
+        {"handle": name, "feature": name, "story": f"A visitor wants to run {name}.", "outcome": outcome,
+         "constraints": [], "sources": ["kickoff"]}
+        for name, outcome in [("hello", "Hello, Ada!"), ("bye", "Goodbye, Ada!")][:milestone_count]
+    ]
+    vision["quality"] = [{"handle": "exact", "criterion": "Use exact punctuation",
+                          "verification": "Compare actual CLI output", "constraints": [], "sources": ["kickoff"]}]
+    planned = []
+    for index, story in enumerate(vision["stories"], 1):
+        name = story["handle"]
+        expected = story["outcome"]
+        probe = ("import subprocess, sys\n"
+                 f"output = subprocess.check_output([sys.executable, '-B', '{name}.py', 'Ada'], "
+                 "text=True).strip()\n"
+                 f"assert output == {expected!r}, f'Expected {expected}, got {{output}}'\n"
+                 "print(output)")
+        check = {"purpose": f"Open {name} with Ada", "command": [sys.executable, "-B", "-c", probe],
+                 "expectedEvidence": story["outcome"]}
+        planned.append({"outcome": story["outcome"],
+                        "promises": [f"scopeIn:{name}"] + (["quality:exact"] if index == 1 else []),
+                        "spec": {"what": story["outcome"], "how": "Read a positional name in Python.",
+                                 "test": [check]}, "brief": brief + "\n\n" + story["outcome"]})
+
+    native = tmp_path / "lead_native.py"
+    native.write_text(r"""
+import json, sys, uuid
+from pathlib import Path
+
+args = sys.argv[1:]
+schema = Path(args[args.index("--output-schema") + 1])
+q = json.loads(schema.with_name("question.json").read_text(encoding="utf-8"))
+prompt = schema.with_name("prompt.txt").read_text(encoding="utf-8")
+facts = q["facts"]
+assert prompt.startswith(facts["Milestone brief"] + "\n\n")
+assert "provider-native sub-agents and skills" in prompt and "Return schema" in prompt
+assert "features.multi_agent=true" in args and "skills.bundled.enabled=true" in args
+assert "--ephemeral" not in args and 'sandbox_mode="danger-full-access"' in args
+thread = args[args.index("resume") + 1] if "resume" in args else str(uuid.uuid4())
+print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
+assert Path.cwd().resolve() == Path(facts["Write scope"]).resolve()
+planned, = facts["Approved spec"]["test"]
+expected = planned["expectedEvidence"]
+name = "hello" if expected.startswith("Hello") else "bye"
+path = Path(f"checks/{name}.py")
+path.parent.mkdir(exist_ok=True)
+path.write_text(planned["command"][-1] + "\n", encoding="utf-8")
+check = {**planned, "command": [sys.executable, "-B", path.as_posix()]}
+def implement(name, greeting):
+    Path(name + ".py").write_text("import sys\n" + f"print(f'{greeting}, {{sys.argv[1]}}!')\n",
+                                  encoding="utf-8")
+implement(name, expected.split(",")[0])
+if name == "bye":
+    earlier = Path("checks/hello.py")
+    if "resume" in args:
+        assert "Expected Hello, Ada!, got Broken, Ada!" in facts["Exact failure"]
+        implement("hello", "Hello")
+        previous_probe = next(c["command"][-1] for c in facts["Previous checkpoint"]["checks"].values()
+                              if "-c" in c["command"])
+        earlier.write_text(previous_probe + "\n", encoding="utf-8")
+    else:
+        implement("hello", "Broken")
+        earlier.write_text("print('Hello, Ada!')\n", encoding="utf-8")
+guide = Path("docs/try-it.md")
+guide.parent.mkdir(exist_ok=True)
+with guide.open("a", encoding="utf-8") as output:
+    if "resume" not in args:
+        output.write(f"\nRun `python {name}.py Ada`. Expect {expected}\n")
+receipt = {"outcome": "done", "summary": f"A visitor can run {name}.", "checks": [check],
+           "checkPaths": [path.as_posix()], "walkthrough": check}
+print(json.dumps({"type": "item.completed", "item": {"type": "agent_message",
+                  "text": json.dumps({"answer": receipt})}}), flush=True)
+print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
+""", encoding="utf-8")
+    setup = {"providers": deepcopy(ROLES), "scriptedUser": True, "userOrigin": "scripted journey",
+             "codexCommand": [sys.executable, "-B", str(native)], "python": {"path": sys.executable}}
+    provider = Codex(tmp_path / "calls", setup)
+    invoke = provider.invoke
+
+    def scripted(question, started):
+        strict_schema(question["schema"])
+        kind, facts = question["kind"], question["facts"]
+        if kind == "WORK":
+            return invoke(question, started)
+        if kind == "ALIGN":
+            answer = draft
+        elif kind == "MILESTONES":
+            assert facts["Dream"] == dream
+            answer = {"milestones": planned}
+        elif kind == "REVIEW":
+            assert facts["Milestones"] == planned
+            answer = {"verdict": "adequate", "gaps": [], "why": "The plan exercises both commands as staged."}
+        else:
+            assert kind == "JUDGE"
+            assert "hello.py" in facts["Code shape (measured)"]
+            assert {row["commit"] for row in facts["Observations"] if row["purpose"] == "milestone"} == {
+                facts["Candidate"]}
+            assert any("Hello, Ada!" in row["stdout"] for row in facts["Observations"])
+            answer = {"findings": {key: {"verdict": "satisfied", "gaps": [],
+                                         "why": "The named CLI action and source support the subject."}
+                                   for key in facts["Subjects"]}, "why": "Checked the delivered commands."}
+        return json.dumps({"answer": answer}), None
+
+    monkeypatch.setattr(provider, "invoke", scripted)
+    displayed = []
+
+    def user(request):
+        gate = request["gate"]
+        displayed.append(gate)
+        if gate == "A":
+            return {"request": request["request"], "replyId": "lock",
+                    "selections": [{"groupId": "round", "optionId": "done"}]}
+        return approve(request)
+
+    def pause_at_b(request):
+        if request["gate"] == "B":
+            raise Waiting()
+        return user(request)
+
+    mode = ["lead"]
+    monkeypatch.setattr(lead, "os", SimpleNamespace(getenv=lambda name, default: mode[0]))
+    project = tmp_path / "product"
+    run = Run(project, tmp_path / "workers", dream, setup, provider, pause_at_b,
+              mode=None if milestone_count == 1 else "lead")
+    try:
+        assert run.run().state == "B"
+        before = run.store.cursor()
+        assert before.B is None and gitwork.git(project, "rev-list", "--count", "HEAD") == "1"
+        assert not list(run.store.records("lead_assignment"))
+        assert not list((tmp_path / "calls").iterdir())
+        assert frontdoor.state(str(project))["mode"] == "lead"
+    finally:
+        run.close()
+    mode[0] = "orchestrator"
+    run = Run.reopen(project, provider, user)
+    try:
+        cursor = run.run()
+        assert cursor.state == "SCRIPTED_C", frontdoor.state(str(project))
+        assert displayed == ["A", "B", *(["CHECK-IN"] * milestone_count), "C"]
+        assert run.store.read(cursor.kickoff)["mode"] == "lead"
+        assignments = run.store.records("lead_assignment")
+        assert len(assignments) == milestone_count
+        assert all(int(ref[1:]) > int(cursor.B[1:]) and row["B"] == cursor.B for ref, _, row in assignments)
+        proofs = [row for _, _, row in run.store.records("milestone_proof")]
+        kept = [row for row in questions.observed(run.store, cursor.finalObservations)
+                if row["command"] == planned[0]["spec"]["test"][0]["command"]]
+        assert len(kept) == 1 and kept[0]["commit"] == cursor.candidate
+        assert kept[0]["stdout"].strip() == "Hello, Ada!"
+        assert gitwork.git(project, "rev-list", "--count", "HEAD") == str(1 + milestone_count)
+        sessions = [row["session"] for _, _, row in run.store.records("call_session")]
+        if milestone_count == 1:
+            assert len(sessions) == 1
+        else:
+            assert len(sessions) == 3 and sessions[0] != sessions[1] == sessions[2]
+            assert proofs[0]["commit"] != proofs[1]["commit"]
+            _, _, failure = run.store.records("lead_failure")[0]
+            assert failure["assignment"] == assignments[-1][0]
+            assert "Expected Hello, Ada!, got Broken, Ada!" in failure["failure"]
+    finally:
+        run.close()
+
+
 def unit_ref(run, number):
     scope = f"unit-{number:03}/**"
     return next(r for r, u in plan.select(run.store.plan(run.store.cursor().revision), "unit").items()

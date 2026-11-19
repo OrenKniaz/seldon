@@ -14,11 +14,15 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
     setup = store.read(store.cursor().kickoff)["setup"]
     kind = question["kind"]
     attempt = None
+    lead = question.get("execution", {}).get("lead")
+    session = question.get("execution", {}).get("session") if lead else None
 
     def invoke(current):
-        nonlocal attempt
+        nonlocal attempt, session
         if unit:
             current = {**current, "execution": {**current["execution"], "session": store.unit(unit).thread}}
+        elif lead:
+            current = {**current, "execution": {**current["execution"], "session": session}}
         previous = None
         for recovery in range(3):
             timeout = provider.timeout_for(kind, {}) if hasattr(provider, "timeout_for") else 30
@@ -42,6 +46,9 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                     if unit and thread:
                         with store.transaction():
                             store.unit(unit, replace(store.unit(unit), thread=thread))
+                    elif lead and thread:
+                        session = thread
+                        store.record("call_session", {"attempt": attempt, "session": thread})
                     return raw
                 return provider(current)
             except ProviderFailure as error:
@@ -49,7 +56,8 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                     "transient": error.transient, "cleanupVerified": error.cleanup_verified,
                     "receipt": error.receipt})
                 if (isinstance(error, ResumeUnavailable) or not error.transient
-                        or not error.cleanup_verified or unit and isinstance(error, Deadline)):
+                        or not error.cleanup_verified or unit and isinstance(error, Deadline)
+                        or lead):
                     raise
                 if recovery == 2:
                     raise RuntimeError(f"{error}; receipt: {error.receipt}") from error

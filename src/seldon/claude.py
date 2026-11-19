@@ -24,8 +24,11 @@ def command(setup, config, folder, worker, session, images):
     line = [*setup["claudeCommand"], "-p", "--output-format", "stream-json", "--verbose",
             "--json-schema", (folder / "schema.json").read_text("utf-8"), "--model", config["model"],
             "--effort", {"minimal": "low"}.get(config["effort"], config["effort"]),
-            "--permission-mode", "bypassPermissions", "--safe-mode", "--strict-mcp-config",
-            "--disable-slash-commands"]
+            "--permission-mode", "bypassPermissions"]
+    if not config.get("lead"):
+        line += ["--safe-mode", "--strict-mcp-config", "--disable-slash-commands"]
+    else:
+        line += ["--strict-mcp-config", "--setting-sources", ""]
     if session:
         line += ["--resume", session]
     if not worker:  # read-only: no tools, or Read alone to open attached images
