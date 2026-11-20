@@ -1434,12 +1434,16 @@ def approve(request):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("arm", ["hello-reopen", "cumulative-repair", "unchanged", "proof-owner", "plan-owner",
-                                 "lh01", "lh02", "explicit-question"])
+                                 "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
     A replacement check can hide a regression, and a receipt can stall proof or lose a genuine question.
     Wave journeys never exercise Lead's B-bound spec, durable witness or owner-specific repair.
+    guide-replay catches a passing walkthrough that skips the reader shell status action;
+    proof-owner separately protects the runner-owned missing-evidence wait.
+    lr01 guards against asking for a faulty CLI when the base has none. The weak-check twin catches
+    accepting a base pass without review or losing the judge's correction on the next Builder turn.
     """
     from types import SimpleNamespace
 
@@ -1533,11 +1537,25 @@ implement(name, expected.split(",")[0])
 check_paths = [path.as_posix()]
 if name == "hello":
     err = Path("checks/usage.py")
-    err.write_text(
-        "import subprocess, sys\n"
-        "r = subprocess.run([sys.executable, 'hello.py', '--help'], capture_output=True, text=True)\n"
+    setup = ""
+    if arm in ("lr01", "weak-check"):
+        setup = (
+            "subprocess.check_output(['git', 'ls-files', '--error-unmatch', '--', 'checks/usage.py'])\n"
+            "assert not subprocess.check_output(['git', 'status', '--porcelain'])\n"
+            "print('tracked witness in a clean checkout')\n"
+        )
+    usage = ("import subprocess, sys\n" + setup +
+             "r = subprocess.run([sys.executable, 'hello.py', '--help'], capture_output=True, text=True)\n")
+    err.write_text(usage +
         "assert (r.returncode, r.stdout, r.stderr) == (2, '', 'Usage: pass a name\\n')\n"
         "print('usage error asserted')\n", encoding="utf-8")
+    if arm == "weak-check":
+        if "resume" in args:
+            assert facts["Exact failure"] == (
+                "In checks/usage.py, assert the CLI's usage line, exit 2 and empty stdout.")
+        else:
+            err.write_text(usage + "assert r.returncode == 2 and not r.stdout and r.stderr.strip()\n"
+                           "print('usage error asserted')\n", encoding="utf-8")
     checks.append({"vision": "quality:exact", "purpose": "Exercise documented rejection",
                    "command": [sys.executable, "-B", err.as_posix()], "expectedEvidence": "usage on stderr"})
     check_paths.append(err.as_posix())
@@ -1570,10 +1588,35 @@ if "resume" not in args:
         output.write(f"\nRun `python {name}.py Ada`. Expect {expected}\n")
         if name == "hello":
             output.write("Run `python hello.py --help`. Expect usage on stderr and exit 2.\n")
+if arm == "guide-replay":
+    import shutil
+    shell = shutil.which("powershell") or shutil.which("pwsh")
+    assert shell
+    with guide.open("a", encoding="utf-8") as output:
+        if "resume" not in args:
+            output.write("Run in PowerShell: `python hello.py --help; $LASTEXITCODE`. Expect 2.\n")
+    script = Path("docs/try-it/replay.py")
+    script.parent.mkdir(parents=True, exist_ok=True)
+    if "resume" in args:
+        assert facts["Exact failure"] == "Exercise the documented PowerShell $LASTEXITCODE step and record its result."
+        script.write_text(
+            "import json, os, subprocess\nfrom pathlib import Path\n"
+            + f"r = subprocess.run([{shell!r}, '-NoProfile', '-Command', "
+            + "'python hello.py --help; $LASTEXITCODE'], capture_output=True, text=True)\n"
+            + "assert r.returncode == 0 and r.stdout.strip() == '2' and 'Usage:' in r.stderr\n"
+            + "Path(os.environ['SELDON_EVIDENCE_DIR'], 'operation-lifecycle.json').write_text("
+            + "json.dumps([{'command': 'python hello.py --help; $LASTEXITCODE', 'result': r.stdout.strip()}]))\n"
+            + "print('PowerShell $LASTEXITCODE: ' + r.stdout.strip())\n", encoding="utf-8")
+    else:
+        script.write_text("print('guide check passed without shell status')\n", encoding="utf-8")
+    check_paths.append(script.as_posix())
 for check in checks:
     check["expectedExit"] = 0
 walk = dict(checks[-1] if name == "hello" else checks[0])
 walk.pop("vision")
+if arm == "guide-replay":
+    walk = {"purpose": "Replay documented PowerShell step", "command": [sys.executable, "-B", script.as_posix()],
+            "expectedEvidence": "PowerShell status", "expectedExit": 0}
 receipt = {"outcome": "done", "summary": f"A visitor can run {name}. Resumed: {'resume' in args}.",
            "checks": checks, "checkPaths": check_paths, "walkthrough": walk, "question": ""}
 # Retained e2dc3f5 lh01 r57 and lh02 r40, with the fixture's runnable witnesses attached.
@@ -1640,10 +1683,58 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             answer = {"findings": {key: {"verdict": "satisfied", "gaps": [],
                                          "why": "The named CLI action and source support the subject."}
                                    for key in facts["Subjects"]}, "why": "Checked the delivered commands."}
+            if arm == "guide-replay":
+                walkthrough = next(row for row in green if row["command"][-1] == "docs/try-it/replay.py")
+                if "guide check passed without shell status" in walkthrough["stdout"]:
+                    answer["findings"]["tryItGuide"] = {"verdict": "gap",
+                        "why": "The check omits the documented shell action.",
+                        "gaps": [{"target": "tryItGuide", "owners": ["builder"], "severity": "must-fix",
+                                  "correction": "Exercise the documented PowerShell $LASTEXITCODE step and record its result."}]}
+                else:
+                    assert "PowerShell $LASTEXITCODE: 2" in walkthrough["stdout"]
+                    assert walkthrough["operationLifecycle"] == [
+                        {"command": "python hello.py --help; $LASTEXITCODE", "result": "2"}]
             if arm == "proof-owner":
                 answer["findings"]["tryItGuide"] = {"verdict": "uncertain",
                     "why": "No runner observation of the guide lifecycle.",
                     "neededFacts": ["Runner's documented-step evidence"]}
+            if arm in ("lr01", "weak-check"):
+                usage = next(row for row in green if row["requirements"] == ["quality:exact"])
+                if "Milestone base" not in facts:
+                    # lr01 r56's unresolved clear-errors finding, mapped to this journey's usage promise.
+                    answer["findings"]["quality:exact"] = {"verdict": "uncertain",
+                        "why": "The candidate check exercises argument rejection and passes. The RED run "
+                               "instead failed because hello.py was missing.",
+                        "neededFacts": ["A RED observation against an existing product that fails because "
+                                        "an unknown flag does not produce the required diagnostic."]}
+                else:
+                    base = [row for row in facts["Observations"] if row["purpose"] == "milestone-base"]
+                    assert {row["check"] for row in base} == {row["check"] for row in green}
+                    assert all(row["commit"] == base_commit for row in base)
+                    assert all(row["runnerResult"] == "GREEN" for row in green)
+                    assert facts["Milestone base"] == base_commit and usage["check"] in facts["New promise checks"]
+                    original = next(row for row in base if row["check"] == usage["check"])
+                    assert original["command"] == usage["command"]
+                    source = facts["Product files"]["checks/usage.py"]
+                    assert usage["executedCommit"] == usage["commit"]
+                    overlay = original["executedCommit"]
+                    assert gitwork.git(project, "rev-parse", f"{overlay}^") == base_commit
+                    assert gitwork.git(project, "diff", "--name-only", base_commit, overlay).splitlines() == sorted(
+                        original["witness"]["paths"])
+                    assert all("tracked witness in a clean checkout" in row["stdout"]
+                               for row in (original, usage))
+                    if "assert (r.returncode, r.stdout, r.stderr)" in source:
+                        assert original["runnerResult"] == "RED" and original["exitCode"] != 0
+                        assert "assert (r.returncode, r.stdout, r.stderr)" in original["stderr"]
+                        answer["findings"]["quality:exact"]["why"] = (
+                            "The base lacks the CLI. The check asserts the exact status and streams "
+                            "on the real candidate and would catch incorrect argument rejection.")
+                    else:
+                        assert arm == "weak-check" and original["runnerResult"] == "GREEN"
+                        answer["findings"]["quality:exact"] = {"verdict": "gap",
+                            "why": "Python's missing-file diagnostic satisfies the check without running the CLI.",
+                            "gaps": [{"target": "quality:exact", "owners": ["builder"], "severity": "must-fix",
+                                      "correction": "In checks/usage.py, assert the CLI's usage line, exit 2 and empty stdout."}]}
         return json.dumps({"answer": answer}), None
 
     monkeypatch.setattr(provider, "invoke", scripted)
@@ -1673,6 +1764,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         assert all(isinstance(item["spec"]["test"], str) for item in
                    run.store.read(before.leadPlan)["milestones"])
         assert before.B is None and gitwork.git(project, "rev-list", "--count", "HEAD") == "1"
+        base_commit = gitwork.git(project, "rev-parse", "HEAD")
         assert not list(run.store.records("lead_assignment"))
         assert not list((tmp_path / "calls").iterdir())
         assert frontdoor.state(str(project))["mode"] == "lead"
@@ -1713,8 +1805,11 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                            for row in failed)
             return
         assert cursor.state == "SCRIPTED_C", frontdoor.state(str(project))
-        if arm in ("lh01", "lh02"):
+        if arm in ("lh01", "lh02", "lr01"):
             assert not run.store.records("lead_failure")
+        if arm in ("weak-check", "guide-replay"):
+            (_, _, failure), = run.store.records("lead_failure")
+            assert failure["owner"] == "Builder"
         assert displayed == ["A", "B", *(["B"] if arm == "plan-owner" else []),
                              *(["CHECK-IN"] * milestone_count), "C"]
         assert run.store.read(cursor.kickoff)["mode"] == "lead"
@@ -1732,7 +1827,9 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         assert gitwork.git(project, "rev-list", "--count", "HEAD") == str(1 + milestone_count)
         sessions = [row["session"] for _, _, row in run.store.records("call_session")]
         if milestone_count == 1:
-            assert len(sessions) == (2 if arm == "plan-owner" else 1)
+            assert len(sessions) == (2 if arm in ("plan-owner", "weak-check", "guide-replay") else 1)
+            if arm in ("weak-check", "guide-replay"):
+                assert sessions[0] == sessions[1]
         else:
             assert len(sessions) == 3 and sessions[0] != sessions[1] == sessions[2]
             assert proofs[0]["commit"] != proofs[1]["commit"]

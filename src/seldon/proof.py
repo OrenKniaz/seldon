@@ -39,6 +39,7 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
     else:
         gitwork.checkout(checkout, commit)
     cleanup_verified, dirty = True, False
+    witness_commits = {}
     if purpose == "final":
         walkthroughs = plan.guide_checks(plan.execution(store))
     try:
@@ -53,9 +54,15 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
             command = list(check["command"])
             dirty = True
             retained = check.get("witness")
+            executed_commit = commit
             if retained and retained["commit"] != commit and retained["paths"]:
-                gitwork.git(checkout, "--literal-pathspecs", "restore", "--source", retained["commit"],
-                            "--worktree", "--", *retained["paths"])
+                key = retained["commit"], tuple(retained["paths"])
+                if key not in witness_commits:
+                    witness_commits[key] = gitwork.check_commit(
+                        root, commit, key[0], key[1], scratch, literal=True)
+                executed_commit = witness_commits[key]
+                if executed_commit != commit:
+                    gitwork.checkout(checkout, executed_commit)
             if (checkout / command[0]).is_file():
                 command[0] = str((checkout / command[0]).resolve())
             cleanup_verified = False
@@ -66,14 +73,14 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
             body = {k: v[-4096:].decode("utf-8", errors="replace") if isinstance(v, bytes) else v
                     for k, v in result.items()}
             body.update(evidence_facts.runtime(result, checkout, temp, evidence,
-                                              walkthrough=ref in walkthroughs, commit=commit))
+                                              walkthrough=ref in walkthroughs, commit=executed_commit))
             files = [store.artifact(p.read_bytes(), ref) for p in evidence.rglob("*")
                      if p.is_file() and not (p.parent == evidence and evidence_facts.runtime_file(p.name))]
             body.update(check=ref, unit=unit, commit=commit, purpose=purpose,
                         requirements=check["requirements"], command=check["command"], cwd=str(checkout),
                         evidenceFiles=files, cleanCheckout=True, actualCommand=command)
             if retained:
-                body["witness"] = retained
+                body.update(witness=retained, executedCommit=executed_commit)
             if scope_tree is not None:
                 body["scopeTree"] = scope_tree
             with store.transaction():
@@ -96,13 +103,16 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
     return observations
 
 
+def executed(body):
+    return (body["executionStarted"] and not body["timedOut"] and body["cleanupVerified"]
+            and body["exitCode"] is not None)
+
+
 def failures(store, observations, red=False):
     failed = []
     for ref in observations:
         body = store.read(ref)
-        usable = (body["executionStarted"] and not body["timedOut"] and body["cleanupVerified"]
-                  and body["exitCode"] is not None)
-        if not usable or (body["exitCode"] == 0 if red else body["exitCode"] != 0):
+        if not executed(body) or (body["exitCode"] == 0 if red else body["exitCode"] != 0):
             failed.append(body)
     return failed
 
@@ -123,8 +133,10 @@ def account(store, refs, delivered=None):
     for ref in refs:
         body = store.read(ref)
         fields = ("commit", "check", "requirements", "purpose", "exitCode", "stdout", "stderr",
-                  "executionStarted", "cleanupVerified", "timedOut", "cleanCheckout", "witness")
+                  "executionStarted", "cleanupVerified", "timedOut", "cleanCheckout", "witness", "executedCommit")
         row = {key: body[key] for key in fields if key in body}
+        if body["purpose"] in ("milestone-base", "milestone"):
+            row["runnerResult"] = ("GREEN" if body["exitCode"] == 0 else "RED") if executed(body) else "unobserved"
         row.update(evidence_facts.judge_fields(body), command=body.get("actualCommand", body["command"]),
                    workingDirectory=body["cwd"], ranOnDeliveredRevision=body["commit"] == delivered)
         row["artifacts"] = {}
@@ -142,9 +154,9 @@ def account(store, refs, delivered=None):
     return rows
 
 
-def candidate_files(store, root, commit):
+def candidate_files(store, root, commit, *, named=None):
     files, images = {}, {}
-    for name, content in gitwork.blobs(root, commit, ["**"]).items():
+    for name, content in gitwork.blobs(root, commit, ["**"], named=named).items():
         if image(content):
             images[name] = store.artifact(content, "candidate-image")
         elif b"\0" not in content:

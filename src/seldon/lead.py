@@ -30,7 +30,8 @@ WRITE_RULES = (
     "Assert any expected product error inside its check. Use a headless browser for any browser paths. "
     "List the check-only files and helpers in checkPaths. Return done when the work is written. "
     "Seldon runs every check itself. Put any doubts in summary. Leave question empty unless you need "
-    "an answer you cannot find yourself. If you cannot supply a walkthrough, return an empty object."
+    "an answer you cannot find yourself. If you cannot supply a walkthrough, return an empty object. "
+    + plan.GUIDE_WALKTHROUGH
 )
 EXAMPLE_CHECK = {"purpose": "Greet a named visitor", "command": ["python", "checks/greet.py"],
                  "expectedEvidence": "The process prints Hello, Ada!", "expectedExit": 0}
@@ -245,7 +246,10 @@ def build(store, provider, cursor):
             facts["Owner direction"] = store.read(cursor.requestedChange)["words"]
         example = {"outcome": "done", "summary": "A visitor can greet Ada.", "question": "",
                    "checks": [{**EXAMPLE_CHECK, "vision": next(iter(facts["Promises"]))}],
-                   "checkPaths": ["checks/greet.py"], "walkthrough": EXAMPLE_CHECK}
+                   "checkPaths": ["checks/greet.py", "docs/try-it/walkthrough.py"],
+                   "walkthrough": {"purpose": "Replay the guide",
+                                   "command": ["python", "docs/try-it/walkthrough.py"],
+                                   "expectedEvidence": "The reader sees Hello, Ada!", "expectedExit": 0}}
         question = questions.question("WORK", WRITE_RULES, facts, RECEIPT, [example],
             execution={"cwd": assignment["workspace"], "session": session, "lead": cursor.leadBuild,
                        "turn": cursor.repairs})
@@ -317,26 +321,26 @@ def prove(store, provider, cursor):
     previous = store.read(cursor.productVerdict) if cursor.productVerdict else {}
     candidate = None
     try:
-        red, candidate, changed = gitwork.snapshots(
-            worktree, base, ["**"], receipt["checkPaths"], cursor.scratch)
+        _, candidate, changed = gitwork.snapshots(worktree, base, ["**"], [], cursor.scratch)
         checks, new, walks = proof.milestone_checks(store, previous, cursor.wave, current, subjects, receipt, candidate)
     except ValueError as error:
         fail(store, cursor, str(error), candidate=candidate)
         return
-    green = proof.observe(store, project, candidate, checks | new, "milestone", walkthroughs=walks)
+    declarations = checks | new
+    red_refs = proof.observe(store, project, base, declarations, "milestone-base", walkthroughs=walks)
+    green = proof.observe(store, project, candidate, declarations, "milestone", walkthroughs=walks)
+    observations = red_refs + green
     if failed := proof.failures(store, green):
         runner_fault = any(not o["executionStarted"] or o["timedOut"] for o in failed)
         fail(store, cursor, proof.explain(failed), "Seldon" if runner_fault else "Builder",
-             candidate=candidate, evidence=green, retry="Retry proof" if runner_fault else None)
+             candidate=candidate, evidence=observations, retry="Retry proof" if runner_fault else None)
         return
-    red_refs = proof.observe(store, project, red,
-        {key: check for key, check in new.items() if key not in walks
-         and check["requirements"][0] in current}, "milestone-red")
-    judge, fixes, missing = judgment.milestone(store, provider, candidate, subjects, checks | new,
-                                              red_refs + green, walks, receipt["summary"])
+    new_promises = [key for key, check in new.items() if key not in walks and not check.get("replacement")]
+    judge, fixes, missing = judgment.milestone(store, provider, base, candidate, subjects, declarations,
+                                              observations, walks, new_promises, receipt["summary"])
     if fixes or missing:
         fail(store, cursor, "\n".join(fixes or missing), "Builder" if fixes else "Seldon",
-             candidate=candidate, evidence=[judge, *green],
+             candidate=candidate, evidence=[judge, *observations],
              retry="Run proof after the evidence is fixed" if missing and not fixes else None)
         return
     checks.update({k: v for k, v in new.items() if "replacement" not in v})
@@ -345,7 +349,7 @@ def prove(store, provider, cursor):
         verdict = store.record("milestone_proof", {"milestone": cursor.wave, "plan": cursor.leadPlan,
             "commit": candidate, "assignment": cursor.leadBuild, "return": cursor.leadReturn,
             "changed": changed, "checks": checks, "walkthroughs": walks, "red": red_refs,
-            "observations": green, "executedChecks": list(checks | new), "judge": judge,
+            "observations": green, "executedChecks": list(declarations), "judge": judge,
             "previous": cursor.productVerdict})
         intent = store.record("publication", {"milestone": cursor.wave, "before": base,
             "commit": candidate, "verdict": verdict, "observations": green})

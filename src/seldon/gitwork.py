@@ -196,13 +196,17 @@ def integrated(project, scratch, base, product, current):
     return commit(project, tree, current)
 
 
-def check_commit(root, wave_start, product, check_paths, scratch):
+def check_commit(root, wave_start, product, check_paths, scratch, *, literal=False):
     env = {"GIT_INDEX_FILE": str(Path(scratch) / ("index-" + uuid.uuid4().hex))}
     git(root, "read-tree", wave_start, env=env)
-    names = [p for p in set(paths(root, wave_start)) | set(paths(root, product)) if matches(p, check_paths)]
+    names = list(check_paths) if literal else [
+        p for p in set(paths(root, wave_start)) | set(paths(root, product)) if matches(p, check_paths)]
     if names:
         git(root, "--literal-pathspecs", "restore", "--source", product, "--staged", "--", *names, env=env)
-    return commit(root, git(root, "write-tree", env=env), wave_start)
+    tree = git(root, "write-tree", env=env)
+    if literal and tree == git(root, "rev-parse", f"{wave_start}^{{tree}}"):
+        return wave_start
+    return commit(root, tree, wave_start)
 
 
 def unchanged(root, revision):

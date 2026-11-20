@@ -23,10 +23,10 @@ async function journey() {
     await once(server, 'listening');
     const url = `http://127.0.0.1:${server.address().port}/settings`;
     let instance;
-    const run = check => browser(url, async ({page}) => {
+    const run = (check, options) => browser(url, async ({page}) => {
       instance = page.context().browser();
       return check(page);
-    });
+    }, options);
 
     assert.equal(await run(async page => {
       await page.getByRole('button', {name: 'Save'}).click();
@@ -43,7 +43,7 @@ async function journey() {
     await assert.rejects(run(async page => {
       await page.goto(broken);
       await page.getByRole('button', {name: 'Publish'}).click();
-    }), error => error.message.includes('Browser deadline') && error.message.includes(broken)
+    }, {deadline: 10_000}), error => error.message.includes('Browser deadline') && error.message.includes(broken)
       && error.message.includes('check callback') && error.message.includes('Editor failed to initialize'));
     assert.equal(instance.isConnected(), false);
   } finally {
