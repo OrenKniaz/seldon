@@ -823,40 +823,106 @@ def test_wave_loop_golden(tmp_path, scalar_align, fault):
 
 
 @pytest.mark.fast
-def test_directed_checkin_architect_continuation_journey(tmp_path, scalar_align):
-    """A completed single-wave run plans the requested follow-on with its original proof.
+def test_directed_checkin_architect_continuation_journey(tmp_path, monkeypatch):
+    """A check-in extends the existing writer through final proof without echoing ownership.
 
-    The retained Quiet Bench reply kept a closed horizon when the check-in direction was
-    buried. Existing staged-wave journeys already have a next wave and miss this refusal.
+    Quiet Bench lost direction behind the closed horizon and kept a draft requirement on two writers
+    after review. Earlier staged-wave journeys miss the draft repair and exact value dropped by WORK.
     """
     from contextlib import closing
 
+    from seldon import features
     from seldon.providers import render_question
     from seldon.run import TERMINAL
 
-    direction = "Also let me export a saved value as CSV"
+    monkeypatch.setattr(features, "enabled", {"growAlign", "answerRepair"}.__contains__)
+    monkeypatch.setattr(features, "planning_setup", lambda: {})
+    slot = tmp_path / "directed-checkin"
+    slot.mkdir()
+    (slot / "mode").write_text("normal")
+    direction = "Also let me export a saved value as CSV\nKeep the exact heading."
     goal = "Export the saved value as CSV"
-    run, _ = prepare(tmp_path / "directed-checkin")
+    heading = "Expiring soon"
+    story, quality = "scopeIn:greeting", "quality:clear"
+    follow_on = "    Path(name, 'check.py').write_text(source)"
+    (slot / "native.py").write_text(NATIVE.replace(follow_on, r"""    if number == 1 and turn == 2:
+        assert facts['User check-in'].startswith('Also let me export a saved value as CSV')
+        heading, = (c['value'] for c in facts['Applicable exact constraints'])
+        Path(name, 'values.csv').write_text(heading + '\n' + value + '\n', encoding='utf-8')
+        source += f"assert Path('{name}/values.csv').read_text().splitlines() == {[heading, value]!r}\n"
+""" + follow_on), encoding="utf-8")
     briefs = []
+    draft_requirement = "2.area-1.requirement2"
+    reviewed_draft = False
 
     class Planner(Scripted):
         def __call__(self, q):
-            facts = q["facts"]
-            if q["kind"] == "DECIDE" and facts["Decision"] == "CHECK-IN":
+            nonlocal reviewed_draft
+            kind, facts = q["kind"], q["facts"]
+            if kind == "ALIGN":
+                answer = questions.tiny_round_example()
+                accepted = answer["vision"]
+                accepted["stories"][0].update(story="Read the saved value", outcome="Show the saved value",
+                                              constraints=["heading"], sources=["kickoff"])
+                accepted["constraints"] = [{"handle": "heading", "value": heading,
+                    "meaning": "Exact CSV heading", "source": "kickoff"}]
+                return json.dumps({"answer": answer})
+            if kind == "DECIDE" and facts["Decision"] == "CHECK-IN":
                 return json.dumps({"answer": {"choice": "Other", "why": "The user requests CSV export."}})
-            if q["kind"] == "ARCHITECT" and "Finished wave" in facts:
+            if kind == "JUDGE" and any("CSV exports" in r["acceptance"] for r in facts["Requirements"].values()):
+                assert [c["value"] for c in facts["Applicable exact constraints"]] == [heading]
+            if kind == "ARCHITECT" and "Finished wave" in facts:
                 strict_schema(q["schema"])
                 briefs.append(q)
                 # Replay the recorded shape unless the current direction is explicit.
-                waves = ([{"goal": goal, "commitments": ["scopeIn:1"]}]
+                waves = ([{"goal": goal, "commitments": [story]}]
                          if facts.get("User check-in") == direction and facts.get("Next wave") == 2
                          else [])
                 return json.dumps({"answer": {"areas": [], "contracts": [], "decisions": [],
                     "waves": waves, "why": "Extend the existing saved-value outcome with export."}})
-            return super().__call__(q)
+            if kind == "REVIEW" and draft_requirement in facts["Plan"] and not reviewed_draft:
+                reviewed_draft = True
+                return json.dumps({"answer": {"verdict": "gap", "gaps": [{"severity": "must-fix",
+                    "target": draft_requirement, "correction": "Give the independent reader its own check."}],
+                    "why": "The reader can prove its value independently of the continuing export."}})
+            if kind == "DETAIL":
+                area = facts["Area"]
+                later = facts["Current wave"]["goal"] == goal
+                repairing = later and "Merge correction" in facts
+                # The repair reuses edit positions and replaces the proposed independent reader.
+                scopes = [area["scope"][-1], area["scope"][0]] if repairing else area["scope"][:2 if later else 1]
+                q = {**q, "facts": {**facts, "Area": {**area, "scope": scopes}}}
+            answer = json.loads(super().__call__(q))["answer"]
+            if kind == "ARCHITECT":
+                answer["areas"][0].update(scope=[f"unit-{i:03}/**" for i in (1, 2, 3)],
+                                          commitments=[story, quality])
+                answer["waves"][0]["commitments"] = [story, quality]
+            if kind == "DETAIL":
+                for edit in answer["edits"]:
+                    if edit["kind"] == "feature":
+                        edit["typedBody"]["commitments"] = [story]
+                if later:
+                    assert facts["User check-in"] == direction
+                    continuing = facts["Continuing owner"]
+                    assert facts["What exists here"][continuing]["scope"] == ["unit-001/**"]
+                    guide = facts["Walkthrough ownership"]
+                    assert guide["owner"] == "guide" and guide["paths"] == list(plan.GUIDE_SCOPE)
+                    del answer["units"][-1 if repairing else 0]["scope"]
+                    export = next(edit for edit in answer["edits"] if edit["targetHandle"] == "r1")
+                    export["typedBody"]["acceptance"] = "CSV exports the original saved value."
+            return json.dumps({"answer": answer})
 
-    with closing(run):
-        run.provider = Planner(tmp_path / "directed-checkin")
+    def user(item):
+        if item["gate"] == "A":
+            return {"request": item["request"], "replyId": "lock", "selections": [
+                {"groupId": "round", "optionId": "done"}]}
+        if item["gate"] == "CHECK-IN" and item["subject"]["wave"] == 1:
+            return direction
+        return approve(item)
+
+    provider = Planner(slot)
+    with closing(Run(slot / "product", slot / "workers", f"Read saved values. Use the exact heading {heading}.",
+                     provider.setup, provider, user)) as run:
         while run.store.cursor().state != "CHECK-IN":
             assert run.step() not in TERMINAL
         store = run.store
@@ -868,7 +934,6 @@ def test_directed_checkin_architect_continuation_journey(tmp_path, scalar_align)
         assert owners and all(row.state == "DONE" for row in owners.values())
         assert evidence and any(body["commit"] == before.candidate and body["exitCode"] == 0
                                 for _, _, body in evidence)
-        run.user = lambda item: direction if item["gate"] == "CHECK-IN" else approve(item)
         assert run.step() == "PRODUCT-JUDGE"
         assert run.step() == "ARCHITECT"
         assert run.step() == "DETAIL"
@@ -882,10 +947,42 @@ def test_directed_checkin_architect_continuation_journey(tmp_path, scalar_align)
         continued = store.plan(after.revision)
         assert after.wave == 2 and after.waveStart == before.candidate == after.candidate
         assert continued["architecture"]["waves"] == [*document["architecture"]["waves"],
-                                                       {"goal": goal, "commitments": ["scopeIn:1"]}]
+                                                       {"goal": goal, "commitments": [story]}]
         assert continued["architecture"]["areas"] == document["architecture"]["areas"]
         assert continued["nodes"] == document["nodes"]
         assert store.units() == owners and store.records("observation") == evidence
+        owner = unit_ref(run, 1)
+        assert run.step() == "REVIEW"
+        draft = store.plan(store.cursor().revision)
+        assert "CSV exports" in draft["nodes"][draft_requirement]["body"]["acceptance"]
+        assert draft_requirement in plan.select(draft, "unit")[owner]["requirements"]
+        assert any(unit["scope"] == ["unit-002/**"] for unit in plan.select(draft, "unit").values())
+        assert run.step() == "REPAIR"
+        assert run.step() == "DETAIL"
+        final, _, rows = finish(run)
+        execution = plan.execution(store)
+        units = plan.select(execution, "unit")
+        assert final.B == before.B and unit_ref(run, 1) == owner and rows[owner].wave == 2
+        assert units[owner]["scope"] == plan.select(document, "unit")[owner]["scope"]
+        new, = units.keys() - owners.keys()
+        assert units[new]["scope"] == ["unit-003/**"] and rows[new].wave == 2
+        assert [ref for ref, unit in units.items() if draft_requirement in unit["requirements"]] == [new]
+        prior_requirements = plan.select(document, "unit")[owner]["requirements"]
+        assert all(ref in units[owner]["requirements"] and execution["nodes"][ref] == document["nodes"][ref]
+                   for ref in prior_requirements)
+        assert (run.project / "unit-001/values.csv").read_text().splitlines() == [heading, "value-001"]
+        for question_path in (slot / "calls").glob("call-*/question.json"):
+            work = json.loads(question_path.read_bytes())
+            if (work["facts"].get("User check-in") == direction
+                    and work["facts"]["Write scope"] == units[owner]["scope"]):
+                actual = question_path.with_name("prompt.txt").read_text("utf-8")
+                for rendered in (actual, render_question(work, prompts2=True)[0]):
+                    assert "User check-in\n" + direction in rendered
+                    assert f'"value": "{heading}"' in rendered.split("Applicable exact constraints\n", 1)[1]
+                break
+        else:
+            pytest.fail("No wave-2 worker brief carried the prior direction in the original scope")
+        assert not store.records("consumption_failure") and not store.records("detail_correction")
 
 
 @pytest.mark.fast
@@ -1073,15 +1170,18 @@ answer = {'outcome':'done','summary':'Wrote and exercised the acceptance',
 if mode == 'schema-fix' and name == 'unit-001' and turn == 1:
     answer = json.loads((slot/'recorded-work.json').read_text())['answer']
 elif mode == 'scale-five' and name == 'unit-012' and turn == 1:
-    answer.update(outcome='question', summary='Should the reader preserve the exact label?')
+    answer.update(outcome='question', question='Should the reader preserve the exact label?')
 elif mode == 'repeat-question' and name == 'unit-001':
-    answer.update(outcome='question', summary='May I hand off with acceptance pending WAVE-VERIFY?')
+    answer.update(outcome='question', question='Which documented fixture should the reader exercise?',
+                  summary=f'Work to verify the saved-value fixture, turn {turn}.')
+elif mode == 'followup-question' and name == 'unit-001':
+    answer.update(outcome='question', question='Which saved label should the reader preserve?')
 elif mode == 'question' and name == 'unit-001' and turn == 1:
-    answer.update(outcome='question', summary='How can I check persistence in this scope?')
+    answer.update(outcome='question', question='How can I check persistence in this scope?')
 elif mode == 'coach-facts' and name == 'unit-003' and turn == 1:
-    answer.update(outcome='question', summary="Coordinator: supply u001's existing task/thread ID and evidence location")
+    answer.update(outcome='question', question="Coordinator: supply u001's existing task/thread ID and evidence location")
 elif mode == 'coach-facts' and name == 'unit-001' and turn == 1:
-    answer.update(outcome='question', summary="Where are u002's files and execution evidence?")
+    answer.update(outcome='question', question="Where are u002's files and execution evidence?")
 elif name == 'docs':
     command = [sys.executable, '-B', 'docs/try-it/check.py']
     Path('docs/try-it').mkdir(parents=True, exist_ok=True)
@@ -2225,7 +2325,8 @@ def test_quietbench_peer_agreements_journey(tmp_path, route, monkeypatch):
                     raise ReceivedAgreement
                 if route == "coach" and "Direction: " + guidance in facts.get("Exact failure", ""):
                     raise ReceivedAgreement
-                answer = fixture["r103"]
+                answer = {**fixture["r103"],
+                          "question": "What are the agreed simulation-run interface and page-assets paths?"}
             elif kind == "COACH":
                 seen.append("coach")
                 answer = fixture["r111"]
@@ -2271,36 +2372,93 @@ def test_quietbench_peer_agreements_journey(tmp_path, route, monkeypatch):
 
 
 @pytest.mark.fast
-def test_repeating_worker_question_journey(tmp_path, scalar_align):
-    """Repeated handoff questions reach one user wait while siblings finish, then resume.
+def test_repeating_worker_question_journey(tmp_path, scalar_align, monkeypatch):
+    """A repeat with changed progress stays parked until the owner supplies changed input.
 
-    The finite question journey misses the uncounted loop that caused T-184; the
-    wave-gap journey never asks a question and cannot protect counted COACH returns.
+    The existing question golden answers once without a restart and cannot catch a lost
+    receipt or a second WORK dispatch on an acknowledgement after the same question returns.
     """
+    from seldon import decisions
     from seldon.decisions import Waiting
 
     slot = tmp_path / "repeat-question"
     run, provider = prepare(slot, "repeat-question", 3)
+    original = provider.invoke
+    first_answer = []
+    fresh_question = "Which saved label should the reader preserve?"
+
+    def invoke(q, started):
+        facts = q["facts"]
+        if q["kind"] == "COACH":
+            work = facts["Unresolved work"]
+            assert work["workerQuestion"] == work["receipt"]["question"]
+            assert work["receipt"]["why"] == "Ready for independent observation"
+            if work["workerQuestion"] == fresh_question:
+                (slot / "mode").write_text("normal")
+                return json.dumps({"answer": {"guidance": "Preserve the exact saved label.",
+                                              "why": "The accepted settings already name it."}}), None
+        if q["kind"] == "DECIDE" and "Required input" in facts:
+            # The raw replay guard owns an exact repeated answer, even if DECIDE calls it Other.
+            choice = "Unclear" if facts["User's words"] == "Understood, continue" else "Other"
+            return json.dumps({"answer": {"choice": choice, "why": "Interpret the owner's reply."}}), None
+        return original(q, started)
+
+    def answer_once(item):
+        if item["gate"] != "UNIT":
+            return approve(item)
+        if item["subject"].get("inputOwner"):
+            raise Waiting()
+        first_answer.append(item["ask"]["options"][0]["label"])
+        return first_answer[-1]
+
+    provider.invoke, run.user = invoke, answer_once
     try:
+        class ControllerInterrupted(BaseException):
+            pass
+
+        def interrupt(*_):
+            raise ControllerInterrupted()
+
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(decisions, "ask_unit", interrupt)
+            with pytest.raises(ControllerInterrupted):
+                while True:
+                    run.step()
+        assert run.store.unit(unit_ref(run, 1)).state == "ASKED"
+        assert not [b for _, _, b in run.store.records("answer") if b["kind"] == "COACH"]
+        run.close()
+        run = Run.reopen(slot / "product", provider, answer_once)
         with pytest.raises(Waiting):
             while True:
                 run.step()
-        requests = [b for _, _, b in run.store.records("decision_request") if b["gate"] == "UNIT"]
-        assert len(requests) == 1
+        previous, request = [b for _, _, b in run.store.records("decision_request") if b["gate"] == "UNIT"]
+        assert previous["subject"]["receipt"]["summary"] != request["subject"]["receipt"]["summary"]
+        assert "still needs an answer" in request["ask"]["question"]
         assert run.store.unit(unit_ref(run, 1)).state == "ASKED"
-        assert all(run.store.unit(ref).state == "DONE" for ref in (unit_ref(run, 2), unit_ref(run, 3)))
+        assert all(run.store.unit(unit_ref(run, peer)).state == "DONE" for peer in (2, 3))
+        decision = run.store.cursor().decision
         candidate = run.store.cursor().candidate
+        attempts = (slot / "turn-unit-001").read_text()
+        coached = len([b for _, _, b in run.store.records("answer") if b["kind"] == "COACH"])
         run.close()
         run = Run.reopen(slot / "product", provider, approve)
         with pytest.raises(Waiting):
             run.step()
+        for words in ("Understood, continue", first_answer[0], "Provide a fix"):
+            run.user = lambda _, words=words: words
+            with pytest.raises(Waiting):
+                run.step()
+            assert run.store.cursor().decision == decision
         assert run.store.cursor().candidate == candidate
-        assert len([b for _, _, b in run.store.records("decision_request") if b["gate"] == "UNIT"]) == 1
-        (slot / "mode").write_text("normal")
-        run.user = lambda request: ("Try again with the saved-value check"
-                                    if request["gate"] == "UNIT" else approve(request))
+        assert (slot / "turn-unit-001").read_text() == attempts
+        assert len([b for _, _, b in run.store.records("answer") if b["kind"] == "COACH"]) == coached
+        (slot / "mode").write_text("followup-question")
+        run.user = lambda item: ("Revise the fixture to use the saved-value check"
+                                if item["gate"] == "UNIT" else approve(item))
         finish(run)
         assert all((slot / f"turn-unit-{n:03}").read_text() == "1" for n in (2, 3))
+        assert any(b["subject"].get("workerQuestion") == fresh_question
+                   for _, _, b in run.store.records("planner_answer"))
     finally:
         run.close()
 
@@ -2482,10 +2640,36 @@ def test_defect_reaches_owner_journey(tmp_path, scalar_align, outcome):
 
     slot = tmp_path / "defect"
     run, provider = prepare(slot, "defect-" + outcome, 2)
+
+    class ControllerInterrupted(BaseException):
+        pass
+
+    original_invoke = provider.invoke
+
+    def old_provider(q, started):
+        if q["kind"] != "WORK" or q["facts"]["Write scope"] != ["unit-001/**"]:
+            return original_invoke(q, started)
+        old = deepcopy(q)
+        variants = old["schema"]["properties"]["answer"]["anyOf"]
+        variants[0]["properties"]["outcome"]["enum"].append("question")
+        variants[:] = variants[:1]
+        original_invoke(old, started)
+        raise ControllerInterrupted()
+
     try:
+        if outcome == "question":
+            provider.invoke = old_provider
+            with pytest.raises(ControllerInterrupted):
+                while True:
+                    run.step()
+            run.close()
+            provider.invoke = original_invoke
+            run = Run.reopen(slot / "product", provider, approve)
         while run.store.cursor().state != "WAVE-VERIFY":
             run.step()
         assert run.store.unit(unit_ref(run, 1)).state == "DONE"
+        if outcome == "question":
+            assert (slot / "turn-unit-001").read_text() == "1"
         original = gitwork.blobs(run.project, run.store.cursor().candidate, ["unit-001/**"])
         assert (run.project / "unit-002/peer.txt").read_text() == "broken"
         run.step()

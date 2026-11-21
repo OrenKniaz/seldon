@@ -341,6 +341,18 @@ def not_judged(store):
                                + [{"subject": ref, "answer": store.read(row.judgment).get("answer", {})}
                                   for ref, row in store.units().items() if row.judgment])
                      if v["answer"].get("verdict") == "not judged"})
+    limits = []
+    for ref in cursor.finalObservations:
+        observation = store.read(ref)
+        if observation["commit"] != cursor.candidate or observation["purpose"] != "final":
+            continue
+        for row in observation.get("operationLifecycle", ()):
+            step = row.get("step") or row.get("operation") or row.get("command_or_interaction")
+            if row.get("observed") is False and isinstance(step, str) and step.strip():
+                reason = row.get("reason")
+                limits.append(f"{step}: {reason}" if isinstance(reason, str) and reason.strip() else step)
+    if limits:
+        deferred["tryItGuide:walkthrough"] = "not judged: " + "; ".join(dict.fromkeys(limits))
     return deferred
 
 

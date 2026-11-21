@@ -4,7 +4,7 @@ from copy import deepcopy
 
 from . import plan
 from .answers import Mismatch, links, normalised
-from .schema import ARCHITECT, DETAIL_PLAN, DETAIL_SPLIT, GROWN_DETAIL_PLAN, vision_body
+from .schema import ARCHITECT, DETAIL_SPLIT, FEATURE, GROWN_FEATURE, detail_plan, vision_body
 from .schema import validate as validate_schema
 
 
@@ -245,7 +245,7 @@ def local_plan(area, answer, vision, *, record=None):
     if "units" in structure:
         structure["units"] = [{k: v for k, v in unit.items() if k != "brief"}
                               for unit in structure["units"]]
-    validate_schema(structure, GROWN_DETAIL_PLAN if grown else DETAIL_PLAN)
+    validate_schema(structure, detail_plan(GROWN_FEATURE if grown else FEATURE, continuing=True))
     edits = index(answer["edits"], "edits.targetHandle", key="targetHandle", record=record)
     answer["edits"] = list(edits.values())
     features = {r: e["typedBody"] for r, e in edits.items() if e["kind"] == "feature"}
@@ -269,13 +269,17 @@ def local_plan(area, answer, vision, *, record=None):
             raise Mismatch(field, f"Seldon expected this area's feature handles {list(features)}; got {refs}. "
                 "Send the matching local handles from this answer's edits.")
     trace = plan.trace_requirements(features, requirements)
-    for i, unit in enumerate(answer["units"], 1):
-        unit["scope"] = plan.product_scope(unit["scope"], "units.scope", f"{area['handle']} unit:{i}", record)
-        missing = [p for p in unit["scope"]
-                   if not any(plan.contains(s, p) for s in area["scope"])]
-        if missing:
-            raise ContractGap(f"Area {area['handle']}: keep work inside its named area scopes; "
-                              f"ARCHITECT must assign missing scope for {missing}", [area["handle"]])
+    units = answer["units"]
+    if sum("scope" not in unit for unit in units) > 1:
+        raise Mismatch("units.scope", "Give the continuing owner one assignment. Scope each new writer separately.")
+    for i, unit in enumerate(units, 1):
+        if "scope" in unit:
+            subject = f"{area['handle']} unit:{i}"
+            unit["scope"] = plan.product_scope(unit["scope"], "units.scope", subject, record)
+            missing = [p for p in unit["scope"] if not any(plan.contains(s, p) for s in area["scope"])]
+            if missing:
+                raise ContractGap(f"Area {area['handle']}: keep work inside its named area scopes; "
+                                  f"ARCHITECT must assign missing scope for {missing}", [area["handle"]])
         unit["requirements"] = links(unit["requirements"], requirements, via=trace, record=record,
                                      field="units.requirements", subject=f"{area['handle']} unit:{i}")
         if set(unit["requirements"]) - requirements.keys():
@@ -299,13 +303,14 @@ def local_plan(area, answer, vision, *, record=None):
     nodes = {"vision": {"kind": "vision", "body": vision}}
     nodes.update({e["targetHandle"]: {"kind": e["kind"], "body": plan.edit_body(e, grown)}
         for e in answer["edits"]})
-    units = {f"unit:{i}": {**{k: v for k, v in u.items() if k != "provides"}, "area": area["handle"],
+    plan.validate_records({"nodes": nodes})
+    # The compiled plan checks actual overlap after binding any implicit owner.
+    units = {f"unit:{i}": {"scope": [], **{k: v for k, v in u.items() if k != "provides"},
+             "area": area["handle"],
              "dependencies": [f"unit:{d}" for d in u["dependencies"]]}
              for i, u in enumerate(answer["units"], 1)}
     nodes.update({r: {"kind": "unit", "body": u} for r, u in units.items()})
-    document = {"nodes": nodes}
-    plan.validate_records(document)
-    plan.validate_owned_work(document)
+    plan.validate_owned_work({"nodes": nodes})
 
 
 def subdivision(parent, answer, known_contracts, *, record=None):

@@ -84,14 +84,18 @@ ARCHITECT = obj(areas=array(AREA), contracts=array(AREA_CONTRACT),
                 decisions=array(BODIES["decision"]), waves=array(obj(goal=TEXT, commitments=REFS), 1))
 
 
-def detail_plan(feature, *, planner_brief=False, guide_brief=False):
+def detail_plan(feature, *, planner_brief=False, guide_brief=False, continuing=False):
     unit = {**PLANNED_UNIT["properties"], "requirements": REFS}
     if planner_brief:
         unit["brief"] = TEXT
+    assignments = [obj(**unit), obj(**unit, provides=REFS)]
+    if continuing:
+        del unit["scope"]
+        assignments.extend([obj(**unit), obj(**unit, provides=REFS)])
     return obj(verdict=choice("planned"), edits=array({"anyOf": [
         obj(kind=choice("feature"), targetHandle=TEXT, typedBody=feature),
         obj(kind=choice("requirement"), targetHandle=TEXT, typedBody=PLAN_BODIES["requirement"])]}, 1),
-        units=array({"anyOf": [obj(**unit), obj(**unit, provides=REFS)]}, 1),
+        units=array({"anyOf": assignments}, 1),
         **({"guideBrief": TEXT} if guide_brief else {}))
 
 
@@ -114,7 +118,7 @@ def folded_judge_schema(subjects, owner):
 
 
 def answer_schema(kind, targets=(), owners=(), *, grown=False, coach_contracts=False,
-                  planner_brief=False, guide_brief=False):
+                  planner_brief=False, guide_brief=False, continuing=False):
     gap = obj(target=choice(*targets), correction=TEXT, owners=array(choice(*owners), 1), severity=SEVERITY)
     payload = {
         "ALIGN": VISION, "ARCHITECT": obj(**{**ARCHITECT["properties"],
@@ -123,7 +127,7 @@ def answer_schema(kind, targets=(), owners=(), *, grown=False, coach_contracts=F
         "DECIDE": obj(choice=choice(*targets,
                                     "Other", "Stop", "Unclear")),
         "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
-        "WORK": obj(outcome=choice("done", "question"), summary=TEXT,
+        "WORK": obj(outcome=choice("done"), summary=TEXT,
                     checkPaths=REFS, checks=array({"anyOf": [
                         obj(**CHECK), obj(update=TEXT, **CHECK), obj(retire=TEXT)]}),
                     discoveries=array(obj(owner=choice(*owners), correction=TEXT))),
@@ -133,11 +137,14 @@ def answer_schema(kind, targets=(), owners=(), *, grown=False, coach_contracts=F
         "FLOW": obj(verdict=choice("satisfied", "gap"), gaps=array(gap)),
         "PRODUCT": obj(verdict=choice("satisfied", "gap"), gaps=array(gap)),
     }[kind]
-    if kind == "DETAIL" and planner_brief:
-        payload = detail_plan(GROWN_FEATURE if grown else FEATURE, planner_brief=True, guide_brief=guide_brief)
+    if kind == "DETAIL" and (planner_brief or continuing):
+        payload = detail_plan(GROWN_FEATURE if grown else FEATURE, planner_brief=planner_brief,
+                              guide_brief=guide_brief, continuing=continuing)
     uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1))
     alternatives = ((payload, DETAIL_SPLIT, DETAIL_GAP) if kind == "DETAIL" else
                     (payload, obj(scope=TEXT)) if kind == "ARCHITECT" else
+                    (payload, obj(**{**payload["properties"], "outcome": choice("question"),
+                                     "question": TEXT})) if kind == "WORK" else
                     (payload, obj(ask=ASK)) if kind == "COACH" else
                     (payload, uncertain) if kind in ("JUDGE", "FLOW", "PRODUCT", "REVIEW") else
                     (payload,))

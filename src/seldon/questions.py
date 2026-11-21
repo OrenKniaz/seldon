@@ -62,6 +62,22 @@ SOLE_WORK = (
     "Keep existing declarations unless updating or retiring one by handle. Save visual evidence in "
     "SELDON_EVIDENCE_DIR. Seldon runs the declared checks; run locally as needed to build or debug.")
 
+WORK_RETURN = (
+    "Return question with the specific question in the question field when a missing fact or "
+    "decision prevents completing your work. Return done when the assigned work is complete. "
+    "If an exact runtime needed only for verification is unavailable, exercise the supported paths, "
+    "keep the exact step in the guide, and record its name and observed=false with the reason in the "
+    "walkthrough evidence. Report that limit in why."
+)
+LEGACY_WORK_RETURN = (
+    "If a missing fact or a decision about meaning prevents completion, return question with the "
+    "specific question in summary. Otherwise return done."
+)
+WORK_COACH = (
+    "Use workerQuestion when supplied. Use the receipt's summary, why and discoveries to resolve "
+    "the actual issue in an older receipt. Ask the user only for a concrete fact or decision they own."
+)
+
 OPERATION_WALKTHROUGH = (
     "For each accepted operation with start/stop or progress, observe one run through the documented "
     "user interface in the integrated walkthrough. Start it, read state while active, stop it and read "
@@ -106,9 +122,9 @@ PROMPTS = {
                  'alone also work, and an empty list keeps the horizon.\n'
                  'areas/contracts: handles merge with existing entries when steering; empty lists keep them.',
     "DETAIL": 'What features, requirements and units deliver this wave in this area? Each requirement '
-              'has one plain-words acceptance sentence. Assign disjoint scopes, requirements and dependencies to '
-              'session-sized units. Subdivide if needed; a missing agreement returns a contract_gap to the '
-              'planner. Normally the area is one unit. Use more only when they can be built at the same '
+              'has one plain-words acceptance sentence. Give each session-sized unit disjoint ownership, '
+              'requirements and dependencies. Subdivide if needed or use contract_gap for a missing agreement. '
+              'Normally the area is one unit. Use more only when they can be built at the same '
               "time. Name a dependency only when a unit cannot be written until another unit's files exist.\n"
               "edits: requirement features refer to feature targetHandle values in this answer.\n"
               "units: requirements use local requirement handles; dependencies use one-based unit positions.",
@@ -125,7 +141,7 @@ PROMPTS = {
     "WORK": "Deliver this whole unit inside its scope. Write and run your own checks for the "
             "acceptance sentences; declare each check's command, plus checkPaths "
             "including helpers needed without the product. Code observes RED without product and GREEN "
-            "with it. Return a question in summary for missing facts or requirement meaning. Save visual evidence "
+            "with it. Save visual evidence "
             "in SELDON_EVIDENCE_DIR.\n"
             "checkPaths: paths of checks and helpers inside your scope; Seldon uses them to run checks without product.\n"
             "checks: declare commands with the Requirements handles each proves. Existing checks keep running "
@@ -183,6 +199,10 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grow
                       if kind == "REVIEW" and facts.get("Review subject") == "architecture" else
                       "The observed interaction and check sources support this answer")
     prompt = SOLE_WORK if sole_work else PROMPTS[kind]
+    if kind == "WORK":
+        prompt += "\n" + WORK_RETURN
+    if kind == "COACH" and "receipt" in facts.get("Unresolved work", {}):
+        prompt += "\n" + WORK_COACH
     if kind == "DETAIL" and ("Planning approach" in facts or "Steering policy" in facts):
         prompt += ("\nKeep the requested stages, and implement only the current wave's commitments. "
                    "When the area fits one session, give one unit the work and its checks. "
@@ -192,8 +212,12 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grow
         prompt += ("\nKeep unit instructions focused on the product and its real-path acceptance. "
                    "Leave check implementation and local verification order to the builder.")
     if grown and kind == "DETAIL":
-        prompt += ("\nCite the Accepted commitments that each feature implements. Carry the applicable "
-                   "constraints into requirements, and plan only the work due here in this wave.")
+        prompt += ("\nCite the Accepted commitments that each feature implements. Plan only the work "
+                   "due here in this wave. Seldon supplies linked exact values for execution and review.")
+    continuing = kind == "DETAIL" and "Continuing owner" in facts
+    if continuing:
+        prompt += "\n" + CONTINUING_ASSIGNMENT
+        del example["units"][0]["scope"]
     if grown and kind == "ARCHITECT":
         prompt += ("\nUse the supplied commitment handles across the full wave horizon. Start with a "
                    "working slice of the highest-value outcomes and preserve the exact constraints.")
@@ -209,7 +233,8 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grow
                    "guidance did not resolve it, describe the gap and what the planner must settle. "
                    "Use ask for decisions that require the user.")
     return question(kind, prompt, facts, answer_schema(kind, targets, owners, grown=grown,
-                    coach_contracts=coach_contracts, planner_brief=planner_brief, guide_brief=guide_brief),
+                    coach_contracts=coach_contracts, planner_brief=planner_brief, guide_brief=guide_brief,
+                    continuing=continuing),
                     [example], targets, execution, images, context=context)
 
 
@@ -472,6 +497,11 @@ def architect_brief(vision, words, gap=None, previous=None, built=None):
     return build("ARCHITECT", facts, grown="stories" in vision)
 
 
+CONTINUING_ASSIGNMENT = ("For work on the continuing owner's paths, leave scope out of that assignment. "
+                         "Seldon keeps the owner and its approved write paths. Give new work that needs "
+                         "different paths an explicit scope.")
+
+
 def detail_brief(store, outline, area, *, guide_brief=False, may_fold_guide=False):
     cursor = store.cursor()
     vision = vision_body(store.read(cursor.vision)["answer"])
@@ -489,7 +519,7 @@ def detail_brief(store, outline, area, *, guide_brief=False, may_fold_guide=Fals
         # A changed agreement can bring an area into DETAIL without a wave commitment.
         commitments = [r for r in goals if r in (area_goals & active or area_goals)]
     document = store.plan(cursor.revision)
-    existing = {}
+    existing, completed = {}, []
     for ref, unit in plan.select(document, "unit").items():
         if unit["area"] == area["handle"] and ref != "guide":
             row = store.unit(ref)
@@ -497,6 +527,8 @@ def detail_brief(store, outline, area, *, guide_brief=False, may_fold_guide=Fals
                 document["nodes"][r]["body"]["acceptance"] for r in unit["requirements"]],
                 "last worker summary": store.read(row.report)["answer"]["summary"]
                 if row and row.report else ""}
+            if row and row.state == "DONE" and row.wave < cursor.wave:
+                completed.append(ref)
     setup = store.read(cursor.kickoff)["setup"]
     facts = {"User's words": user_words(store),
              "Approved scope": {"scopeIn": [goals[r] for r in commitments
@@ -514,14 +546,24 @@ def detail_brief(store, outline, area, *, guide_brief=False, may_fold_guide=Fals
                            if area["handle"] in d["areas"]],
              "Product in this area": {"files": files},
              "Runtime": runtime(setup)}
+    if len(completed) == 1:
+        facts["Continuing owner"] = completed[0]
+    if guide := plan.guide_owner(document):
+        scope = plan.select(document, "unit")[guide]["scope"]
+        assignment = ("Include walkthrough behavior in this owner's assignment without restating these paths."
+                      if guide in completed else
+                      "Seldon keeps walkthrough work with this owner. Leave it out of product assignments.")
+        facts["Walkthrough ownership"] = {"owner": guide, "paths": [p for p in scope if p in plan.GUIDE_SCOPE],
+                                         "assignment": assignment}
+    if cursor.wave > 1 and isinstance(words := plan.prior_checkin(store)["User check-in"], str):
+        facts["User check-in"] = words
     if setup.get("sizeFirst"):
         facts.update(architecture.planning_approach(setup, vision, continuing=cursor.wave > 1))
     if grown:
         facts["Approved scope"].pop("scopeIn")
-        attached = {handle for goal in goals.values() for handle in goal["constraints"]}
-        relevant = {handle for r in commitments for handle in goals[r]["constraints"]}
-        facts["Applicable constraints"] = {c["handle"]: c for c in vision["constraints"]
-                                           if c["handle"] in relevant or c["handle"] not in attached}
+        relevant = [*commitments, *(r for r in area["commitments"] if r.startswith("quality:"))]
+        constraints = plan.applicable_constraints(vision, relevant)
+        facts["Applicable constraints"] = {c["handle"]: c for c in constraints}
     planner_brief = features.enabled("plannerBrief")
     guide_brief = planner_brief and guide_brief
     if planner_brief:
@@ -531,7 +573,7 @@ def detail_brief(store, outline, area, *, guide_brief=False, may_fold_guide=Fals
             "them, the tricky part, what belongs to another owner or is out of scope, and one real user "
             "path that proves it works. Say what readable, maintainable code looks like for this work: "
             "normal line lengths and one home for each behavior. Give the engineer the intent and room "
-            "to make ordinary implementation choices. Keep agreed product wording exact. "
+            "to make ordinary implementation choices. "
             "The sample answer includes an example brief.")
         if may_fold_guide:
             facts["Writing the brief"] += ("\n\nIf one unit owns the whole outcome, also brief it on the "
@@ -567,9 +609,7 @@ WORK_OUTPUT = (
     "files and helpers needed to run without the product. Seldon observes the check on the baseline "
     "and on the delivered product. Describe only results you observed.\n\n"
     "Omitted existing checks keep running. To revise one, use its handle in update with its new declaration. "
-    "To retire one, give its handle in retire. List actual cross-scope corrections in discoveries. "
-    "If a missing fact or a decision about meaning prevents completion, return question with the specific "
-    "question in summary. Otherwise return done.")
+    "To retire one, give its handle in retire. List actual cross-scope corrections in discoveries.")
 SOURCE_REVIEW = (
     "Follow a promised action from its entry point to the result the person receives. Read the relevant "
     "assertion and its baseline and delivered observations. Explain what the check can distinguish, "
@@ -590,9 +630,15 @@ def take(facts, *keys):
     return {key: facts.pop(key) for key in keys if key in facts}
 
 
+def work_output(question):
+    variants = question["schema"]["properties"]["answer"]["anyOf"]
+    returns = WORK_RETURN if any("question" in variant["properties"] for variant in variants) else LEGACY_WORK_RETURN
+    return WORK_OUTPUT + " " + returns
+
+
 def reviewed_work(question, facts, context):
     checks = question["schema"]["properties"]["answer"]["anyOf"][0]["properties"]["checks"]["items"]
-    output, receipt = WORK_OUTPUT, WORK_RECEIPT
+    output, receipt = work_output(question), WORK_RECEIPT
     if "anyOf" not in checks:  # Retained WORK calls predate check links and edits.
         output = ("After the work, return one JSON receipt. Summarize what a person can now do, what you "
                   "exercised locally and what remains for integration. For each check give its command as "
@@ -641,7 +687,8 @@ def reviewed_work(question, facts, context):
     opening = {**({"Accepted audience": audience} if audience else {}),
                **user_words,
                **({"Current wave": wave} if wave else {}),
-               **take(facts, "This wave's commitments", "Unit"),
+               **take(facts, "User check-in", "This wave's commitments", "Unit",
+                      "Applicable exact constraints"),
                **({"Accepted stories and results": context["stories"]} if context.get("stories") else {}),
                **({"Applicable exact constraints": context["constraints"]}
                   if context.get("constraints") else {})}
@@ -685,7 +732,7 @@ def reviewed_judge(question, facts, context):
                "Use the delivered source and checks, recorded observations and attached images.")
     opening = {**({"Accepted audience": context["audience"]} if context.get("audience") else {}),
                **({"Accepted stories and results": context["stories"]} if context.get("stories") else {}),
-               **take(facts, "Unit responsibility")}
+               **take(facts, "Unit responsibility", "Applicable exact constraints")}
     example = {"answer": {"verdict": "uncertain", "neededFacts": [
         "What value appears after closing and reopening the app?"],
         "why": "The check reads from the session that did the write. Settings.save has a clear persistence "
@@ -779,12 +826,16 @@ def reviewed_decision(question, facts, context):
                     "later ones as handles and a sentence. In a multi-wave plan start with a runnable slice.")
     elif kind == "DETAIL":
         mission = "What should the user be able to do through this area in the current wave?"
-        opening.update(take(facts, "Current wave", "Area", "Applicable constraints",
-                            "Writing the brief", "Separate walkthrough"))
+        opening.update(take(facts, "Current wave", "User check-in", "Area", "Applicable constraints",
+                            "Walkthrough ownership", "Writing the brief", "Separate walkthrough"))
         task = ("Describe the features and give each requirement one observable acceptance sentence. Trace "
-                "commitments and exact constraints. Give the work and its checks to one session-sized owner "
+                "the accepted commitments. Seldon supplies linked exact values for execution and review. "
+                "Give the work and its checks to one session-sized owner "
                 "unless another unit can build an independent piece now. Reserve dependencies for actual "
                 "file prerequisites. Return contract_gap for a missing agreement or subdivide at a real boundary.")
+        if "Continuing owner" in facts:
+            opening.update(take(facts, "Continuing owner"))
+            task += " " + CONTINUING_ASSIGNMENT
         output += (" Cite Accepted commitments when the schema asks for them. Feature links use feature "
                    "targetHandle values. Unit requirements use local requirement handles and dependencies "
                    "use one-based unit positions.")
@@ -805,6 +856,8 @@ def reviewed_decision(question, facts, context):
         task = ("Answer yes or no first when possible. Resolve the question from accepted requirements, "
                 "decisions, the actual runtime and contract text. Escalate unresolved user choices with "
                 "two to four concrete options, recommendation first.")
+        if "receipt" in opening.get("Unresolved work", {}):
+            task += " " + WORK_COACH
         if any("contract" in branch.get("properties", {})
                for branch in question["schema"]["properties"]["answer"]["anyOf"]):
             task += (" For a peer agreement, return its applicable text or identify the gap "
@@ -893,7 +946,8 @@ def planner_work(question, brief, instruction, image_directions):
     for key in ("Unit", "Readers", "This wave's commitments", "Quality bar",
                 "Design guidance used by UI workers", "Try-it guide"):
         facts.pop(key, None)
-    structure = take(facts, "Write scope", "Contract authority", "Contracts provided",
+    structure = take(facts, "Write scope", "User check-in", "Applicable exact constraints",
+                     "Contract authority", "Contracts provided",
                      "Contracts consumed", "Area contracts", "Planned contracts")
     if "Execution facts" in facts:
         facts["Execution facts"] = {k: v for k, v in facts["Execution facts"].items() if k != "Execution"}
@@ -904,7 +958,7 @@ def planner_work(question, brief, instruction, image_directions):
         "Call instruction\n" + instruction if instruction else "",
         labelled(facts), image_directions.strip(),
         "Save visual evidence in SELDON_EVIDENCE_DIR when the proof uses a visual surface.",
-        WORK_OUTPUT,
+        work_output(question),
         "Illustrative receipt\n" + encode({"answer": WORK_RECEIPT}),
         "Person's exact words\n" + "\n\n".join(appendix) if appendix else "",
         "Answer schema\n" + encode(question["schema"]))))
@@ -953,17 +1007,27 @@ def repair_facts(store, assignment):
 
 
 def work_brief(store, ref):
+    cursor = store.cursor()
     unit = store.unit(ref)
     document = plan.execution(store)
     contract = plan.select(document, "unit")[ref]
     sole = plan.sole_owner(document) == ref
-    setup = store.read(store.cursor().kickoff)["setup"]
+    setup = store.read(cursor.kickoff)["setup"]
+    waves = document.get("architecture", {}).get("waves", [])
+    context = plan.prompt_context(document, plan.acceptance(document, ref), area=contract["area"])
+    context.update(soleOwner=sole, guideRole="separate" if ref == "guide" else
+                   "owned" if plan.guide_owner(document) == ref else "",
+                   wave={"number": unit.wave, "goal": waves[unit.wave - 1]["goal"]} if waves else {})
+    constraints = context.pop("constraints")
     facts = {"User's words": user_words(store),
              "Unit": contract["instructions"], "Write scope": contract["scope"],
+             **({"Applicable exact constraints": constraints} if constraints else {}),
              "Requirements": requirement_facts(document, contract["requirements"]),
              "Existing checks": plan.assigned(document)[ref],
              "Execution facts": execution_facts(store, ref, sole=sole),
              "Quality bar": [c["criterion"] for c in plan.select(document, "criterion").values()]}
+    if unit.wave == cursor.wave > 1 and isinstance(words := plan.prior_checkin(store)["User check-in"], str):
+        facts["User check-in"] = words
     # A sole owner builds the whole experience, page included; never gate its craft on criterion wording.
     if len(plan.select(document, "unit")) == 1 or any(
             "visual direction" in c["criterion"].lower() for c in plan.select(document, "criterion").values()
@@ -984,11 +1048,13 @@ def work_brief(store, ref):
         # The walkthrough proves this wave's promises only (M3 rule 10), never the whole dream.
         vision = document["nodes"]["vision"]["body"]
         goals = architecture.commitments(vision)
-        wave = document["architecture"]["waves"][unit.wave - 1]["commitments"]
+        wave = waves[unit.wave - 1]["commitments"]
         del facts["User's words"]
         facts.update({"Guide path": plan.GUIDE_PATH, "Readers": vision["users"],
                       "This wave's commitments": {r: goals[r] for r in wave if not r.startswith("quality:")},
                       "Quality bar": [goals[r]["criterion"] for r in wave if r.startswith("quality:")]})
+        if constraints := plan.applicable_constraints(vision, wave):
+            facts["Applicable exact constraints"] = constraints
     if unit.failure:
         facts["Exact failure"] = unit.failure
         facts["Read current patch"] = ["git", "diff", "--binary", unit.base]
@@ -1007,11 +1073,6 @@ def work_brief(store, ref):
         facts["Operation lifecycle walkthrough"] = OPERATION_WALKTHROUGH
     if not sole:
         facts.update(agreement_facts(document, ref))
-    wave = document.get("architecture", {}).get("waves", [])
-    context = {**plan.prompt_context(document, plan.acceptance(document, ref)), "soleOwner": sole,
-               "guideRole": "separate" if ref == "guide" else
-                            "owned" if plan.guide_owner(document) == ref else "",
-               "wave": {"number": unit.wave, "goal": wave[unit.wave - 1]["goal"]} if wave else {}}
     if (brief := contract.get("brief")) and brief.strip():
         context["plannerBrief"] = brief
         if ref == "guide":
@@ -1075,7 +1136,9 @@ def judge_brief(store, ref, commit=None, observations=None):
     refs = list(dict.fromkeys(refs))
     root = store.root.parent if commit else unit.worktree
     commit = commit or unit.P
-    requirements = requirement_facts(document, plan.acceptance(document, ref))
+    required = plan.acceptance(document, ref)
+    requirements = requirement_facts(document, required)
+    context = plan.prompt_context(document, required, area=contract["area"])
     sources = gitwork.blobs(root, commit, [*contract["scope"], *contract["checkPaths"]])
     checks, product, binaries = {}, {}, {}
     for path, content in sources.items():
@@ -1095,10 +1158,11 @@ def judge_brief(store, ref, commit=None, observations=None):
              "Product files": product,
              "Observations": (observed(store, refs) if observations is None
                               else proof.account(store, refs, commit))}
+    if constraints := context.pop("constraints"):
+        facts["Applicable exact constraints"] = constraints
     facts.update(agreement_facts(document, ref))
     return build("JUDGE", facts, requirements, images=images(store, refs),
-                 owners=[ref, *architecture.contracts_for(document, ref)],
-                 context=plan.prompt_context(document, requirements))
+                 owners=[ref, *architecture.contracts_for(document, ref)], context=context)
 
 
 class AnswerRejected(ValueError):

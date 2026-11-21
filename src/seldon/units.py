@@ -5,7 +5,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import decisions, features, fixups, gitwork, inference, judgment, plan, proof, questions, recovery
+from . import features, fixups, gitwork, inference, judgment, plan, proof, questions, recovery
 from .providers import Deadline, ProviderFailure, ResumeUnavailable, recorded
 from .schema import validate
 from .states import advance
@@ -44,9 +44,14 @@ def thread_from_recording(store, ref):
 
 
 def work(store, provider, ref):
+    def needs_answer(answer):
+        # Old receipts overloaded question with handoffs to a named correction owner.
+        return answer["outcome"] == "question" and ("question" in answer or
+            not any(d["owner"] != ref for d in answer["discoveries"]))
+
     def consume(report, answer):
         store.record("writer_end", {"unit": ref, "report": report, "finishedAt": time.time()})
-        if answer["outcome"] == "question" and not any(d["owner"] != ref for d in answer["discoveries"]):
+        if needs_answer(answer):
             return
         plan.work_checks(store, ref, report, answer)
         advance(store, "returned", report, unit=ref, report=report)
@@ -73,14 +78,8 @@ def work(store, provider, ref):
     else:
         report, answer = inference.call(store, provider, questions.work_brief(store, ref), unit=ref,
             consume=consume, field="outcome/checkPaths/checks/discoveries", retained=report)
-    if answer["outcome"] == "question" and not any(d["owner"] != ref for d in answer["discoveries"]):
-        text = answer["summary"]
-        recovery.recover(store, ref, text, cause=report, direct=True)
-        subject = decisions.coach(store, provider, {"unit": ref, "failure": text,
-            "tried": [text]})
-        if subject:
-            decisions.request(store, "UNIT", subject)
-        return
+    if needs_answer(answer):
+        recovery.recover(store, ref, answer.get("question", answer["summary"]), cause=report, direct=True)
 
 
 def integrate(store, ref, checks):

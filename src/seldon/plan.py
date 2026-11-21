@@ -15,7 +15,9 @@ GUIDE_WALKTHROUGH = ("In docs/try-it.md, show how to try every accepted user sur
                      "Declare a check under docs/try-it/ that uses the same commands in the reader's shell "
                      "from a clean checkout wherever safe, including input setup, launch and stop. Where "
                      "practical, have the reader and the check use the same runnable script. Assert the "
-                     "promised results and stop what you start. In SELDON_EVIDENCE_DIR/operation-lifecycle.json, "
+                     "promised results and stop what you start. For checks and local walkthrough probes, use the "
+                     "supplied SELDON_EVIDENCE_DIR for generated evidence; do not override it or write "
+                     "generated evidence into the product checkout. In SELDON_EVIDENCE_DIR/operation-lifecycle.json, "
                      "record a JSON array linking each exercised step to the guide with its actual command "
                      "or interaction and observed result. Use only approved runtimes already available. "
                      "If the exact runtime is unavailable, preserve it in the guide, record observed=false "
@@ -90,22 +92,29 @@ def sole_owner(document):
         return owner
 
 
-def prompt_context(document, requirements=()):
-    """Accepted audience and the features traced from this assignment's requirements."""
+def applicable_constraints(vision, commitments):
     from . import architecture
 
+    if "stories" not in vision:
+        return []
+    goals = architecture.commitments(vision)
+    attached = {h for goal in goals.values() for h in goal["constraints"]}
+    relevant = {h for ref in commitments for h in goals.get(ref, {}).get("constraints", [])}
+    return [c for c in vision["constraints"] if c["handle"] in relevant or c["handle"] not in attached]
+
+
+def prompt_context(document, requirements=(), *, area=None):
+    """Accepted audience and the features traced from this assignment's requirements."""
     vision = document["nodes"].get("vision", {}).get("body", {})
     nodes = document["nodes"]
     traced = dict.fromkeys(f for r in requirements for f in nodes[r]["body"]["features"])
     stories = select(document, "feature")
-    goals = architecture.commitments(vision) if "stories" in vision else {}
     relevant = {h for f in traced for h in stories[f].get("commitments", [])}
-    attached = {h for goal in goals.values() for h in goal.get("constraints", [])}
-    constraints = {h for key in relevant for h in goals.get(key, {}).get("constraints", [])}
+    relevant.update(f"quality:{c['handle']}" for c in select(document, "criterion").values()
+                    if c["area"] == area and "handle" in c)
     return {"audience": vision.get("users", []),
             "stories": {f: {k: stories[f][k] for k in ("story", "acceptance")} for f in traced},
-            "constraints": [c for c in vision.get("constraints", [])
-                            if c["handle"] in constraints or c["handle"] not in attached]}
+            "constraints": applicable_constraints(vision, relevant)}
 
 
 def guide_checks(document):
@@ -282,6 +291,18 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
     nodes["vision"] = {"kind": "vision", "body": vision}
     goals = owner.commitments(vision)
     units = select(document, "unit")
+    draft_units = set()
+    if not retain_trace:
+        # DETAIL replaces each replanned area's unexecuted requirement draft.
+        replanned = {area["handle"] for area, _ in leaves}
+        for ref, unit in units.items():
+            if unit["area"] in replanned:
+                draft = {r for r in unit["requirements"] if r.startswith(f"{wave}.")}
+                for requirement in draft:
+                    del nodes[requirement]
+                unit["requirements"] = [r for r in unit["requirements"] if r not in draft]
+                if draft and ref.startswith(f"{wave}."):
+                    draft_units.add(ref)
     guide = guide_owner(document)
     folded = guide if guide != "guide" else None
     endpoints = {r: {"provides": [c["provider"]], "consumes": [u for u in c["consumers"] if u != "guide"]}
@@ -317,17 +338,25 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
             handles[handle] = ref
             nodes[ref] = node
         local_units, continued = {}, set()
-        for i, unit in enumerate(answer["units"], 1):
-            scope = unit["scope"]
+        # Bind the continuation before interpreting explicit scopes for other assignments.
+        indexed = enumerate(answer["units"], 1)
+        for i, unit in sorted(indexed, key=lambda pair: "scope" in pair[1]):
+            scope = unit.get("scope")
             owners = {r: [p for p in u["scope"] if r != folded or p not in GUIDE_SCOPE]
                       for r, u in units.items() if u["area"] == area["handle"]
                       and r not in local_units.values()}
-            ref = next((r for r, paths in owners.items() if set(paths) == set(scope)), None)
-            if ref is None:
-                containing = [r for r, paths in owners.items()
-                              if all(any(contains(old, p) for old in paths) for p in scope)]
-                if len(containing) == 1 and containing[0] in completed:
-                    ref, = containing
+            if scope is None:
+                candidates = (owners.keys() & completed) - {"guide"}
+                if len(candidates) != 1:
+                    raise Mismatch("units.scope", f"Name a write scope for {area['handle']}; "
+                                   "its continuing owner is no longer unique.")
+                ref, = candidates
+                continued.add(ref)
+            else:
+                containing = [r for r, paths in owners.items() if set(paths) == set(scope) or
+                              (r in completed and all(any(contains(old, p) for old in paths) for p in scope))]
+                ref = containing[0] if len(containing) == 1 else None
+                if ref in completed:
                     continued.add(ref)
             if ref is None:
                 covered = [r for r, paths in owners.items() if paths
@@ -368,6 +397,18 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
                         and (len(answer["units"]) == 1 or handle in unit.get("provides", []))
                         and ref not in bound["provides"]):
                     bound["provides"].append(ref)
+    retired = {ref for ref in draft_units if not units[ref]["requirements"]}
+    if retired:
+        for ref in retired:
+            del nodes[ref]
+            del units[ref]
+        for unit in units.values():
+            unit["dependencies"] = [r for r in unit["dependencies"] if r not in retired]
+        for bound in endpoints.values():
+            for side in bound:
+                bound[side] = [r for r in bound[side] if r not in retired]
+        if guide in retired:
+            guide = None
     if guide is None and fold_guide and len(units) == len(architecture["areas"]) == len(architecture["waves"]) == 1:
         guide, = units
         units[guide]["scope"].extend(GUIDE_SCOPE)
@@ -548,11 +589,23 @@ def built(store):
         rows[ref] = {"scope": units[ref]["scope"], "summary": answer.get("summary", ""),
                      "discoveries": answer.get("discoveries", []),
                      "open gaps": [b for _, _, b in store.records("open_gap") if b["unit"] == ref]}
-    words = store.read(cursor.checkin)["words"] if cursor.checkin else None
-    if isinstance(words, str):
-        words = store.read(words)["words"]
     return {"Previous architecture": document["architecture"], "Finished wave": rows,
-            "User check-in": words, "Remaining waves": document["architecture"]["waves"][finished:]}
+            "Remaining waves": document["architecture"]["waves"][finished:], **prior_checkin(store)}
+
+
+def prior_checkin(store):
+    """Read the owner reply bound to the preceding wave and its integrated commit."""
+    cursor = store.cursor()
+    for ref, _, approval in reversed(store.records("approval")):
+        subject = approval["subject"]
+        if (subject.get("wave") == cursor.wave - 1 and subject.get("commit") == cursor.waveStart
+                and store.read(approval["request"])["gate"] == "CHECK-IN"
+                and (ref == cursor.checkin or approval.get("effect") == "direct")):
+            words = approval.get("userWords", approval["words"])
+            return {"User check-in": store.read(words)["words"] if isinstance(words, str) else words,
+                    **({"Next wave": cursor.wave}
+                    if approval.get("effect") == "direct" else {})}
+    return {"User check-in": None}
 
 
 def approved(store):

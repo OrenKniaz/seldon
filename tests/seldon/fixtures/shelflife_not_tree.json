@@ -1890,6 +1890,98 @@
       }
     ],
     [
+      303,
+      "unit_fixup",
+      {
+        "approval": "r185",
+        "base": "f0c5a3da8844119792c4ae05e184330ea99c507c",
+        "gaps": [
+          {
+            "commit": "f0c5a3da8844119792c4ae05e184330ea99c507c",
+            "correction": "1.ui.1\n[{'check': '1.backend.1:check:1', 'purpose': 'final', 'command': ['python', 'checks/backend/test_peer_page.py'], 'executionStarted': True, 'timedOut': False, 'cleanupVerified': True, 'exitCode': 1, 'stdout': '', 'stderr': 'Traceback (most recent call last):\\r\\n  File \"C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-ba24d8389e774984b9f39350283c2e96\\\\checks\\\\backend\\\\test_peer_page.py\", line 54, in <module>\\r\\n    assert not parts.netloc and not parts.scheme, f\\'external asset: {asset}\\'\\r\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\r\\nAssertionError: external asset: data:,\\r\\n'}]",
+            "kind": "check",
+            "source": "r297",
+            "subject": "1.backend.1:check:1",
+            "units": [
+              "1.ui.1"
+            ]
+          }
+        ],
+        "observations": [
+          "r287",
+          "r288"
+        ],
+        "owner": "1.ui.1",
+        "revision": 6,
+        "scope": [
+          "web/**",
+          "checks/ui/**"
+        ]
+      }
+    ],
+    [
+      305,
+      "unit_fixup",
+      {
+        "approval": "r185",
+        "base": "f0c5a3da8844119792c4ae05e184330ea99c507c",
+        "gaps": [
+          {
+            "commit": "f0c5a3da8844119792c4ae05e184330ea99c507c",
+            "correction": "[{'check': '1.import-integration.1:check:2', 'purpose': 'final', 'command': ['node', 'checks/integration/fresh-folder.cjs'], 'executionStarted': True, 'timedOut': False, 'cleanupVerified': True, 'exitCode': 1, 'stdout': '', 'stderr': '127.0.0.1 - - [17/Nov/2026 10:13:37] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:37] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:39] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:39] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:39] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:39] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:39] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:39] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:39] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:39] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:40] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:40] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:40] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:40] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:40] \"GET /api/items HTTP/1.1\" 200 -\\r\\nAssertionError [ERR_ASSERTION]: same-origin requests must not fail or return errors\\n+ actual - expected\\n\\n+ [\\n+   \\'http://127.0.0.1:62222/api/items: net::ERR_ABORTED\\'\\n+ ]\\n- []\\n\\n    at browser.viewports.width (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-94eae0d21673402cb38681c97d8e5239\\\\checks\\\\integration\\\\fresh-folder.cjs:57:18)\\n    at async browser (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-94eae0d21673402cb38681c97d8e5239\\\\checks\\\\kit\\\\browser.cjs:29:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-94eae0d21673402cb38681c97d8e5239\\\\checks\\\\integration\\\\fresh-folder.cjs:29:9\\n    at async serve (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-94eae0d21673402cb38681c97d8e5239\\\\checks\\\\kit\\\\serve.cjs:30:12)\\n    at async main (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-94eae0d21673402cb38681c97d8e5239\\\\checks\\\\integration\\\\fresh-folder.cjs:21:5) {\\n  generatedMessage: false,\\n  code: \\'ERR_ASSERTION\\',\\n  actual: [Array],\\n  expected: [],\\n  operator: \\'deepStrictEqual\\',\\n  diff: \\'simple\\'\\n}\\n'}]",
+            "kind": "check",
+            "source": "r301",
+            "subject": "1.import-integration.1:check:2",
+            "units": [
+              "1.import-integration.1"
+            ]
+          }
+        ],
+        "observations": [
+          "r239",
+          "r240",
+          "r242"
+        ],
+        "owner": "1.import-integration.1",
+        "revision": 6,
+        "scope": [
+          "README.md",
+          "checks/integration/**"
+        ]
+      }
+    ],
+    [
+      307,
+      "unit_fixup",
+      {
+        "approval": "r185",
+        "base": "f0c5a3da8844119792c4ae05e184330ea99c507c",
+        "gaps": [
+          {
+            "commit": "f0c5a3da8844119792c4ae05e184330ea99c507c",
+            "correction": "[{'check': 'guide:check:2', 'purpose': 'final', 'command': ['node', 'docs/try-it/wave-verify.cjs'], 'executionStarted': True, 'timedOut': False, 'cleanupVerified': True, 'exitCode': 1, 'stdout': '', 'stderr': '127.0.0.1 - - [17/Nov/2026 10:13:36] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:36] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:38] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:38] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:38] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:38] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:38] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:38] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:38] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:13:38] \"GET /api/items HTTP/1.1\" 200 -\\r\\nAssertionError [ERR_ASSERTION]: import failed: python: can\\'t open file \\'C:\\\\\\\\seldon\\\\\\\\tests\\\\\\\\m1\\\\\\\\shelflife-main-15682aa-s01\\\\\\\\workers\\\\\\\\worker-e17d502cdcee4ebd8e4635e124c4f704\\\\\\\\import_items.py\\': [Errno 2] No such file or directory\\r\\n\\n\\n2 !== 0\\n\\n    at browser.viewports.width (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-e17d502cdcee4ebd8e4635e124c4f704\\\\docs\\\\try-it\\\\wave-verify.cjs:28:14)\\n    at async browser (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-e17d502cdcee4ebd8e4635e124c4f704\\\\checks\\\\kit\\\\browser.cjs:29:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-e17d502cdcee4ebd8e4635e124c4f704\\\\docs\\\\try-it\\\\wave-verify.cjs:15:5\\n    at async serve (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-e17d502cdcee4ebd8e4635e124c4f704\\\\checks\\\\kit\\\\serve.cjs:30:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-e17d502cdcee4ebd8e4635e124c4f704\\\\docs\\\\try-it\\\\wave-verify.cjs:10:3 {\\n  generatedMessage: false,\\n  code: \\'ERR_ASSERTION\\',\\n  actual: 2,\\n  expected: 0,\\n  operator: \\'strictEqual\\',\\n  diff: \\'simple\\'\\n}\\n'}]",
+            "kind": "check",
+            "source": "r299",
+            "subject": "guide:check:2",
+            "units": [
+              "guide"
+            ]
+          }
+        ],
+        "observations": [
+          "r222",
+          "r223",
+          "r225"
+        ],
+        "owner": "guide",
+        "revision": 6,
+        "scope": [
+          "docs/try-it.md",
+          "docs/try-it/**"
+        ]
+      }
+    ],
+    [
       329,
       "worker_checks",
       {
@@ -1994,6 +2086,39 @@
       }
     ],
     [
+      383,
+      "unit_fixup",
+      {
+        "approval": "r185",
+        "base": "578462226dfd44988f872d4b0c7a300b644cb488",
+        "gaps": [
+          {
+            "commit": "578462226dfd44988f872d4b0c7a300b644cb488",
+            "correction": "Provide import_items.py at the project root with the specified CSV-to-shared-database behavior, then rerun the guide check.\n[{'check': 'guide:check:1', 'purpose': 'final', 'command': ['node', 'docs/try-it/wave-verify.cjs'], 'executionStarted': True, 'timedOut': False, 'cleanupVerified': True, 'exitCode': 1, 'stdout': '', 'stderr': '127.0.0.1 - - [17/Nov/2026 10:15:00] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:00] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:02] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:02] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:02] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:02] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:02] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:02] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:02] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:02] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:02] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:02] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\nAssertionError [ERR_ASSERTION]: import failed: python: can\\'t open file \\'C:\\\\\\\\seldon\\\\\\\\tests\\\\\\\\m1\\\\\\\\shelflife-main-15682aa-s01\\\\\\\\workers\\\\\\\\worker-ee5e884d2064439c9e02d066bde962c0\\\\\\\\import_items.py\\': [Errno 2] No such file or directory\\r\\n\\n\\n2 !== 0\\n\\n    at browser.viewports.width (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-ee5e884d2064439c9e02d066bde962c0\\\\docs\\\\try-it\\\\wave-verify.cjs:28:14)\\n    at async browser (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-ee5e884d2064439c9e02d066bde962c0\\\\checks\\\\kit\\\\browser.cjs:29:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-ee5e884d2064439c9e02d066bde962c0\\\\docs\\\\try-it\\\\wave-verify.cjs:15:5\\n    at async serve (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-ee5e884d2064439c9e02d066bde962c0\\\\checks\\\\kit\\\\serve.cjs:30:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-ee5e884d2064439c9e02d066bde962c0\\\\docs\\\\try-it\\\\wave-verify.cjs:10:3 {\\n  generatedMessage: false,\\n  code: \\'ERR_ASSERTION\\',\\n  actual: 2,\\n  expected: 0,\\n  operator: \\'strictEqual\\',\\n  diff: \\'simple\\'\\n}\\n'}]",
+            "kind": "check",
+            "source": "r378",
+            "subject": "guide:check:1",
+            "units": [
+              "1.import-integration.1"
+            ]
+          }
+        ],
+        "observations": [
+          "r239",
+          "r240",
+          "r242",
+          "r346",
+          "r348"
+        ],
+        "owner": "1.import-integration.1",
+        "revision": 6,
+        "scope": [
+          "README.md",
+          "checks/integration/**"
+        ]
+      }
+    ],
+    [
       395,
       "worker_checks",
       {
@@ -2020,6 +2145,72 @@
         ],
         "report": "r392",
         "unit": "1.import-integration.1"
+      }
+    ],
+    [
+      413,
+      "unit_fixup",
+      {
+        "approval": "r185",
+        "base": "77425c8c5a347b01ed5e829539fa8d5322bd8c1e",
+        "gaps": [
+          {
+            "commit": "77425c8c5a347b01ed5e829539fa8d5322bd8c1e",
+            "correction": "Defer the guide\u2019s importer-dependent check until import_items.py is delivered, or align the guide check with this wave\u2019s explicit exclusion of CSV import.\n[{'check': '1.import-integration.1:check:1', 'purpose': 'final', 'command': ['node', 'docs/try-it/wave-verify.cjs'], 'executionStarted': True, 'timedOut': False, 'cleanupVerified': True, 'exitCode': 1, 'stdout': '', 'stderr': '127.0.0.1 - - [17/Nov/2026 10:15:28] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:28] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:29] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:29] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:29] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:30] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:30] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:30] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:30] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:30] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:30] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:30] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\nAssertionError [ERR_ASSERTION]: import failed: python: can\\'t open file \\'C:\\\\\\\\seldon\\\\\\\\tests\\\\\\\\m1\\\\\\\\shelflife-main-15682aa-s01\\\\\\\\workers\\\\\\\\worker-7213f1d325ce4a9289706d79b4d51cbd\\\\\\\\import_items.py\\': [Errno 2] No such file or directory\\r\\n\\n\\n2 !== 0\\n\\n    at browser.viewports.width (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-7213f1d325ce4a9289706d79b4d51cbd\\\\docs\\\\try-it\\\\wave-verify.cjs:28:14)\\n    at async browser (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-7213f1d325ce4a9289706d79b4d51cbd\\\\checks\\\\kit\\\\browser.cjs:29:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-7213f1d325ce4a9289706d79b4d51cbd\\\\docs\\\\try-it\\\\wave-verify.cjs:15:5\\n    at async serve (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-7213f1d325ce4a9289706d79b4d51cbd\\\\checks\\\\kit\\\\serve.cjs:30:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-7213f1d325ce4a9289706d79b4d51cbd\\\\docs\\\\try-it\\\\wave-verify.cjs:10:3 {\\n  generatedMessage: false,\\n  code: \\'ERR_ASSERTION\\',\\n  actual: 2,\\n  expected: 0,\\n  operator: \\'strictEqual\\',\\n  diff: \\'simple\\'\\n}\\n'}]",
+            "kind": "check",
+            "source": "r408",
+            "subject": "1.import-integration.1:check:1",
+            "units": [
+              "guide"
+            ]
+          }
+        ],
+        "observations": [
+          "r222",
+          "r223",
+          "r225",
+          "r332"
+        ],
+        "owner": "guide",
+        "revision": 6,
+        "scope": [
+          "docs/try-it.md",
+          "docs/try-it/**"
+        ]
+      }
+    ],
+    [
+      415,
+      "unit_fixup",
+      {
+        "approval": "r185",
+        "base": "77425c8c5a347b01ed5e829539fa8d5322bd8c1e",
+        "gaps": [
+          {
+            "commit": "77425c8c5a347b01ed5e829539fa8d5322bd8c1e",
+            "correction": "Provide import_items.py at the project root with the specified CSV-to-shared-database behavior, then rerun the guide check.\n[{'check': 'guide:check:1', 'purpose': 'final', 'command': ['node', 'docs/try-it/wave-verify.cjs'], 'executionStarted': True, 'timedOut': False, 'cleanupVerified': True, 'exitCode': 1, 'stdout': '', 'stderr': '127.0.0.1 - - [17/Nov/2026 10:15:28] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:29] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\nAssertionError [ERR_ASSERTION]: import failed: python: can\\'t open file \\'C:\\\\\\\\seldon\\\\\\\\tests\\\\\\\\m1\\\\\\\\shelflife-main-15682aa-s01\\\\\\\\workers\\\\\\\\worker-74d68ca6ca6e4b83955faf317d431d5c\\\\\\\\import_items.py\\': [Errno 2] No such file or directory\\r\\n\\n\\n2 !== 0\\n\\n    at browser.viewports.width (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-74d68ca6ca6e4b83955faf317d431d5c\\\\docs\\\\try-it\\\\wave-verify.cjs:28:14)\\n    at async browser (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-74d68ca6ca6e4b83955faf317d431d5c\\\\checks\\\\kit\\\\browser.cjs:29:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-74d68ca6ca6e4b83955faf317d431d5c\\\\docs\\\\try-it\\\\wave-verify.cjs:15:5\\n    at async serve (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-74d68ca6ca6e4b83955faf317d431d5c\\\\checks\\\\kit\\\\serve.cjs:30:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-74d68ca6ca6e4b83955faf317d431d5c\\\\docs\\\\try-it\\\\wave-verify.cjs:10:3 {\\n  generatedMessage: false,\\n  code: \\'ERR_ASSERTION\\',\\n  actual: 2,\\n  expected: 0,\\n  operator: \\'strictEqual\\',\\n  diff: \\'simple\\'\\n}\\n'}]",
+            "kind": "check",
+            "source": "r409",
+            "subject": "guide:check:1",
+            "units": [
+              "1.import-integration.1"
+            ]
+          }
+        ],
+        "observations": [
+          "r239",
+          "r240",
+          "r242",
+          "r346",
+          "r348",
+          "r398"
+        ],
+        "owner": "1.import-integration.1",
+        "revision": 6,
+        "scope": [
+          "README.md",
+          "checks/integration/**"
+        ]
       }
     ],
     [

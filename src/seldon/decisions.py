@@ -45,11 +45,25 @@ def again(store, subject, source, direction):
                     failure=unit.failure + "\nDirection: " + direction)
 
 
+def previous_worker_question(store, answer):
+    if answer:
+        request = store.read(answer).get("request")
+        if request:
+            return store.read(request)["subject"].get("workerQuestion")
+
+
 def coach(store, provider, subject, frame=False):
     """Runs outside integration and database locks, including when submitted by the scheduler.
 
     frame: the planner writes the user's options; its guidance becomes one of them (R17)."""
     ref = subject.get("unit")
+    if ref and (worker_question := subject.get("workerQuestion")):
+        history = store.recovery(recovery.lineage(store, ref))
+        if worker_question == previous_worker_question(store, history["answer"]):
+            return {**subject, "inputOwner": "User", "ask": {
+                "question": f"The worker still needs an answer. {worker_question}",
+                "options": [option("Provide a fix", "Describe the changed information or decision", "direction"),
+                            option("Pause", "Keep this question pending", "pause")]}}
     coach_contracts = bool(ref) and features.enabled("askContracts")
     document = plan.execution(store) if store.cursor().revision else {}
     facts = {"Unresolved work": subject, "Earlier user answers": questions.user_words(store),
@@ -125,6 +139,15 @@ def ask_unit(store, provider, ref):
         tried = [b["failure"] for _, _, b in store.records("unit_failure") if b["unit"] == ref]
         subject = {"unit": ref, "tried": tried, "failure": row.failure,
                    "affects": sorted(affected(store, ref) - {ref}), "recommendation": row.failure}
+        attempts = store.recovery(recovery.lineage(store, ref))["attempts"]
+        if attempts:
+            report = attempts[-1]
+            source = store.read(report)
+            if source.get("kind") == "WORK" and source["unit"] == ref:
+                receipt = source["answer"]
+                subject.update(report=report, receipt=receipt, tried=[*tried, row.failure])
+                if worker_question := receipt.get("question"):
+                    subject["workerQuestion"] = worker_question
         checks = recovery.repeated(store, ref)
         if checks and (missing := judged(store, ref)):
             # Builders could not fix what a judge found missing; that is a product choice, not a fault.
@@ -285,6 +308,9 @@ def request(store, gate, subject, *, ask=None):
         key = None
         if gate == "UNIT" or "step" in subject:
             key, subject = recovery.subject(store, gate, subject)
+            if ("workerQuestion" in subject and subject["workerQuestion"] !=
+                    previous_worker_question(store, subject.get("previousAnswer"))):
+                subject.pop("recurrence", None)
         ask = ask if ask is not None else gate_ask(store, gate, subject)
         summary = []
         if gate in ("A", "B"):
@@ -477,8 +503,16 @@ def decide(store, provider, user):
         return decide_round(store, provider, ref, item, words)
     scripted = store.read(cursor.kickoff)["setup"].get("scriptedUser", False)
     input_owner = item["subject"].get("inputOwner")
+    worker_question = item["subject"].get("workerQuestion")
     if (scripted or input_owner) and item["gate"] not in ("A", "B", "CHECK-IN", "C") and isinstance(words, dict):
         raise Waiting()
+    prior_words = []
+    if input_owner:
+        prior_words = [store.read(b["userWords"])["words"] for _, _, b in store.records("approval")
+                       if "userWords" in b and b.get("effect") == "direct"
+                       and ((b["subject"].get("inputOwner") == input_owner
+                             and b["subject"].get("failure") == item["subject"]["failure"])
+                            or (worker_question and b["subject"].get("workerQuestion") == worker_question))]
     raw = store.record("user_words", {"request": ref, "words": words, "origin": item["origin"]})
     direction, interpretation = str(words), None
     if isinstance(words, dict):
@@ -507,6 +541,11 @@ def decide(store, provider, user):
             if input_owner:
                 question["prompt"] += (" Choose Other only for a concrete change to the named input. "
                                        "Acknowledgement, approval and a request to continue are Unclear.")
+                if worker_question:
+                    question["facts"]["Previously applied answers to this worker question"] = prior_words
+                    question["facts"]["Required input"] = (
+                        "Choose Other only for changed information or a changed decision that answers "
+                        "the worker's question. An acknowledgement or restatement is Unclear.")
             interpretation, _ = inference.call(store, provider, question,
                 consume=consume, field="choice")
             picked, choice, effect = (selection[k] for k in ("picked", "choice", "effect"))
@@ -520,11 +559,7 @@ def decide(store, provider, user):
         if picked:
             direction = picked["label"] + ": " + picked["means"]
     if effect in ("pause", "direction") or (input_owner and effect == "direct" and
-            (choice != "Other" or any(
-                b.get("effect") == "direct" and b["subject"].get("inputOwner") == input_owner
-                and b["subject"].get("failure") == item["subject"]["failure"]
-                and store.read(b["userWords"])["words"] == words
-                for _, _, b in store.records("approval") if "userWords" in b))):
+            (choice != "Other" or words in prior_words)):
         raise Waiting()  # Keep the displayed request and step intact for a later answer.
     with store.transaction():
         cursor = store.cursor()
