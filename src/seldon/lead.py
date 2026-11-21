@@ -5,18 +5,15 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
-from . import architecture, decisions, gitwork, inference, judgment, plan, proof, questions, recovery
+from . import architecture, decisions, features, gitwork, inference, judgment, plan, proof, questions, recovery
 from .providers import ProviderFailure, recorded
-from .schema import REFS, TEXT, answer_schema, array, choice, obj, validate
+from .schema import REFS, TEXT, answer_schema, array, choice, lead_plan_schema, obj, validate
 from .states import advance
 from .store import encode
 
 CHECK = obj(purpose=TEXT, command=array(TEXT, 1),
             expectedEvidence={**TEXT, "description": "What the command asserts about the product."},
             expectedExit={"type": "integer", "enum": [0]})
-MILESTONE = obj(outcome=TEXT, promises=array(obj(vision=TEXT, action=TEXT, result=TEXT), 1),
-                spec=obj(what=TEXT, how=TEXT, test=TEXT), brief=TEXT)
-PLAN = obj(answer=obj(milestones=array(MILESTONE, 1)))
 RECEIPT = obj(answer=obj(
     outcome=choice("done", "question", "plan correction", "proof fault"),
     summary=TEXT, checks=array(obj(vision=TEXT, **CHECK["properties"])),
@@ -26,28 +23,14 @@ WRITE_RULES = (
     "behavior and earlier witnesses. You may use provider-native sub-agents and skills within this "
     "assignment; wait for them to finish. Keep Seldon's store, decisions and proof untouched. Do not "
     "commit or change global settings. For each promise, return one unattended check with its command, "
-    "what it asserts and expectedExit 0. Check the full approved result, including whether any "
-    "diagnostic conveys the required meaning. A missing product must fail its check. Reuse the same "
-    "witness across promises and the walkthrough where it covers their actions and results. Keep "
-    "the guide to runnable steps the walkthrough exercises, including any shell commands or status "
-    "inspection it asks the reader to perform. Return the walkthrough in the same format, or an "
-    "empty object if unavailable. Use headless browsers. List all witness files in checkPaths. "
-    "Return done when the work is written. Seldon runs every check. Put doubts in summary. "
-    "Leave question empty unless you need an answer you cannot find yourself. "
-    + plan.GUIDE_WALKTHROUGH
+    "what it asserts and expectedExit 0. Reuse witnesses that cover multiple promises. Return the "
+    "walkthrough in the same format. Use headless browsers. List all witness files in checkPaths. "
+    "Return done when written. Seldon runs every check. Put doubts in summary and leave question "
+    "empty unless you need an answer. " + plan.GUIDE_WALKTHROUGH
 )
-EXAMPLE_CHECK = {"purpose": "Greet a named visitor", "command": ["python", "checks/greet.py"],
-                 "expectedEvidence": "The process prints Hello, Ada!", "expectedExit": 0}
-EXAMPLE_BRIEF = (
-    "Give a visitor a greeting they can personalize. A first-time user should be able to run the "
-    "command from a new checkout with the available Python interpreter. They pass a name and see "
-    "Hello, Ada! when they pass Ada. Preserve that exact punctuation. Keep the argument handling "
-    "and printing easy to understand, and let a missing name produce a helpful usage message. "
-    "Exercise the command as a visitor would, by launching the real program and checking what it "
-    "prints. Keep a short guide with the commands and expected outputs so someone can try it on their "
-    "machine. The check should detect a changed greeting on a later milestone. Return what someone "
-    "can now do, the command that tests it, and a walkthrough."
-)
+BOUND_RULES = ("Write checks against exactly the approved action, result and notMetIf. "
+               "Put walkthrough scratch, fresh copies, dependencies and generated build outputs "
+               "in temporary directories outside the product tree. Use the OS temp directory (TMPDIR/TEMP). ")
 
 
 def kickoff_mode(selected):
@@ -85,16 +68,19 @@ def user_words(store, cursor):
 
 def propose(store, provider, cursor):
     previous = milestones(store, cursor)
-    completed = previous[:cursor.wave - 1]
+    bound = features.enabled("leadBoundProof")
+    amend = bound and (cursor.failure or "").startswith("Amend B proof: ")
+    completed = [] if amend else previous[:cursor.wave - 1]
     promises = commitments(store, cursor)
     open_promises = {key: value for key, value in promises.items()
                      if not any(key in obligations(m, promises) for m in completed)}
     example = {"outcome": "Greet a named visitor", "promises": [
                    {"vision": next(iter(open_promises or promises)), "action": "Pass Ada as the name",
-                    "result": "See Hello, Ada! on standard output."}],
+                    "result": "See Hello, Ada! on standard output.",
+                    **({"notMetIf": "The greeting omits Ada or its exclamation mark."} if bound else {})}],
                "spec": {"what": "A greeting names the visitor", "how": "Read the name from a CLI argument",
                         "test": "Observe the full greeting and punctuation for the supplied name."},
-               "brief": EXAMPLE_BRIEF}
+               "brief": "Let visitors pass a name and see a personalized greeting. Write the check and try-it guide."}
     facts = {**user_words(store, cursor), "Accepted vision": store.read(cursor.vision)["answer"],
              "Open promises": open_promises, "Completed milestones": completed,
              "Remaining proposal": previous[len(completed):],
@@ -108,19 +94,18 @@ def propose(store, provider, cursor):
     prompt = (
         "Plan the remaining milestones from these approved promises and owner words. A micro dream usually "
         "needs one milestone. Keep staging the owner asked for. Reference the supplied promise handles. "
-        "For each promise state the person's action and the observable result in words. Give a spec of "
-        "what, how and what proof must observe. The planner supplies no code, tests or commands to run. "
-        "Write a 120â€“400 word mission brief as a tech lead to a strong engineer. Preserve the person's "
-        "exact wording, including any invocation they specified as part of the product. Assign the "
-        "real tests and try-it guide to the same builder."
+        "State each action and observable result. Give a what/how/proof spec without code or commands. "
+        "Write a mission brief with the exact owner constraints. Assign checks and guide to the builder. "
+        + ("State one or two wrong behaviours per promise in notMetIf. " if bound else "")
+        + ("Return the entire plan preserving milestone order and ownership. Clarify only the named proof lines." if amend else "")
     )
 
     def consume(source, answer):
         ref = store.record("milestone_plan", {"source": source, "vision": cursor.vision,
             "parent": cursor.leadPlan, "milestones": completed + answer["milestones"]})
-        advance(store, "planned", ref, leadPlan=ref, B=None, requestedChange=None)
+        advance(store, "planned", ref, leadPlan=ref, B=None, requestedChange=None, failure="")
 
-    inference.call(store, provider, questions.question("MILESTONES", prompt, facts, PLAN,
+    inference.call(store, provider, questions.question("MILESTONES", prompt, facts, lead_plan_schema(bound),
                    [{"milestones": [example]}]), consume=consume, binding=cursor.A)
 
 
@@ -130,10 +115,13 @@ def review(store, provider, cursor):
         return
     facts = {**user_words(store, cursor), "Accepted promises": commitments(store, cursor),
              "Milestones": milestones(store, cursor)}
+    if amend_missing(store, cursor):
+        return
     question = questions.question("REVIEW",
         "Does this milestone plan cover the locked dream, with specific what, how and observable results? "
         "Check the owner's exact constraints, staging, milestone briefs and walkthrough obligation. "
-        "Name any material correction.", facts, answer_schema("REVIEW"),
+        "Name material corrections, including ambiguous proof lines.",
+        facts, answer_schema("REVIEW"),
         [{"verdict": "adequate", "gaps": [], "why": "The named greeting is specified and exercised."}])
 
     def consume(source, answer):
@@ -162,12 +150,20 @@ def review(store, provider, cursor):
     inference.call(store, provider, question, consume=consume, binding=cursor.leadPlan)
 
 
+def amend_missing(store, cursor):
+    if features.enabled("leadBoundProof") and (missing := [key for item in milestones(store, cursor)
+            for key, p in obligations(item, {}).items() if not (p or {}).get("notMetIf", "").strip()]):
+        return advance(store, "repair-plan", cursor.leadPlan, B=None, leadBuild=None, leadReturn=None,
+                       failure="Amend B proof: Add notMetIf to " + ", ".join(missing))
+
+
 def render_builder(question):
     facts = question["facts"]
     brief = facts["Milestone brief"]
     context = questions.labelled({key: value for key, value in facts.items() if key != "Milestone brief"})
-    return "\n\n".join((brief, WRITE_RULES, context, "Return schema\n" + encode(question["schema"]),
-                        "Example receipt\n" + encode(question["examples"][0]))), WRITE_RULES
+    rules = question["prompt"]
+    return "\n\n".join((brief, rules, context, "Return schema\n" + encode(question["schema"]),
+                        "Example receipt\n" + encode(question["examples"][0]))), rules
 
 
 def attempts(store, assignment, turn=None):
@@ -210,6 +206,8 @@ def recover_return(store, attempt, question):
 
 
 def build(store, provider, cursor):
+    if amend_missing(store, cursor):
+        return
     project = store.root.parent
     approval = store.read(cursor.B) if cursor.B else {}
     if (approval.get("subject", {}).get("plan") != cursor.leadPlan
@@ -247,13 +245,13 @@ def build(store, provider, cursor):
             facts["Exact failure"] = cursor.failure
         if cursor.requestedChange:
             facts["Owner direction"] = store.read(cursor.requestedChange)["words"]
-        example = {"outcome": "done", "summary": "A visitor can greet Ada.", "question": "",
-                   "checks": [{**EXAMPLE_CHECK, "vision": next(iter(facts["Promises"]))}],
-                   "checkPaths": ["checks/greet.py", "docs/try-it/walkthrough.py"],
-                   "walkthrough": {"purpose": "Replay the guide",
-                                   "command": ["python", "docs/try-it/walkthrough.py"],
-                                   "expectedEvidence": "The reader sees Hello, Ada!", "expectedExit": 0}}
-        question = questions.question("WORK", WRITE_RULES, facts, RECEIPT, [example],
+        walk = {"purpose": "Replay the greeting", "command": ["python", "docs/try-it/walkthrough.py"],
+                "expectedEvidence": "The reader sees Hello, Ada!", "expectedExit": 0}
+        example = {"outcome": "done", "summary": "A visitor can greet Ada.", "question": "", "walkthrough": walk,
+                   "checks": [{**walk, "vision": next(iter(facts["Promises"]))}], "checkPaths": [walk["command"][-1]]}
+        question = questions.question("WORK", (BOUND_RULES if features.enabled("leadBoundProof") else
+            "Check the full approved result and diagnostic meaning. A missing product must fail its check. ")
+            + WRITE_RULES, facts, RECEIPT, [example],
             execution={"cwd": assignment["workspace"], "session": session, "lead": cursor.leadBuild,
                        "turn": cursor.repairs})
 
@@ -339,11 +337,12 @@ def prove(store, provider, cursor):
              candidate=candidate, evidence=observations, retry="Retry proof" if runner_fault else None)
         return
     new_promises = [key for key, check in new.items() if key not in walks and not check.get("replacement")]
-    judge, fixes, missing = judgment.milestone(store, provider, base, candidate, subjects, declarations,
-                                              observations, walks, new_promises, receipt["summary"])
-    if fixes or missing:
-        fail(store, cursor, "\n".join(fixes or missing), "Builder" if fixes else "Seldon",
-             candidate=candidate, evidence=[judge, *observations],
+    judge, fixes, missing, amendments = judgment.milestone(store, provider, base, candidate, subjects, declarations,
+                                                          observations, walks, new_promises, receipt["summary"])
+    if amendments or fixes or missing:
+        fail(store, cursor, "Amend B proof: " + "\n".join(amendments) if amendments else "\n".join(fixes or missing),
+             "Planner" if amendments else "Builder" if fixes else "Seldon",
+             candidate=candidate, evidence=[judge, *observations], replan=bool(amendments),
              retry="Run proof after the evidence is fixed" if missing and not fixes else None)
         return
     checks.update({k: v for k, v in new.items() if "replacement" not in v})
@@ -386,7 +385,8 @@ def step(store, provider, user):
         review(store, provider, cursor)
     elif state == "B":
         decisions.request(store, "B", {"plan": cursor.leadPlan, "vision": cursor.vision,
-            "milestones": milestones(store, cursor), "review": store.read(cursor.review)})
+            "milestones": milestones(store, cursor), "review": store.read(cursor.review),
+            **({"Whole-product proof": judgment.LEAD_BINDINGS} if features.enabled("leadBoundProof") else {})})
     elif state == "BUILD":
         build(store, provider, cursor)
     elif state == "PROVE":
@@ -398,6 +398,7 @@ def step(store, provider, user):
             decisions.request(store, state, {"commit": cursor.candidate, "milestone": cursor.wave,
                 "proof": cursor.productVerdict, "built": receipt["summary"],
                 "walkthrough": receipt["walkthrough"],
+                "judgeNotes": store.read(store.read(cursor.productVerdict)["judge"]).get("notes", []),
                 "next milestone": item[cursor.wave]["outcome"] if cursor.wave < len(item) else None})
             if cursor.waived:
                 advance(store, "approve", store.cursor().checkin)

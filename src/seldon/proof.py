@@ -1,5 +1,6 @@
 """C14/C15/C26/I1; R6/R9: code observes ordinary commands on exact Git commits."""
 
+import hashlib
 import os
 import threading
 import uuid
@@ -8,6 +9,7 @@ from pathlib import Path
 from . import features, gitwork, observations as evidence_facts, plan
 from .processes import execute
 from .providers import ROLES
+from .store import encode
 
 
 _observer = threading.local()
@@ -127,7 +129,7 @@ def image(content):
     return content.startswith((b"\x89PNG", b"\xff\xd8"))
 
 
-def account(store, refs, delivered=None):
+def account(store, refs, delivered=None, *, mark_images=False):
     """Render the runner's observations for both judgment paths."""
     rows = []
     for ref in refs:
@@ -143,13 +145,16 @@ def account(store, refs, delivered=None):
         for path in body["evidenceFiles"]:
             content = Path(path).read_bytes()
             artifact = row["artifacts"][path] = {"bytes": len(content)}
-            if not image(content):
-                try:
-                    text = content.decode("utf-8")
-                except UnicodeDecodeError:
-                    continue
-                if text not in body["stdout"] and text not in body["stderr"]:
-                    artifact["text"] = text[-4096:]
+            if image(content):
+                if mark_images:
+                    artifact["image"] = True
+                continue
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if text not in body["stdout"] and text not in body["stderr"]:
+                artifact["text"] = text[-4096:]
         rows.append(row)
     return rows
 
@@ -165,6 +170,65 @@ def candidate_files(store, root, commit, *, named=None):
             except UnicodeDecodeError:
                 pass
     return files, images
+
+
+def judge_paths(root, commit, bound):
+    paths = gitwork.paths(root, commit)
+    if not bound:
+        return paths
+    generated = {"node_modules", ".venv", "venv", "virtualenv", "site-packages", ".tox", ".nox",
+                 "__pycache__", "build", "dist", ".next", ".output", "out", "coverage", "target",
+                 "playwright-report", "test-results"}
+    return [path for path in paths if not generated.intersection(path.lower().split("/")[:-1])
+            and not path.lower().startswith(("docs/try-it/work/", "docs/try-it/fresh/",
+                                             "docs/try-it/scratch/", "docs/try-it/tmp/"))]
+
+
+def milestone_source(store, root, commit, checks, refs, bound):
+    inventory = judge_paths(root, commit, bound)
+    files, images = candidate_files(store, root, commit, named=set(inventory) if bound else None)
+    retained = {}
+    for check in checks.values():
+        witness = check["witness"]
+        if witness["commit"] != commit:
+            retained.setdefault(witness["commit"], set()).update(witness["paths"])
+    facts = {"Candidate file inventory": inventory, "Product files": files, "Candidate images": images,
+             "Code shape (measured)": evidence_facts.code_shape(files),
+             "Observations": account(store, refs, commit, mark_images=bound),
+             "Checks": {key: {k: v for k, v in check.items() if k != "command"}
+                        for key, check in checks.items()},
+             "Retained check sources": {revision: candidate_files(store, root, revision, named=(
+                 paths & set(judge_paths(root, revision, bound))))[0] for revision, paths in retained.items()}}
+    return facts, images
+
+
+def milestone_evidence_key(root, facts, schema):
+    trees = {}
+
+    def tree(commit):
+        if commit not in trees:
+            trees[commit] = gitwork.git(root, "rev-parse", f"{commit}^{{tree}}")
+        return trees[commit]
+
+    def witness_tree(row):
+        witness = row["witness"]
+        return {**row, "witness": {**witness, "commit": tree(witness["commit"])}}
+
+    rows = []
+    for observation in facts["Observations"]:
+        row = witness_tree(observation) if "witness" in observation else dict(observation)
+        cwd = row.pop("workingDirectory")
+        for field in ("commit", "executedCommit"):
+            if field in row:
+                row[field] = tree(row[field])
+        for field in ("stdout", "stderr"):
+            row[field] = row[field].replace(cwd, "<checkout>").replace(cwd.replace("\\", "/"), "<checkout>")
+        row["command"] = [part.replace(cwd, "<checkout>") for part in row["command"]]
+        rows.append(row)
+    subject = {key: facts[key] for key in ("Subjects", "Walkthrough checks", "New promise checks")}
+    subject["Checks"] = {key: witness_tree(check) for key, check in facts["Checks"].items()}
+    payload = [tree(facts["Milestone base"]), tree(facts["Candidate"]), schema, subject, rows]
+    return hashlib.sha256(encode(payload).encode()).hexdigest()
 
 
 def milestone_checks(store, previous, milestone, current, subjects, receipt, candidate):

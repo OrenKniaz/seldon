@@ -6,7 +6,7 @@ tag=${1:?Usage: bash scripts/gate.sh drep-N}
 case "$tag" in
   *[!a-zA-Z0-9_-]*|'') echo 'Use a simple test directory tag' >&2; exit 2 ;;
 esac
-root="C:/seldon/tests/${tag}-1"
+root="${GATE_ROOT:-C:/seldon/tests/${tag}-1}"
 mkdir -p "$root/temp"
 export PYTHONPATH='src;tests/seldon'
 export TEMP="$root/temp" TMP="$root/temp"

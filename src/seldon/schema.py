@@ -106,13 +106,26 @@ DETAIL_GAP = obj(verdict=choice("contract_gap"), need=TEXT)
 CHECK = dict(purpose=TEXT, command=array(TEXT, 1), expectedEvidence=TEXT, requirements=REFS)
 
 
-def folded_judge_schema(subjects, owner):
+def lead_plan_schema(bound):
+    promise = obj(vision=TEXT, action=TEXT, result=TEXT)
+    if bound:
+        promise = {"anyOf": [obj(**promise["properties"], notMetIf=TEXT), promise]}
+    milestone = obj(outcome=TEXT, promises=array(promise, 1), spec=obj(what=TEXT, how=TEXT, test=TEXT), brief=TEXT)
+    return obj(answer=obj(milestones=array(milestone, 1)))
+
+
+def folded_judge_schema(subjects, owner, *, bound=False):
     def finding(subject):
         gap = obj(target=choice(subject), correction=TEXT, owners=array(choice(owner), 1), severity=SEVERITY)
+        uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1), why=TEXT)
+        if bound:
+            gap = {"anyOf": [obj(**gap["properties"], quote=TEXT, evidence=TEXT), gap]}
+            uncertain = {"anyOf": [obj(**uncertain["properties"], quote=TEXT, evidence=TEXT), uncertain]}
         return {"anyOf": [
             obj(verdict=choice("satisfied"), gaps=array(gap), why=TEXT),
             obj(verdict=choice("gap"), gaps=array(gap, 1), why=TEXT),
-            obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1), why=TEXT),
+            uncertain,
+            *([obj(verdict=choice("amend"), why=TEXT)] if bound and isinstance(subjects[subject], dict) else []),
         ]}
     return obj(answer=obj(findings=obj(**{s: finding(s) for s in subjects}), why=TEXT))
 

@@ -10,7 +10,7 @@ RUN = {
     "MILESTONES": {"planned": "LEAD-REVIEW"},
     "LEAD-REVIEW": {"reviewed": "B", "repair-plan": "MILESTONES"},
     "BUILD": {"returned": "PROVE", "repair-plan": "MILESTONES"},
-    "PROVE": {"proved-milestone": "CHECK-IN", "repair-build": "BUILD"},
+    "PROVE": {"proved-milestone": "CHECK-IN", "repair-build": "BUILD", "repair-plan": "MILESTONES"},
     "LEAD-NEXT": {"next-milestone": "BUILD", "last-milestone": "C"},
     "ARCHITECT": {"outlined": "DETAIL", "scope": "ALIGN"},
     "DETAIL": {"detailed": "REVIEW", "contract-gap": "ARCHITECT"},

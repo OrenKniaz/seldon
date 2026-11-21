@@ -6,6 +6,8 @@ from . import architecture, features, fixups, gitwork, inference, plan, proof, q
 from .observations import code_shape
 from .schema import answer_schema, folded_judge_schema
 from .states import advance
+LEAD_BINDINGS = {"tryItGuide": {"result": "The documented steps work from a fresh checkout."},
+                 "sourceAcceptance": {"result": "Real implementation with no stubs, mocks or missing behavior."}}
 
 
 WALKTHROUGH_CHECKOUT = (
@@ -34,55 +36,52 @@ def folded_subjects(document):
 
 def milestone(store, provider, base, commit, subjects, checks, refs, walks, new_promises, notes):
     root = store.root.parent
-    files, images = proof.candidate_files(store, root, commit)
-    retained = {}
-    for check in checks.values():
-        witness = check["witness"]
-        if witness["commit"] != commit:
-            retained.setdefault(witness["commit"], set()).update(witness["paths"])
-    subjects = {**subjects, "tryItGuide": "The documented steps work from a fresh checkout.",
-                "sourceAcceptance": "Real implementation with no stubs, mocks or missing behavior.",
+    bound = features.enabled("leadBoundProof")
+    source_facts, images = proof.milestone_source(store, root, commit, checks, refs, bound)
+    subjects = {**subjects, **{k: v if bound else v["result"] for k, v in LEAD_BINDINGS.items()},
                 "codeQuality": "Main implementation is readable and safe to change."}
-    facts = {"Milestone base": base, "Candidate": commit, "Subjects": subjects,
-             "Candidate file inventory": gitwork.paths(root, commit),
-             "Product files": files, "Candidate images": images, "Code shape (measured)": code_shape(files),
-             "Retained check sources": {revision: proof.candidate_files(store, root, revision, named=paths)[0]
-                                        for revision, paths in retained.items()},
-             "Walkthrough checks": walks, "New promise checks": new_promises,
-             "Observations": proof.account(store, refs, commit),
-             "Builder notes": notes,
-             "Checks": {key: {k: v for k, v in check.items() if k != "command"}
-                        for key, check in checks.items()}}
+    facts = {**source_facts, "Milestone base": base, "Candidate": commit, "Subjects": subjects,
+             "Walkthrough checks": walks, "New promise checks": new_promises, "Builder notes": notes}
     example = {key: {"verdict": "satisfied", "gaps": [], "why": "Observed the approved action and result."}
                for key in subjects}
-    if new_promises:
-        example[checks[new_promises[0]]["requirements"][0]]["why"] = (
-            "The base lacked the entry point. The same check passed on the candidate, "
-            "and its assertions would fail for an incorrect result.")
     question = questions.question("JUDGE",
-        "Judge each approved action and result. The runner supplies both executions with the same "
-        "witness files over the milestone base and candidate. Each observation names the product "
-        "commit and the executed commit with the witness files. Use the check source to decide "
-        "whether its assertions would detect loss of the promise. A missing product entry point is "
-        "valid base RED for new behavior. A launcher error that accidentally satisfies an assertion "
-        "is evidence the check is weak. Earlier promises may already pass at the base. "
-        "Mark a weak check must-fix when it would pass despite a concrete violation of an approved "
-        "result. Name the violation and the smallest assertion that catches it. Require exact "
-        "wording only where the approved result does. Judge from the supplied executions and source. "
-        "If the declared walkthrough fails to exercise a documented step the builder can "
-        "change, give the builder a concrete must-fix gap. Use uncertainty for facts missing because "
-        "the runner or approved environment cannot exercise an otherwise adequate walkthrough. "
-        "Keep allowed limitations visible. Judge the guide's observed steps and use measured code shape for maintenance.",
-        facts, folded_judge_schema(subjects, "builder"), [{"findings": example, "why": "Reviewed the evidence."}],
+        ("Judge against B. A must-fix needs the entire verbatim result or notMetIf in quote and an observed "
+         "product or check violation in evidence. Unavailable runner evidence (uncertain) needs the same binding. "
+         "A check omitting a B result is a check gap. Attached execution images are marked image in Observations. "
+         "Use amend for missing or ambiguous B semantics and sourceAcceptance for stubs and mocks."
+         if bound else "Judge approved results using base RED, candidate GREEN and source. Report must-fix "
+         "for weak checks, lost behavior or skipped guide steps. Use uncertain for unavailable runner evidence."),
+        facts, folded_judge_schema(subjects, "builder", bound=bound), [{"findings": example, "why": "Reviewed the evidence."}],
         subjects, images=list(dict.fromkeys([*images.values(), *questions.images(store, refs)])))
-    source, answer = inference.call(store, provider, question, binding=commit)
-    fixes = [gap["correction"] for finding in answer["findings"].values()
-             for gap in questions.must_fix({"gaps": finding.get("gaps", [])})]
-    missing = [f["why"] + " " + "; ".join(f["neededFacts"]) for f in answer["findings"].values()
-               if f["verdict"] == "uncertain"]
-    if not files.get(plan.GUIDE_PATH, "").strip():
-        fixes.append(f"Deliver the runnable try-it guide at {plan.GUIDE_PATH}.")
-    return source, fixes, missing
+    key = proof.milestone_evidence_key(root, facts, question["schema"]) if bound else None
+    if bound and (prior := next((row for _, _, row in store.records("bound_judgment") if row["key"] == key), None)):
+        source, answer = prior["source"], store.read(prior["source"])["answer"]
+    else:
+        source, answer = inference.call(store, provider, question, binding=commit)
+    fixes, advisory, amendments, missing = [], [], [], []
+    for target, finding in answer["findings"].items():
+        if finding["verdict"] == "amend":
+            amendments.append(f"{target}: {finding['why']}")
+        gaps = finding.get("gaps", [])
+        if uncertain := finding["verdict"] == "uncertain":
+            gaps = [{**finding, "target": target, "severity": "must-fix",
+                     "correction": finding["why"] + " " + "; ".join(finding["neededFacts"])}]
+        for gap in gaps:
+            quote, evidence = gap.get("quote"), gap.get("evidence", "").strip()
+            subject = subjects[target] if isinstance(subjects[target], dict) else {}
+            if bound and (not quote or quote not in (subject.get("result"), subject.get("notMetIf")) or not evidence
+                          or gap["severity"] != "must-fix"):
+                advisory.append({**gap, "severity": "note"})
+            elif bound or features.blocking(gap):
+                (missing if uncertain else fixes).append(
+                    f"B: {quote}\nEvidence: {evidence}\n{gap['correction']}" if bound else gap["correction"])
+    if not source_facts["Product files"].get(plan.GUIDE_PATH, "").strip():
+        fixes.append((f"B: {LEAD_BINDINGS['tryItGuide']['result']}\nEvidence: {plan.GUIDE_PATH} is missing or empty.\n"
+                      if bound else "") + f"Deliver the runnable try-it guide at {plan.GUIDE_PATH}.")
+    if bound:
+        source = store.record("bound_judgment", {"source": source, "key": key, "commit": commit,
+                                                 "notes": advisory, "fixes": fixes, "amendments": amendments})
+    return source, fixes, missing, amendments
 
 
 def folded_brief(store, document, owner, observations):

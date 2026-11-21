@@ -55,6 +55,11 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                 store.record("provider_failure", {"attempt": attempt, "reason": str(error),
                     "transient": error.transient, "cleanupVerified": error.cleanup_verified,
                     "receipt": error.receipt})
+                if (lead and session and features.enabled("leadBoundProof")
+                        and isinstance(error, ResumeUnavailable) and error.cleanup_verified):
+                    session, previous = None, attempt
+                    current = {**current, "execution": {**current["execution"], "session": None}}
+                    continue
                 if (isinstance(error, ResumeUnavailable) or not error.transient
                         or not error.cleanup_verified or unit and isinstance(error, Deadline)
                         or lead):
