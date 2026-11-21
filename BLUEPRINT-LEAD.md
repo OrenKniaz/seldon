@@ -1,6 +1,6 @@
 # Seldon Lead blueprint — one builder per milestone
 
-**Working draft v0.2 (Oren 11-19: "planner carries semantics in schema.. he doesn't write code or tests": B binds each promise's action and observable result in words; the builder writes the checks after B; Seldon reviews, retains and replays them) · v0.1 under the ratified Lead charter v1.0 · 19 November 2026.** Oren ratifies changes. The planning question is “What will the person be able to do after this milestone, and how will we see it still works at the next one?” The execution question belongs to the builder. A promise is an observable commitment in the accepted vision.
+**v0.3 RATIFIED 21 November 2026 (Oren: "Ratify what you need") — bound proof: B fixes each promise's proof standard in words once, including what it is NOT met by; the judge's must-fix quotes a B line; a repair resumes the same builder session (section 2a).** Working draft v0.2 (Oren 11-19: "planner carries semantics in schema.. he doesn't write code or tests": B binds each promise's action and observable result in words; the builder writes the checks after B; Seldon reviews, retains and replays them) · v0.1 under the ratified Lead charter v1.0 · 19 November 2026.** Oren ratifies changes. The planning question is “What will the person be able to do after this milestone, and how will we see it still works at the next one?” The execution question belongs to the builder. A promise is an observable commitment in the accepted vision.
 
 ## 1. One plan and its records
 
@@ -49,6 +49,15 @@ Rerun behavioral witnesses on every milestone candidate. Reuse an independent so
 Render `AGENDA.md` (accepted horizon and next outcome) and `HANDOVER.md` (where to resume and why) in the run's Seldon-owned memory directory, outside the builder's writable product checkout. Link to the locked vision, exact decision words, current brief, candidate and proof. Supply read-only copies or excerpts to the builder. Keep long evidence by reference. Update after a decision, return, proof, pause or check-in that changes the next safe action. Rebuild missing or stale files from the store on open. An edited Markdown file has no transition authority. The ladder's files illustrate the handoff pattern and remain development artifacts.
 
 On reopen, read the stored mode, pending decision and last durable attempt/publication. Reconcile the provider receipt, candidate and process cleanup before choosing resume, replacement or pause. Preserve the same logical owner and brief lineage across a necessary replacement. A pause names the fault, triggering condition, next actor and next action. Provider availability can resume eligible work. A disconnected decision stays pending until the matching reply arrives. A change to accepted scope stale-marks affected briefs and judgments before further writing.
+
+### 2a. Bound proof (v0.3)
+
+The proof standard is written once, at B, in words, and every later reader uses that same text.
+- **B.** For each promise the planner writes the action, the observable result, and "it is not met if …": the one or two wrong behaviours that must fail. This is semantics only. The planner writes no checks.
+- **Build.** The builder writes checks against exactly that text.
+- **Judge.** A must-fix quotes the B line that the product or a check violates, together with the evidence. Anything else is a note, kept visible, and never causes rework. If the B text itself is missing or ambiguous, the planner amends it (a recorded plan revision) instead of the judge inventing a standard.
+- **Repair.** A repair resumes the same builder session where the provider supports it, carrying the quoted line and the observation, instead of starting a cold session.
+- **Switch.** SELDON_OFF=leadBoundProof restores the earlier behaviour for A/B runs.
 
 ## 3. Where the current core fits
 
