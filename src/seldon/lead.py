@@ -26,11 +26,14 @@ WRITE_RULES = (
     "behavior and earlier witnesses. You may use provider-native sub-agents and skills within this "
     "assignment; wait for them to finish. Keep Seldon's store, decisions and proof untouched. Do not "
     "commit or change global settings. For each promise, return one unattended check with its command, "
-    "what it asserts and expectedExit 0. Return a check that walks through the guide in the same format. "
-    "Assert any expected product error inside its check. Use a headless browser for any browser paths. "
-    "List the check-only files and helpers in checkPaths. Return done when the work is written. "
-    "Seldon runs every check itself. Put any doubts in summary. Leave question empty unless you need "
-    "an answer you cannot find yourself. If you cannot supply a walkthrough, return an empty object. "
+    "what it asserts and expectedExit 0. Check the full approved result, including whether any "
+    "diagnostic conveys the required meaning. A missing product must fail its check. Reuse the same "
+    "witness across promises and the walkthrough where it covers their actions and results. Keep "
+    "the guide to runnable steps the walkthrough exercises, including any shell commands or status "
+    "inspection it asks the reader to perform. Return the walkthrough in the same format, or an "
+    "empty object if unavailable. Use headless browsers. List all witness files in checkPaths. "
+    "Return done when the work is written. Seldon runs every check. Put doubts in summary. "
+    "Leave question empty unless you need an answer you cannot find yourself. "
     + plan.GUIDE_WALKTHROUGH
 )
 EXAMPLE_CHECK = {"purpose": "Greet a named visitor", "command": ["python", "checks/greet.py"],
