@@ -420,7 +420,14 @@ def prove(store, provider, cursor):
         return
 
     green = proof.observe(store, project, candidate, checks, "milestone", candidate=candidate)
-    judge, verdict = judgment.milestone(store, provider, base, candidate, subjects, current, green)
+    owner = None
+    if features.enabled("leadGuardOwner"):
+        owner = user_words(store, cursor)
+        owner["Owner decisions"] = [{"gate": store.read(row["request"])["gate"], "choice": row["choice"],
+                                     "selections": [s["label"] for s in row.get("selections", [])]}
+                                    for _, _, row in store.records("approval") if row.get("userWords")]
+    judge, verdict = judgment.milestone(
+        store, provider, base, candidate, subjects, current, green, owner=owner)
     amendments, fixes = verdict["amendments"], verdict["fixes"]
     carried = [{**item, "judge": judge, "commit": candidate} for item in verdict["findings"]
                if item.get("carry") and features.enabled("leadWitnessCarry")]

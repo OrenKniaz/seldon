@@ -10,6 +10,16 @@ from .schema import ALIGN_ROUND, REFS, TEXT, answer_schema, batch_decision, lead
 
 GUIDE_PATH = "docs/try-it.md"
 GUIDE_SCOPE = (GUIDE_PATH, "docs/try-it/**")
+LEAD_GUARD = (
+    "From the person's original words and decisions, choose realistic journeys and walk them through the "
+    "real CLI, API or headless browser. Interrupt one where behaviors meet. Reconcile the walk with B and "
+    "reuse Seldon's regression observations for the promises they demonstrate. Fill gaps in the guide and "
+    "product walk without rerunning observed commands. In baseline, record how new behavior failed on Base. "
+    "Read the implementation for completeness. In maintenance, explain how to change a rule the person cares "
+    "about and where. If unreadable code makes it hard, link source evidence as a sourceAcceptance defect. "
+    "Describe how a specific step felt and what remains unproved. Obtain missing observations yourself. "
+    "Use uncertain for an actual blocker, amend for a scope decision and note for advice."
+)
 GUIDE_WALKTHROUGH = ("In docs/try-it.md, show how to try every accepted user surface, with one runnable "
                      "example per CLI command when there is a CLI. Supply inputs or show how to create them. "
                      "Declare a check under docs/try-it/ that uses the same commands in the reader's shell "

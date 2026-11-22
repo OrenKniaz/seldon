@@ -33,12 +33,7 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
     timeout = setup.get("providers", {}).get("check", ROLES["check"])["timeout"]
     scratch = Path(store.cursor().scratch)
     checkout = getattr(_observer, "checkout", None)
-    if checkout is None or checkout.parent != scratch:
-        checkout = Path(gitwork.admit(root, scratch, commit))
-        _observer.checkout = checkout
-    else:
-        gitwork.checkout(checkout, commit)
-    cleanup_verified, dirty = True, False
+    checkout = checkout if checkout and checkout.parent == scratch else None
     witness_commits, trees, executions = {}, {}, {}
     walkthroughs = evidence_facts.final_guide_checks(store) if purpose == "final" else ()
     try:
@@ -67,22 +62,20 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
                 original, body = cached[witness]
                 if not body["cleanupVerified"]:
                     raise UncertainCleanup("Command cleanup unverified: " + str(body))
-                observations.append(original if list(linked) == body["checks"] else store.record(
-                    "observation_projection", {**body, "checks": list(linked), "requirements": requirements}))
+                coverage = {"checks": list(linked), "requirements": requirements}
+                observations.append(original if all(body[k] == v for k, v in coverage.items()) else
+                                    store.record("observation_projection", {**body, **coverage}))
                 continue
             if checkout is None:
-                checkout = Path(gitwork.admit(root, scratch, commit))
-                _observer.checkout = checkout
-            if executed_commit != commit:
+                _observer.checkout = checkout = Path(gitwork.admit(root, scratch, executed_commit))
+            else:
                 gitwork.checkout(checkout, executed_commit)
             runtime = scratch / ("check-" + uuid.uuid4().hex)
             evidence, temp = runtime / "evidence", runtime / "temp"
             evidence.mkdir(parents=True)
             temp.mkdir()
-            dirty = True
             if (checkout / command[0]).is_file():
                 command[0] = str((checkout / command[0]).resolve())
-            cleanup_verified = False
             result = execute(command, checkout, timeout=timeout,
                              env={**os.environ, "SELDON_EVIDENCE_DIR": str(evidence),
                                   **{key: str(temp) for key in ("TEMP", "TMP", "TMPDIR")}})
@@ -112,13 +105,10 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
                 _observer.checkout = checkout = None
             else:
                 gitwork.clean(checkout, commit)
-            dirty = False
-    finally:
-        # Never reset/reuse a workspace whose descendants may still be running.
-        if not cleanup_verified:
-            _observer.checkout = None
-        elif dirty:
-            gitwork.clean(checkout, commit)
+    except BaseException:
+        # A failed execution or evidence write can leave descendants or dirty files.
+        _observer.checkout = None
+        raise
     return observations
 
 

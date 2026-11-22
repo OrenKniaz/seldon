@@ -1632,7 +1632,7 @@ def test_lead_sizes_by_builder_session(tmp_path, monkeypatch, staging):
                                  "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay",
                                  "bound-note", "unresolved-plan", "missing-check", "guard-repair", "failed-witness",
                                  "guard-feedback", "incomplete-witness", "unrelated-witness", "carry-witness",
-                                 "carry-with-limit"])
+                                 "carry-with-limit", "owner-interruption"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
@@ -1658,6 +1658,10 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     carry-witness catches C treating a missing lifecycle row as missing product proof after a real guard walk.
     carry-with-limit catches the wc04 repair loop when another aspect of the same promise remains uncertain.
     incomplete-witness has no independent observation; neither carry case replaces its required repair.
+    owner-interruption catches a green standalone rejection check masking an interrupted paste from
+    the owner's account. Only this arm walks a failing combination omitted from B and verifies repair.
+    guard-repair also resumes with a Windows-encoded guide edit, which previously blocked the guard
+    before the repaired rejection could reach C.
     micro-redraft catches an extra call or stale spec after an A edit, and missing coaching in the transmitted
     builder prompt. bound-note checks that coaching can be disabled. The other arms miss these boundaries.
     """
@@ -1672,11 +1676,16 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
         monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadWitnessCoach" if arm == "bound-note" else "leadPlanOne")
     else:
         monkeypatch.delenv("SELDON_OFF", raising=False)
+    if arm == "proof-owner":
+        monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadGuardOwner")
     edit = "Require the exact stderr text Usage: pass a name when rejecting --help."
     flow = []
     dream = "Run `python hello.py Ada` and say ‘Hello, Ada!’ exactly. Reject `python hello.py --help`. " + (
         "In a separate milestone add ‘Goodbye, Ada!’." if milestone_count == 2 else "")
     dream += " Fixture: " + arm
+    interruption = "Someone can paste --help Ada together. Reject the whole paste without a greeting."
+    if arm == "owner-interruption":
+        dream += "\n" + interruption
     draft = questions.consequential_round_example()
     draft.update(questions=[], recommendation="done")
     vision = draft["vision"]
@@ -1767,7 +1776,8 @@ if q["kind"] == "JUDGE":
     (evidence / "view.png").write_bytes(base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR1sAAAAASUVORK5CYII="))
     answer = {"why": "Walked the command and rejection from the guide.", "actions": actions, "findings": [],
-              "feedback": [{"step": "Reject bad input", "note": "Usage is easy to scan."}]}
+              "feedback": [{"step": "Reject bad input", "note": "Usage is easy to scan."}],
+              "reuse": [], "maintenance": "Update the argument guard in hello.py before greeting."}
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({"answer": answer})}}))
     print(json.dumps({"type": "turn.completed"}))
     raise SystemExit
@@ -1778,7 +1788,7 @@ assert "--ephemeral" not in args and 'sandbox_mode="danger-full-access"' in args
 thread = args[args.index("resume") + 1] if "resume" in args else str(uuid.uuid4())
 print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
 assert Path.cwd().resolve() == Path(facts["Write scope"]).resolve()
-arm = facts["Owner words"]["Dream"].rsplit(" Fixture: ", 1)[1]
+arm = facts["Owner words"]["Dream"].rsplit(" Fixture: ", 1)[1].splitlines()[0]
 if arm == "micro-redraft":
     assert (
         "Coaching\nFor each result you describe, follow the actual interaction through to the specific "
@@ -1815,6 +1825,10 @@ def implement(name, greeting):
         "    print('Usage: pass a name', file=sys.stderr)\n    sys.exit(2)\n"
         + f"print(f'{greeting}, {{sys.argv[1]}}!')\n", encoding="utf-8")
 implement(name, expected.split(",")[0])
+if arm == "owner-interruption" and "resume" in args:
+    assert "Observed: status 0, stdout 'Hello, --help!\\n'" in facts["Exact failure"]
+    product = Path("hello.py")
+    product.write_text(product.read_text().replace("sys.argv[1:] == ['--help']", "'--help' in sys.argv[1:]"))
 if arm == "guard-repair":
     if "resume" in args:
         assert "B: Exit 2 with usage on stderr and empty stdout" in facts["Exact failure"]
@@ -1875,6 +1889,9 @@ if name == "bye":
             "print(output)\n", encoding="utf-8")
 guide = Path("docs/try-it.md")
 guide.parent.mkdir(exist_ok=True)
+if arm == "guard-repair" and "resume" in args:
+    with guide.open("ab") as output:
+        output.write("\nAda’s error should appear on stderr.\n".encode("cp1252"))
 if arm == "bound-note":
     from tempfile import TemporaryDirectory
     with err.open("a", encoding="utf-8") as output:
@@ -2066,6 +2083,8 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                     continue
                 if witness_case and not carry_case and not facts.get("Previous walk") and expected_status:
                     continue
+                if arm == "owner-interruption" and expected_status:
+                    continue
                 result = subprocess.run([sys.executable, "-B", "hello.py", *args], cwd=work,
                                         capture_output=True, text=True, check=False)
                 if arm != "guard-repair" or facts.get("Previous walk") or expected_status == 0:
@@ -2096,6 +2115,13 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             assert arm in ("missing-check", "guard-repair") or any("usage error asserted" in row["stdout"] for row in green)
             answer = {"why": "Walked the command and rejection from the guide.", "actions": actions,
                       "findings": [], "feedback": [{"step": "Reject bad input", "note": "Usage is easy to scan."}]}
+            if arm == "proof-owner":
+                assert "Owner decisions" not in facts
+            else:
+                guard_fields = question["schema"]["properties"]["answer"]["properties"]
+                answer["maintenance"] = "Update the argument guard in hello.py before greeting."
+                if "reuse" in guard_fields:
+                    answer["reuse"] = []
             if arm == "guard-feedback":
                 if facts.get("Exact corrections"):
                     assert "feedback" in str(facts["Exact corrections"])
@@ -2112,9 +2138,30 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
 
             if actions[0]["actual"] == "Broken, Ada!":
                 defect("scopeIn:hello", "Restore the original greeting.", action=1)
+            if arm == "owner-interruption":
+                assert interruption in facts["Dream"]
+                assert "Ada together" not in str(facts["Subjects"])
+                assert "This is it" in facts["Owner replies"]
+                assert [row["gate"] for row in facts["Owner decisions"]] == ["A", "B"]
+                check, = [ref for ref, row in facts["Observations"].items() if "quality:exact" in row["requirements"]]
+                assert facts["Observations"][check]["exitCode"] == 0
+                baseline = subprocess.run([sys.executable, "-B", "hello.py", "--help"], cwd=facts["Base"],
+                                          capture_output=True, text=True)
+                reference = guard_fields["reuse"]["items"]["properties"]["observation"]
+                # Native structured output uses the available IDs. A free text field elicited prose in S1.
+                observation = check if "enum" in reference else f"{check} proved standalone rejection."
+                answer["reuse"] = [{"observation": observation, "promises": ["quality:exact"],
+                                    "baseline": baseline.stderr}]
+                result = subprocess.run([sys.executable, "-B", "hello.py", "--help", "Ada"], cwd=work,
+                                        capture_output=True, text=True)
+                actions.append({"action": "Paste --help Ada together", "promises": ["quality:exact"],
+                                "actual": f"status {result.returncode}, stdout {result.stdout!r}",
+                                "baseline": "", "screenshots": []})
+                if result.returncode != 2 or result.stdout:
+                    defect("quality:exact", "The pasted extra word bypasses validation.", action=len(actions))
             if arm == "guard-repair":
                 if facts.get("Previous walk"):
-                    assert "+++ b/hello.py" in facts["Repair delta"] and "+    sys.exit(2)" in facts["Repair delta"]
+                    assert set(facts["Changed paths"].splitlines()) == {questions.GUIDE_PATH, "hello.py"}
                     assert actions[0]["actual"] == "Usage: pass a name"
                 elif actions[2]["actual"] == "Hello, --help!":
                     defect("quality:exact", "python hello.py --help exited 0 and printed Hello, --help!", action=3)
@@ -2352,7 +2399,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             stderr = (folder / "stderr.bin").read_bytes()
             assert len(stderr) > 4 * 1024**2 and stderr.rstrip().endswith(b"guard stderr end")
             assert run.store.records("outcome")[-1][2]["verification_complete"] is True
-        elif arm in ("guard-repair", "incomplete-witness"):
+        elif arm in ("guard-repair", "incomplete-witness", "owner-interruption"):
             assert len(sessions) == 2 and sessions[0] == sessions[1]
             assert run.store.records("outcome")[-1][2]["verification_complete"] is True
             if arm == "incomplete-witness":
