@@ -61,23 +61,22 @@ def milestone(store, provider, base, commit, subjects, current, refs):
     runtime = Path(mkdtemp(prefix="guard-", dir=cursor.scratch))
     work, before, evidence_dir = (runtime / name for name in ("product", "base", "evidence"))
     question = questions.question("JUDGE",
-        ("Re-walk failed and repair-affected subjects only. Reuse Base and unaffected evidence. "
+        ("Walk outstanding proof and repair-affected subjects. Reuse Base and unaffected evidence. "
          if prior else "Walk each B promise on Candidate. For new promises record the unmet Base action in "
          "baseline; reuse a shared Base failure for every promise it blocks. ")
-        + "Use the real CLI, API or headless browser. Exercise restart, failure and manual guide steps when "
-        "in scope. For keyboard access, Tab through the UI and operate controls with keys. Measure rendered "
+        + "Finish reachable B actions on Candidate in the real CLI, API or headless browser. Exercise restart, "
+        "failure and manual guide steps in scope. Tab through the UI and operate controls with keys. Measure "
         "text/background contrast. For SQLite integrity, query the file directly. "
         "Inspect source against B for stubs, mocks or gaps. Link actions or findings to each subject revisited. "
-        "Use uncertain for missing observations or machine limits; say what was partly seen and why. "
-        "Give human feedback on a "
-        "screen or action, describing friction or ease. If blocked, describe the blocked step. "
+        "Use uncertain only for a concrete blocker. Record the action, attempt and reason. "
+        "Give human feedback on a screen or action, including friction, ease or a blocked step. "
         "For a demonstrated defect, select the violated B field and link the evidence for that promise: "
         "the one-based position in this answer's actions or an executed observation ID from Observations. "
         "Explain how the linked result shows the product defect or materially broken retained witness, "
         "even if its process exited successfully. Missing observation belongs to the guard. "
         "Use amend for ambiguous B and note for advice. "
         "Use one plain command per action inside the copies and their runtime. Record denials without retrying. "
-        "Use supplied clean-checkout observations for guide commands already run. On resume finish missing actions. "
+        "Reuse exact clean-checkout guide observations. On resume finish missing actions. "
         "Save evidence in SELDON_EVIDENCE_DIR, cite PNG names and stop your processes.",
         {"Candidate": str(work), "Candidate commit": commit, "Base": str(before), "Base commit": base,
          "Guide path": plan.GUIDE_PATH, "Subjects": subjects, "New promises": list(current),
