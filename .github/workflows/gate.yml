@@ -1,4 +1,5 @@
 name: gate
+# Hermetic behaviour journeys. The full gate (with recorded runs and browser checks) runs locally.
 
 on:
   push:
@@ -27,4 +28,9 @@ jobs:
         env:
           GATE_ROOT: ${{ runner.temp }}/gate
           GATE_WORKERS: "4"
-        run: bash scripts/gate.sh ci
+        # Journeys that replay recorded local runs or need Node + Playwright run on the dev machine only.
+        run: >
+          bash scripts/gate.sh ci
+          -k "not size_guide_journey and not size_proof_journey and not browser_kit
+          and not recorded_code_shape and not recorded_runtime_evidence and not check_kit_golden"
+
