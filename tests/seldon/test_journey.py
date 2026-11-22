@@ -1534,6 +1534,86 @@ def approve(request):
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("staging", ["single", "owner-review", "switch-off"])
+def test_lead_sizes_by_builder_session(tmp_path, monkeypatch, staging):
+    """The reviewed B plan covers the same product in one session or honors a requested checkpoint.
+
+    This catches the old non-tiny cutoff, a blank reason opening MILESTONES, and an ALIGN spec
+    swallowing a requested split. The existing tiny Lead journeys miss the size cutoff.
+    """
+    from seldon.decisions import Waiting
+
+    monkeypatch.setenv("SELDON_OFF", "leadSizeByBuilder" if staging == "switch-off" else "")
+    dream = "Build a local reading log with an add-book command, a saved list and CSV export."
+    review = "I want to try adding and listing books before you build CSV export."
+    if staging == "owner-review":
+        dream += " " + review
+    draft = questions.tiny_round_example()
+    draft.update(questions=[], recommendation="done")
+    vision = draft["vision"]
+    vision.update(size="small", sizeWhy="Three commands sharing a small local store.", understanding=dream,
+                  constraints=[], scopeOut=[], stories=[
+        {"handle": handle, "feature": feature, "story": story, "outcome": outcome,
+         "constraints": [], "sources": ["kickoff"]}
+        for handle, feature, story, outcome in (
+            ("record", "Reading list", "Save a book and reopen the list.", "The saved title appears."),
+            ("export", "CSV export", "Export the reading list.", "The CSV contains the saved title."))])
+    vision["quality"] = [{"handle": "errors", "criterion": "Missing titles get clear feedback",
+                          "verification": "Try to add a book without a title.",
+                          "constraints": [], "sources": ["kickoff"]}]
+    record = {"vision": "scopeIn:record", "action": "Add A Wizard of Earthsea and reopen the list",
+              "result": "A Wizard of Earthsea is listed", "notMetIf": "The saved title disappears."}
+    export = {"vision": "scopeIn:export", "action": "Export the saved reading list",
+              "result": "The CSV has a row for A Wizard of Earthsea", "notMetIf": "The CSV is empty."}
+    errors = {"vision": "quality:errors", "action": "Add a book without a title",
+              "result": "The error asks for a title", "notMetIf": "An empty title is saved."}
+    first = {"outcome": "Save and list books", "design": "Store titles locally and show both commands in the guide.",
+             "promises": [record, errors]}
+    second = {"outcome": "Export saved books", "design": "Read the same store and show how to export it.",
+              "promises": [export]}
+    whole = {"outcome": "Save, list and export books", "design": first["design"] + " " + second["design"],
+             "promises": [record, export, errors]}
+    calls = []
+    displayed = {}
+
+    def provider(question):
+        kind = question["kind"]
+        calls.append(kind)
+        if kind == "ALIGN":
+            answer = {**draft, "microSpec": whole}
+            if staging != "switch-off":
+                answer["extraMilestoneReasons"] = [review] if staging == "owner-review" else [" "]
+        elif kind == "MILESTONES":
+            corrected = question["facts"].get("Exact corrections")
+            answer = {"milestones": [first, second] if staging == "owner-review" and corrected else [whole]}
+        else:
+            assert kind == "REVIEW", question
+            answer = {"amendments": [], "unresolved": [], "why": "Every action has a material outcome."}
+        return json.dumps({"answer": answer})
+
+    def user(request):
+        displayed[request["gate"]] = request["subject"]
+        if request["gate"] == "A":
+            return {"request": request["request"], "replyId": "lock",
+                    "selections": [{"groupId": "round", "optionId": "done"}]}
+        raise Waiting()
+
+    run = Run(tmp_path / "product", tmp_path / "workers", dream, {}, provider, user, mode="lead")
+    try:
+        cursor = run.run()
+        assert cursor.state == "B" and cursor.B is None, cursor.failure
+        assert list(displayed) == ["A", "B"]
+        assert displayed["A"]["vision"]["size"] == "small"
+        approved = displayed["B"]["milestones"]
+        expected = [[record, errors], [export]] if staging == "owner-review" else [[record, export, errors]]
+        assert [item["promises"] for item in approved] == expected
+        planning_calls = {"single": [], "owner-review": ["MILESTONES", "MILESTONES"], "switch-off": ["MILESTONES"]}
+        assert calls == ["ALIGN", *planning_calls[staging], "REVIEW"]
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
 @pytest.mark.parametrize("arm", ["hello-reopen", "micro-redraft", "cumulative-repair", "unchanged", "proof-owner", "plan-owner",
                                  "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay",
                                  "bound-note", "unresolved-plan", "missing-check", "guard-repair", "failed-witness",
@@ -1905,6 +1985,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             answer = deepcopy(draft)
             if "microSpec" in question["schema"]["properties"]["answer"]["properties"]:
                 answer["microSpec"] = deepcopy(planned[0]) if micro else None
+                answer["extraMilestoneReasons"] = ["The owner requested a separate milestone for Goodbye."] if milestone_count == 2 else []
             if micro and "Previous proposal" in facts:
                 assert edit in facts["Sources"].values()
                 assert "microSpec" not in facts["Previous proposal"]

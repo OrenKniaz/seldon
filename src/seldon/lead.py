@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import decisions, features, gitwork, inference, judgment, proof, questions, recovery
+from .answers import Mismatch
 from .providers import ProviderFailure, recorded
 from .schema import REFS, TEXT, array, choice, lead_milestone_schema, obj, validate
 from .states import advance
@@ -111,22 +112,31 @@ def propose(store, provider, cursor):
     assigned = {key for m in completed for key in obligations(m, promises)}
     open_promises = {key: value for key, value in promises.items() if key not in assigned}
     context = spec_context(store, cursor)
-    facts = {**context, "Accepted vision": store.read(cursor.vision)["answer"],
+    vision = store.read(cursor.vision)["answer"]
+    facts = {**context, "Accepted vision": vision,
              "Open promises": open_promises, "Milestone outline": [m["outcome"] for m in previous],
              "Runtime": questions.runtime(store.read(cursor.kickoff)["setup"])}
     if cursor.failure:
         facts["Exact failure"] = cursor.failure
     if cursor.requestedChange:
         facts["Owner direction"] = store.read(cursor.requestedChange)["words"]
+    reasons = vision.get("extraMilestoneReasons", []) if not previous else []
+    count = 1 + len(reasons)
     prompt = (
-        "Plan the remaining milestones from these approved promises and owner words. A micro dream usually "
-        "needs one milestone. Keep staging the owner asked for. Reference the supplied promise handles. "
+        "Plan the remaining milestones from these approved promises and owner words. "
+        + (f"Detail exactly {count} milestones from ALIGN. Each extra milestone must serve its "
+           "corresponding extraMilestoneReasons entry in order. " if reasons else
+           "A micro dream usually needs one milestone. ")
+        + "Keep staging the owner asked for. Reference the supplied promise handles. "
         "State the outcome and material design choices. Assign each open promise once. "
         + ("Preserve milestone order and ownership while addressing the named proof issue." if amend else "")
     )
 
     def consume(source, answer):
         ref = record_plan(store, cursor, source, answer["milestones"], completed, open_promises=open_promises)
+        if reasons and len(store.read(ref)["milestones"]) != count:
+            raise Mismatch("milestones", f"Plan {count} milestones as sized at ALIGN. "
+                           "Each milestone needs a distinct set of open promises.")
         advance(store, "planned", ref, leadPlan=ref, B=None, requestedChange=None, failure="")
 
     handles = open_promises or promises
