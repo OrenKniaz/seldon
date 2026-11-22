@@ -107,7 +107,11 @@ CHECK = dict(purpose=TEXT, command=array(TEXT, 1), expectedEvidence=TEXT, requir
 
 
 def lead_plan_schema(bound, promises):
-    promise = obj(vision=choice(*promises), action=TEXT, result=TEXT, **({"notMetIf": TEXT} if bound else {}))
+    action = {**TEXT, "description": "What the person does on the product surface."}
+    result = {**TEXT, "description": "Observable success honoring the owner's exact words."}
+    excluded = {**TEXT, "description": "One or two observable wrong outcomes of the action."}
+    promise = obj(vision=choice(*promises), action=action, result=result,
+                  **({"notMetIf": excluded} if bound else {}))
     milestone = obj(outcome=TEXT, design=TEXT, promises=array(promise, 1))
     return obj(answer=obj(milestones=array(milestone, 1)))
 

@@ -111,9 +111,7 @@ def propose(store, provider, cursor):
     prompt = (
         "Plan the remaining milestones from these approved promises and owner words. A micro dream usually "
         "needs one milestone. Keep staging the owner asked for. Reference the supplied promise handles. "
-        "State the outcome and material design choices. Assign each open promise once with its action and "
-        "observable result. Seldon includes the owner's exact words and guide obligation in the spec. "
-        + ("State one or two wrong behaviours per promise in notMetIf. " if bound else "")
+        "State the outcome and material design choices. Assign each open promise once. "
         + ("Preserve milestone order and ownership while addressing the named proof issue." if amend else "")
     )
 
@@ -149,10 +147,11 @@ def review(store, provider, cursor):
     schema = obj(answer=obj(amendments=array(obj(target=choice(*lines), replacement=TEXT)),
                             unresolved=REFS, why=TEXT))
     question = questions.question("REVIEW",
-        "Review the builder's spec against the accepted promises, owner constraints and staging. "
-        "For a material gap that fits an editable line, give its handle and full replacement text. "
-        "Use unresolved for gaps requiring a coverage or staging decision. Follow the supplied constraints "
-        "and guide obligation by reference without restating them in your amendments.",
+        "Review coverage of the accepted promises and guide, and check staging. Reconcile each action, result "
+        "and any notMetIf with one another, the accepted constraints and the owner's exact words, which govern "
+        "conflicts. Each notMetIf must describe a wrong observable outcome of the action. For a material gap "
+        "or contradiction, give the editable line handle and full replacement text. Use unresolved for gaps "
+        "requiring a coverage or staging decision.",
         {"Builder spec": "\n\n".join(m["brief"] for m in items), "Unassigned promises": missing},
         schema, [{"amendments": [], "unresolved": [], "why": "The named greeting is specified and exercised."}])
 

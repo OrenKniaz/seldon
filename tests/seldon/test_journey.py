@@ -1549,6 +1549,8 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     proof-owner catches an omitted proof subject disappearing at C or reopening the builder.
     The wave journeys do not exercise those Lead paths.
     unresolved-plan catches a missing accepted promise disappearing at B or triggering a whole-plan retry.
+    bound-note catches review edits to the proof standard getting lost at B or in the builder's brief.
+    The other Lead arms do not apply reviewer edits to proof lines.
     hello-reopen launches the native guard adapter to catch disabled tools, a missing candidate copy,
     a product file leaking onto the base through checkPaths, and evidence lost during cleanup.
     Its timeout catches a fresh guard losing completed actions and large streams losing output.
@@ -1588,6 +1590,11 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
                              "result": "Exit 2 with usage on stderr and empty stdout",
                              "notMetIf": "The command succeeds or omits usage."})
         planned.append({"outcome": expected, "promises": promises, "design": "Read a positional name in Python."})
+    reviewed_rejection = {"vision": "quality:exact", "action": "Run `python hello.py --help`",
+                          "result": "Exit 2 with Usage: pass a name on stderr and empty stdout",
+                          "notMetIf": "The command exits with a status other than 2 or prints usage to stdout."}
+    if arm == "bound-note":
+        planned[0]["promises"][1]["notMetIf"] = "The command exits 2 or omits usage."
 
     native = tmp_path / "lead_native.py"
     native.write_text(r"""
@@ -1741,7 +1748,6 @@ guide = Path("docs/try-it.md")
 guide.parent.mkdir(exist_ok=True)
 if arm == "bound-note":
     from tempfile import TemporaryDirectory
-    assert facts["Promises"]["scopeIn:hello"]["notMetIf"] == "The greeting omits Ada."
     with err.open("a", encoding="utf-8") as output:
         output.write("import os\nfrom pathlib import Path\n"
                      "Path(os.environ['SELDON_EVIDENCE_DIR'], 'preview.png').write_bytes(Path('preview.png').read_bytes())\n")
@@ -1822,14 +1828,18 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
 
         monkeypatch.setattr(providers, "execute", guard_deadline)
     reviewed = []
-    amendments = "Parse one name and reject extra flags."
+    approved_milestone = None
 
     def scripted(question, started):
         strict_schema(question["schema"])
         kind, facts = question["kind"], question["facts"]
         if kind == "WORK":
-            expected = reviewed[-1].replace(planned[0]["design"], amendments) if arm == "bound-note" else reviewed[-1]
-            assert facts["Milestone brief"] in expected
+            if arm == "bound-note":
+                assert facts["Milestone brief"] == approved_milestone["brief"]
+                assert facts["Promises"]["quality:exact"] == reviewed_rejection
+                assert facts["Promises"]["scopeIn:hello"]["notMetIf"] == "The greeting omits Ada."
+            else:
+                assert facts["Milestone brief"] in reviewed[-1]
             if facts.get("Previous checkpoint"):
                 assert facts["How the previous milestone felt"][0]["note"] == "Usage is easy to scan."
             return invoke(question, started)
@@ -1841,7 +1851,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             if facts.get("Exact failure"):
                 assert arm == "plan-owner"
                 assert facts["Exact failure"] == "The approved design has an ambiguous parser."
-                answer["milestones"][0]["design"] = amendments
+                answer["milestones"][0]["design"] = "Parse one name and reject extra flags."
             promises = answer["milestones"][0]["promises"]
             if arm == "bound-note":
                 if not facts.get("Exact corrections"):
@@ -1861,7 +1871,9 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             answer = {"amendments": [], "unresolved": [], "why": "The spec exercises the named action."}
             if arm == "bound-note":
                 assert document.count("scopeIn:hello action\n") == 1
-                answer["amendments"] = [{"target": "M1 design", "replacement": amendments}]
+                answer["amendments"] = [
+                    {"target": f"quality:exact {field}", "replacement": reviewed_rejection[field]}
+                    for field in ("action", "result", "notMetIf")]
             if arm == "unresolved-plan":
                 assert "quality:exact" in facts["Unassigned promises"]
                 answer["unresolved"] = ["The guide must show the rejection path."]
@@ -1951,8 +1963,15 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
     displayed = []
 
     def user(request):
+        nonlocal approved_milestone
         gate = request["gate"]
         displayed.append(gate)
+        if gate == "B" and arm == "bound-note":
+            subject = request["subject"]
+            approved_milestone, = subject["milestones"]
+            assert subject["review"]["revision"] == subject["plan"]
+            assert reviewed_rejection in approved_milestone["promises"]
+            assert all(text in approved_milestone["brief"] for text in reviewed_rejection.values())
         if gate == "CHECK-IN":
             assert request["subject"]["guard"]["feedback"][0]["step"] == "Reject bad input"
         if gate == "C" and arm == "hello-reopen":
