@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import decisions, features, gitwork, inference, judgment, proof, questions, recovery
 from .providers import ProviderFailure, recorded
-from .schema import REFS, TEXT, array, choice, lead_plan_schema, obj, validate
+from .schema import REFS, TEXT, array, choice, lead_milestone_schema, obj, validate
 from .states import advance
 from .store import encode
 
@@ -87,6 +87,21 @@ def spec_context(store, cursor):
             "Try-it guide": questions.GUIDE_WALKTHROUGH}
 
 
+def record_plan(store, cursor, source, proposed, completed=(), *, open_promises=None):
+    promises = commitments(store, cursor)
+    remaining = dict(open_promises or promises)
+    items, context = list(completed), spec_context(store, cursor)
+    for milestone in proposed:
+        unique = [p for p in milestone["promises"] if remaining.pop(p["vision"], None) is not None]
+        if unique:
+            item = {"outcome": milestone["outcome"], "promises": unique,
+                    "spec": {"how": milestone["design"], "test": None, "rendered": True}}
+            item["brief"] = render_spec(item, len(items) + 1, context, promises)
+            items.append(item)
+    return store.record("milestone_plan", {"source": source, "vision": cursor.vision,
+        "parent": cursor.leadPlan, "milestones": items})
+
+
 def propose(store, provider, cursor):
     previous = milestones(store, cursor)
     bound = features.enabled("leadBoundProof")
@@ -95,11 +110,6 @@ def propose(store, provider, cursor):
     promises = commitments(store, cursor)
     assigned = {key for m in completed for key in obligations(m, promises)}
     open_promises = {key: value for key, value in promises.items() if key not in assigned}
-    example = {"outcome": "Greet a named visitor", "promises": [
-                   {"vision": next(iter(open_promises or promises)), "action": "Pass Ada as the name",
-                    "result": "See Hello, Ada! on standard output.",
-                    **({"notMetIf": "The greeting omits Ada or its exclamation mark."} if bound else {})}],
-               "design": "Read the name from a CLI argument."}
     context = spec_context(store, cursor)
     facts = {**context, "Accepted vision": store.read(cursor.vision)["answer"],
              "Open promises": open_promises, "Milestone outline": [m["outcome"] for m in previous],
@@ -116,21 +126,13 @@ def propose(store, provider, cursor):
     )
 
     def consume(source, answer):
-        remaining = dict(open_promises or promises)
-        items = completed.copy()
-        for proposed in answer["milestones"]:
-            unique = [p for p in proposed["promises"] if remaining.pop(p["vision"], None) is not None]
-            if unique:
-                item = {"outcome": proposed["outcome"], "promises": unique,
-                        "spec": {"how": proposed["design"], "test": None, "rendered": True}}
-                item["brief"] = render_spec(item, len(items) + 1, context, promises)
-                items.append(item)
-        ref = store.record("milestone_plan", {"source": source, "vision": cursor.vision,
-            "parent": cursor.leadPlan, "milestones": items})
+        ref = record_plan(store, cursor, source, answer["milestones"], completed, open_promises=open_promises)
         advance(store, "planned", ref, leadPlan=ref, B=None, requestedChange=None, failure="")
 
-    question = questions.question("MILESTONES", prompt, facts, lead_plan_schema(bound, open_promises or promises),
-                                  [{"milestones": [example]}])
+    handles = open_promises or promises
+    schema = obj(answer=obj(milestones=array(lead_milestone_schema(bound, choice(*handles)), 1)))
+    example = questions.lead_milestone_example([next(iter(handles))], bound)
+    question = questions.question("MILESTONES", prompt, facts, schema, [{"milestones": [example]}])
     inference.call(store, provider, question, consume=consume, binding=cursor.A)
 
 
@@ -203,6 +205,11 @@ def render_builder(question):
         rules += ("\nUse one runnable path for guide and regression coverage wherever they exercise the same "
                   "behavior. Link its command to every promise it demonstrates. Record each actual command "
                   "or interaction and result when it runs, including helper invocations required by B.")
+    if features.enabled("leadWitnessCoach"):
+        rules += ("\n\nCoaching\nFor each result you describe, follow the actual interaction through to the specific "
+                  "observable outcome, and describe only what that observation establishes. "
+                  "Write the lifecycle so a reader could retrace your run from it alone: the actual commands, "
+                  "interactions and observed outcomes, recorded as you go.")
     return "\n\n".join((brief, rules, context, "Return schema\n" + encode(question["schema"]),
                         "Example receipt\n" + encode(question["examples"][0]))), rules
 

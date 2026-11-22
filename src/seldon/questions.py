@@ -6,7 +6,7 @@ from difflib import SequenceMatcher
 
 from . import features, observations, proof
 from .answers import Mismatch, index, links, normalised, render_constraint_values
-from .schema import ALIGN_ROUND, answer_schema, batch_decision, obj, validate, vision_body
+from .schema import ALIGN_ROUND, TEXT, answer_schema, batch_decision, lead_milestone_schema, obj, validate, vision_body
 
 GUIDE_PATH = "docs/try-it.md"
 GUIDE_SCOPE = (GUIDE_PATH, "docs/try-it/**")
@@ -129,8 +129,30 @@ def build(kind, facts, targets=(), *, coach_contracts=False):
     return question(kind, prompt, facts, answer_schema(kind, targets, coach_contracts=coach_contracts), [example], targets)
 
 
-def align_round_brief(facts, *, sources, size_first=False):
+MICRO_SPEC = (
+    "For a micro (tiny) vision with one delivery, draft microSpec from this round's vision and owner choices. "
+    "Give the outcome and material design, including how the try-it guide exercises the product. "
+    "Give one proof line per story (scopeIn:<handle>) and quality criterion (quality:<handle>). "
+    "Use null for larger dreams or when the owner requires separate milestones."
+)
+
+
+def lead_milestone_example(handles, bound):
+    return {"outcome": "Greet a named visitor", "design": "Read the name from a CLI argument and show it in the guide.",
+            "promises": [{"vision": handle, "action": "Pass Ada as the name",
+                          "result": "See Hello, Ada! on standard output.",
+                          **({"notMetIf": "The greeting omits Ada or its exclamation mark."} if bound else {})}
+                         for handle in handles]}
+
+
+def align_round_brief(facts, *, sources, size_first=False, micro=False):
     """Build one ALIGN round. Sources maps recorded handles to their exact user words."""
+    schema, example = ALIGN_ROUND, tiny_round_example()
+    if micro:
+        bound = features.enabled("leadBoundProof")
+        schema = obj(**schema["properties"], microSpec={"anyOf": [lead_milestone_schema(bound, TEXT), {"type": "null"}]})
+        example["microSpec"] = lead_milestone_example(commitments(example), bound)
+        facts = {key: value for key, value in facts.items() if key not in ("Dream", "Requested change")}
     return question("ALIGN",
         "What product would you put in front of this person now? Name who makes what decision, "
         "what could mislead them, and what they would need tomorrow to repeat it. Rank the stories "
@@ -143,13 +165,13 @@ def align_round_brief(facts, *, sources, size_first=False):
         "Name the affected commitment or scope, show the proposed default first and explain what each "
         "option changes for the user. Give two to four concrete options; Seldon supplies Other. "
         "Give the changed outcome and why. Recommend done when the displayed defaults settle the product. "
-        + ALIGN_DESIGN + ("\n" + SIZE_ESTIMATE if size_first else ""),
+        + ALIGN_DESIGN + ("\n" + SIZE_ESTIMATE if size_first else "") + ("\n" + MICRO_SPEC if micro else ""),
         {**facts, "Sources": sources, "Design guidance used by UI workers": CRAFT},
-        obj(answer=ALIGN_ROUND), [tiny_round_example(), consequential_round_example()],
+        obj(answer=schema), [example] if micro else [example, consequential_round_example()],
         context={"sizeFirst": size_first})
 
 
-def check_align_round(answer, sources):
+def check_align_round(answer, sources, owner_size=None):
     vision = vision_body(answer)
     dropped, changes = set(), []
     def record(kind, body):
@@ -223,6 +245,16 @@ def check_align_round(answer, sources):
             changes.append({"subject": ask["affects"], "action": "question", "question": ask["question"],
                             "summary": "Kept the open question attached to the vision."})
             ask["affects"] = "vision"
+    if owner_size and owner_size not in ("other", vision["size"]):
+        answer["vision"]["size"] = normalised(record, "vision.size", vision["size"], owner_size,
+                                             f"Used the size selected by the owner: {owner_size}.")
+        answer["vision"]["sizeWhy"] = f"The owner selected {owner_size} for planning."
+    if spec := answer.get("microSpec"):
+        handles = [promise["vision"] for promise in spec["promises"]]
+        if answer["vision"]["size"] != "tiny":
+            answer["microSpec"] = None
+        elif sorted(handles) != sorted(goals):
+            raise Mismatch("microSpec.promises", f"Assign each vision promise once. Expected {list(goals)}.")
     return changes
 
 
@@ -358,6 +390,8 @@ def reviewed_decision(question, facts, context):
             if context.get("sizeFirst", SIZE_ESTIMATE in question["prompt"]):
                 task += ("\n\n" + SIZE_ESTIMATE + " Display micro/small/medium/big and use the schema values "
                          "tiny/small/medium/large in the receipt.")
+            if "microSpec" in question["schema"]["properties"]["answer"]["properties"]:
+                task += "\n\n" + MICRO_SPEC
             if follow_up:
                 example = question["examples"][-1]
         else:

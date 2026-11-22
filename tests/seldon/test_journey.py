@@ -1534,7 +1534,7 @@ def approve(request):
 
 
 @pytest.mark.fast
-@pytest.mark.parametrize("arm", ["hello-reopen", "cumulative-repair", "unchanged", "proof-owner", "plan-owner",
+@pytest.mark.parametrize("arm", ["hello-reopen", "micro-redraft", "cumulative-repair", "unchanged", "proof-owner", "plan-owner",
                                  "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay",
                                  "bound-note", "unresolved-plan", "missing-check", "guard-repair", "failed-witness",
                                  "guard-feedback", "incomplete-witness", "unrelated-witness", "carry-witness",
@@ -1564,6 +1564,8 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     carry-witness catches C treating a missing lifecycle row as missing product proof after a real guard walk.
     carry-with-limit catches the wc04 repair loop when another aspect of the same promise remains uncertain.
     incomplete-witness has no independent observation; neither carry case replaces its required repair.
+    micro-redraft catches an extra call or stale spec after an A edit, and missing coaching in the transmitted
+    builder prompt. bound-note checks that coaching can be disabled. The other arms miss these boundaries.
     """
     from types import SimpleNamespace
 
@@ -1571,6 +1573,13 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     from seldon.decisions import Waiting
 
     milestone_count = 2 if arm in ("cumulative-repair", "unchanged") else 1
+    micro = arm == "micro-redraft"
+    if not micro and milestone_count == 1:
+        monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadWitnessCoach" if arm == "bound-note" else "leadPlanOne")
+    else:
+        monkeypatch.delenv("SELDON_OFF", raising=False)
+    edit = "Require the exact stderr text Usage: pass a name when rejecting --help."
+    flow = []
     dream = "Run `python hello.py Ada` and say ‘Hello, Ada!’ exactly. Reject `python hello.py --help`. " + (
         "In a separate milestone add ‘Goodbye, Ada!’." if milestone_count == 2 else "")
     dream += " Fixture: " + arm
@@ -1601,6 +1610,8 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     reviewed_rejection = {"vision": "quality:exact", "action": "Run `python hello.py --help`",
                           "result": "Exit 2 with Usage: pass a name on stderr and empty stdout",
                           "notMetIf": "The command exits with a status other than 2 or prints usage to stdout."}
+    if micro:
+        reviewed_rejection["notMetIf"] = "The command exits other than 2 or stderr omits Usage: pass a name."
     if arm == "bound-note":
         planned[0]["promises"][1]["notMetIf"] = "The command exits 2 or omits usage."
     witness_result = ("Exit 2 with usage on stderr and empty stdout.\n"
@@ -1674,6 +1685,15 @@ thread = args[args.index("resume") + 1] if "resume" in args else str(uuid.uuid4(
 print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
 assert Path.cwd().resolve() == Path(facts["Write scope"]).resolve()
 arm = facts["Owner words"]["Dream"].rsplit(" Fixture: ", 1)[1]
+if arm == "micro-redraft":
+    assert (
+        "Coaching\nFor each result you describe, follow the actual interaction through to the specific "
+        "observable outcome, and describe only what that observation establishes. "
+        "Write the lifecycle so a reader could retrace your run from it alone: the actual commands, "
+        "interactions and observed outcomes, recorded as you go."
+    ) in prompt
+if arm == "bound-note":
+    assert "\nCoaching\n" not in prompt and "Use one runnable path" in prompt
 assert "`python hello.py --help`" in facts["Owner words"]["Dream"]
 if arm == "plan-owner" and "positional" in facts["Approved spec"]["how"]:
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(
@@ -1869,6 +1889,8 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
     def scripted(question, started):
         strict_schema(question["schema"])
         kind, facts = question["kind"], question["facts"]
+        if micro and kind in ("ALIGN", "MILESTONES", "REVIEW", "WORK"):
+            flow.append(kind)
         if kind == "WORK":
             if arm == "bound-note":
                 assert facts["Milestone brief"] == approved_milestone["brief"]
@@ -1880,8 +1902,16 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                 assert facts["How the previous milestone felt"][0]["note"] == "Usage is easy to scan."
             return invoke(question, started)
         if kind == "ALIGN":
-            answer = draft
+            answer = deepcopy(draft)
+            if "microSpec" in question["schema"]["properties"]["answer"]["properties"]:
+                answer["microSpec"] = deepcopy(planned[0]) if micro else None
+            if micro and "Previous proposal" in facts:
+                assert edit in facts["Sources"].values()
+                assert "microSpec" not in facts["Previous proposal"]
+                answer["vision"]["quality"][0]["criterion"] = edit
+                answer["microSpec"]["promises"][1] = reviewed_rejection
         elif kind == "MILESTONES":
+            assert not micro
             assert facts["Dream"] == dream
             answer = {"milestones": deepcopy(planned)}
             if facts.get("Exact failure"):
@@ -1904,6 +1934,9 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             assert dream in document and questions.GUIDE_WALKTHROUGH in document
             assert "Accepted constraint greeting\nHello, Ada!" in document
             reviewed.append(document)
+            if micro:
+                assert reviewed_rejection["result"] in document
+                assert planned[0]["promises"][1]["result"] not in document
             answer = {"amendments": [], "unresolved": [], "why": "The spec exercises the named action."}
             if arm == "bound-note":
                 assert document.count("scopeIn:hello action\n") == 1
@@ -2039,6 +2072,10 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         nonlocal approved_milestone
         gate = request["gate"]
         displayed.append(gate)
+        if micro and gate == "B":
+            flow.append(gate)
+            milestone, = request["subject"]["milestones"]
+            assert reviewed_rejection in milestone["promises"]
         if gate == "B" and arm == "bound-note":
             subject = request["subject"]
             approved_milestone, = subject["milestones"]
@@ -2088,6 +2125,9 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             if arm == "bound-note":
                 assert "tryItGuide:walkthrough" in request["subject"]["unverified"]
         if gate == "A":
+            if micro and displayed.count("A") == 1:
+                return {"request": request["request"], "replyId": "edit",
+                        "selections": [{"groupId": "round", "optionId": "other", "text": edit}]}
             return {"request": request["request"], "replyId": "lock",
                     "selections": [{"groupId": "round", "optionId": "done"}]}
         return approve(request)
@@ -2122,6 +2162,8 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
     run = Run.reopen(project, provider, user)
     try:
         cursor = run.run()
+        if micro:
+            assert flow == ["ALIGN", "ALIGN", "REVIEW", "B", "WORK"]
         if arm == "explicit-question":
             assert cursor.state == "BUILD" and cursor.decision
             ask = run.store.read(cursor.decision)["subject"]
@@ -2177,7 +2219,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             assert not run.store.records("lead_failure")
             assert not [q for _, _, q in run.store.records("question") if q["kind"] == "RECEIPT"]
             assert run.store.records("outcome")[-1][2]["verification_complete"] is True
-        assert displayed == ["A", "B", *(["B"] if arm == "plan-owner" else []),
+        assert displayed == [*(["A"] * (2 if micro else 1)), "B", *(["B"] if arm == "plan-owner" else []),
                              *(["CHECK-IN"] * milestone_count), "C"]
         assert run.store.read(cursor.kickoff)["mode"] == "lead"
         assignments = run.store.records("lead_assignment")

@@ -61,6 +61,11 @@ def advance(store, event, cause, unit=None, **updates):
                   table[row.state].get(event))
         if not unit and (row.state, event) in LEAD and store.read(row.kickoff).get("mode") == "lead":
             target = LEAD[row.state, event]
+            if row.state == "A" and (vision := updates.get("vision")):
+                if draft := store.read(vision)["answer"].get("microSpec"):
+                    from .lead import record_plan
+                    updates["leadPlan"] = record_plan(store, replace(row, vision=vision), vision, [draft])
+                    target = "LEAD-REVIEW"
             if event == "steer":
                 updates.update(wave=row.wave + 1, B=None, repairs=0, leadBuild=None, leadReturn=None)
         if target is None:

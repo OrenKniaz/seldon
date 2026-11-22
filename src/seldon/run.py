@@ -5,7 +5,6 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import decisions, features, gitwork, inference, lead, proof, questions
-from .answers import normalised
 from .states import TERMINAL, advance
 from .store import RunRow, Store
 
@@ -119,6 +118,7 @@ class Run:
                 consume=lambda ref, _: advance(store, "aligned", ref, vision=ref, requestedChange=None))
             return
 
+        micro = size_first and lead.enabled(store) and features.enabled("leadPlanOne")
         sources = {"kickoff": kickoff["words"], **{ref: row["words"]
             for ref, _, row in store.records("user_words") if isinstance(row["words"], str)
             and not row.get("rejected")}}
@@ -127,7 +127,8 @@ class Run:
         size = None
         if previous:
             draft = previous["subject"]["round"]
-            facts["Previous proposal"] = store.read(draft)["answer"]
+            facts["Previous proposal"] = {key: value for key, value in store.read(draft)["answer"].items()
+                                          if key != "microSpec"}
             approvals = [a for _, _, a in reversed(store.records("approval")) if "selections" in a]
             revision = next((a for a in approvals
                              if a["subject"].get("round") == draft and a["choice"] == "revise"), None)
@@ -138,22 +139,15 @@ class Run:
             if size and size != "other":
                 facts["Owner size override"] = size
 
-        def check(answer):
-            vision = answer["vision"]
-            changes = questions.check_align_round(answer, sources)
-            if size and size != "other" and vision["size"] != size:
-                vision["size"] = normalised(lambda kind, body: changes.append(body), "vision.size",
-                    vision["size"], size, f"Used the size selected by the owner: {size}.")
-                vision["sizeWhy"] = f"The owner selected {size} for planning."
-            return changes
-
         def display(ref, answer):
             advance(store, "aligned", ref, requestedChange=None)
             decisions.request(store, "A", {"round": ref, "vision": questions.vision_body(answer)},
                               ask=decisions.round_ask(answer, size_first=size_first))
 
-        inference.call(store, self.provider, questions.align_round_brief(facts, sources=sources, size_first=size_first),
-                       check=check, consume=display, field="vision/questions")
+        inference.call(store, self.provider, questions.align_round_brief(
+                           facts, sources=sources, size_first=size_first, micro=micro),
+                       check=lambda answer: questions.check_align_round(answer, sources, size),
+                       consume=display, field="vision/questions")
 
     def run(self, wait=None):
         import time

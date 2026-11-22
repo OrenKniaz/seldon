@@ -93,14 +93,13 @@ DETAIL_GAP = obj(verdict=choice("contract_gap"), need=TEXT)
 CHECK = dict(purpose=TEXT, command=array(TEXT, 1), expectedEvidence=TEXT, requirements=REFS)
 
 
-def lead_plan_schema(bound, promises):
+def lead_milestone_schema(bound, handles):
     action = {**TEXT, "description": "What the person does on the product surface."}
     result = {**TEXT, "description": "Observable success honoring the owner's exact words."}
     excluded = {**TEXT, "description": "One or two observable wrong outcomes of the action."}
-    promise = obj(vision=choice(*promises), action=action, result=result,
+    promise = obj(vision=handles, action=action, result=result,
                   **({"notMetIf": excluded} if bound else {}))
-    milestone = obj(outcome=TEXT, design=TEXT, promises=array(promise, 1))
-    return obj(answer=obj(milestones=array(milestone, 1)))
+    return obj(outcome=TEXT, design=TEXT, promises=array(promise, 1))
 
 
 def folded_judge_schema(subjects, owner):
@@ -159,7 +158,8 @@ def validation_errors(value, contract, path="answer"):
         branches = [validation_errors(value, child, path) for child in contract["anyOf"]]
         return [] if [] in branches else min(branches, key=len)
     kind = contract["type"]
-    expected = {"object": dict, "array": list, "string": str, "boolean": bool, "integer": int}[kind]
+    expected = {"object": dict, "array": list, "string": str, "boolean": bool,
+                "integer": int, "null": type(None)}[kind]
     if type(value) is not expected:
         return [f"{path}: expected {kind}"]
     errors = []
