@@ -76,6 +76,9 @@ def state(run: str):
         active = running(store)
         waiting = ({"request": cursor.decision, **store.read(cursor.decision)}
                    if cursor.decision and cursor.state not in TERMINAL else None)
+        if waiting and (decisions.retired_owner_question(store, waiting)
+                        or waiting["subject"].get("leadRecovery") and "ask" not in waiting):
+            waiting = None
         relay = RELAY
         if waiting:
             is_round = grouped(waiting)

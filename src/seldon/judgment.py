@@ -256,7 +256,7 @@ def walk_feedback(store, proof_ref):
     verdict = store.read(proof["judge"])
     fields = ("why", "actions", "feedback", "findings", "evidenceFiles", "maintenance", "limitations")
     return {key: verdict[key] for key in fields if key in verdict} | {
-        key: proof[key] for key in ("carriedWitnesses",) if key in proof}
+        key: proof[key] for key in ("carriedWitnesses", "normalisations") if key in proof}
 
 
 def folded_brief(store, document, owner, observations):

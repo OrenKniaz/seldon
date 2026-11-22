@@ -173,7 +173,8 @@ class Run:
                     reason = str(error) + (f"; receipt: {receipt}" if receipt else "")
                     with self.store.transaction():
                         cursor = self.store.cursor(replace(self.store.cursor(), failure=reason))
-                    if isinstance(error, proof.UncertainCleanup) and cursor.state == "PROVE":
+                    if (isinstance(error, proof.UncertainCleanup) and cursor.state == "PROVE"
+                            and not (lead.enabled(self.store) and features.enabled("leadSeldonOwns"))):
                         decisions.owner_question(self.store, "Seldon", reason)
                         break
                     if isinstance(error, proof.UncertainCleanup) or not error.cleanup_verified:

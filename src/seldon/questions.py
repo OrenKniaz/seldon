@@ -547,6 +547,9 @@ def reviewed_decision(question, facts, context):
                 "two to four concrete options, recommendation first.")
         if "receipt" in opening.get("Unresolved work", {}):
             task += " " + WORK_COACH
+        if opening.get("Unresolved work", {}).get("leadRecovery"):
+            task += (" Resolve this from the approved milestone and observed failure. "
+                     "Ask the person only for knowledge or a decision only they can supply, and explain why.")
         if any("contract" in branch.get("properties", {})
                for branch in question["schema"]["properties"]["answer"]["anyOf"]):
             task += (" For a peer agreement, return its applicable text or identify the gap "

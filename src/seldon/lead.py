@@ -335,6 +335,8 @@ def build(store, provider, cursor):
                 raise
             if not error.transient:
                 raise proof.UncertainCleanup(str(error)) from error
+            if features.enabled("leadSeldonOwns"):
+                raise
             fail(store, store.cursor(), str(error), "Seldon", retry="Retry builder")
             return
         cursor = store.cursor()
@@ -361,7 +363,9 @@ def fail(store, cursor, failure, owner="Builder", *, candidate=None, evidence=()
             "owner": owner, "evidence": evidence})
         if owner == "Seldon" and cursor.state == "PROVE":
             store.cursor(replace(cursor, failure=failure))
-            return decisions.owner_question(store, owner, failure, retry=retry)
+            if not features.enabled("leadSeldonOwns"):
+                return decisions.owner_question(store, owner, failure, retry=retry)
+            return decisions.route_repair(store, cause, owner, tree, failure, retry)
         updates = {"leadReturn": None, "repairs": cursor.repairs + 1, "failure": failure,
                    "requestedChange": None}
         if replan and not recovery.failed(store, cause, key=f"lead-spec:{cursor.wave}",
@@ -372,7 +376,7 @@ def fail(store, cursor, failure, owner="Builder", *, candidate=None, evidence=()
             advance(store, "repair-build", cause, **updates)
         else:
             store.cursor(replace(cursor, **updates))
-        if replan:
+        if replan and not features.enabled("leadSeldonOwns"):
             return decisions.owner_question(store, owner, failure)
         return decisions.route_repair(store, cause, owner, tree, failure, retry)
 
@@ -399,20 +403,24 @@ def prove(store, provider, cursor):
     try:
         if "error" in returned:
             raise ValueError(returned["error"])
-        checks = proof.milestone_checks(store, previous, cursor.wave, current, receipt, candidate)
+        checks, omitted = proof.milestone_checks(store, previous, cursor.wave, current, receipt, candidate)
     except ValueError as error:
-        if returned.get("kind") == "RECEIPT":
+        if returned.get("kind") == "RECEIPT" and not cursor.requestedChange:
             fail(store, cursor, str(error), "Seldon", candidate=candidate)
             return
         work_question = store.read(attempts(store, cursor.leadBuild)[-1][1]["question"])
+        facts = {"Error": str(error), "Return": receipt, "New promises": current, "Candidate": candidate,
+                 "Candidate files": gitwork.paths(project, candidate)}
+        if cursor.requestedChange:
+            facts["Recovery direction"] = store.read(cursor.requestedChange)["words"]
         question = questions.question("RECEIPT",
             "Correct the receipt for this frozen candidate. Reference existing witness files and commands.",
-            {"Error": str(error), "Return": receipt, "New promises": current, "Candidate": candidate,
-             "Candidate files": gitwork.paths(project, candidate)}, RECEIPT,
+            facts, RECEIPT,
             [work_question["examples"][0]["answer"]])
 
         inference.call(store, provider, question, binding=candidate,
-                       consume=lambda ref, _: store.cursor(replace(store.cursor(), leadReturn=ref)))
+                       consume=lambda ref, _: store.cursor(replace(store.cursor(), leadReturn=ref,
+                                                                   requestedChange=None)))
         return
 
     green = proof.observe(store, project, candidate, checks, "milestone", candidate=candidate)
@@ -432,7 +440,9 @@ def prove(store, provider, cursor):
                     "Planner" if amendments else "Builder", candidate=candidate, evidence=[judge, *green],
                     replan=bool(amendments))
     if failed := proof.failures(store, green):
-        fail(store, cursor, proof.explain(failed), "Seldon", candidate=candidate, evidence=[judge, *green])
+        executed = [row for row in failed if proof.executed(row)] if features.enabled("leadSeldonOwns") else []
+        fail(store, cursor, proof.explain(executed or failed), "Builder" if executed else "Seldon",
+             candidate=candidate, evidence=[judge, *green])
         return
     renewed = {promise for c in checks.values() if c["witness"]["commit"] == candidate for promise in c["requirements"]}
     resolved = renewed - {item["promise"] for item in verdict["limitations"]}
@@ -445,6 +455,8 @@ def prove(store, provider, cursor):
             "commit": candidate, "assignment": cursor.leadBuild, "return": cursor.leadReturn,
             "changed": changed, "checks": checks,
             "observations": green, "judge": judge,
+            **({"normalisations": ["Omitted check paths absent from the candidate: " + ", ".join(omitted)]}
+               if omitted else {}),
             **({"carriedWitnesses": carried} if carried else {}),
             "previous": cursor.productVerdict})
         intent = store.record("publication", {"milestone": cursor.wave, "before": base,

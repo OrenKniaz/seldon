@@ -47,6 +47,7 @@ def coach(store, provider, subject, frame=False):
                             option("Pause", "Keep this question pending", "pause")]}}
     coach_contracts = bool(ref) and features.enabled("askContracts")
     cursor = store.cursor()
+    lead_repair = subject.get("leadRecovery")
     document = {}
     if ref or cursor.revision:
         from . import plan
@@ -64,9 +65,17 @@ def coach(store, provider, subject, frame=False):
             **unit_questions.agreement_facts(document, ref)})
     else:
         facts["Requirements and agreements"] = document
-    response = None
+    if lead_repair:
+        from . import lead
+        milestones = lead.milestones(store, cursor)
+        if cursor.wave <= len(milestones):
+            milestone = milestones[cursor.wave - 1]
+            facts["Lead milestone"] = {key: milestone[key] for key in ("outcome", "spec", "promises")}
+        if cursor.requestedChange:
+            facts["Last recovery direction"] = store.read(cursor.requestedChange)["words"]
+    response, paused = None, False
     def consume(source, answer):
-        nonlocal subject, response
+        nonlocal subject, response, paused
         key, subject = recovery.subject(store, subject)
         history = store.recovery(key)
         contract = answer.get("contract")
@@ -89,12 +98,18 @@ def coach(store, provider, subject, frame=False):
                 store.cursor(replace(store.cursor(), decision=None, requestedChange=direction,
                                      failure=store.cursor().failure if subject.get("inputOwner") else ""))
             return None
+        if lead_repair and "ask" not in answer:
+            store.cursor(replace(store.cursor(), decision=None, failure=subject["failure"]))
+            paused = True
+            return
         label = ("Change the agreement or approach" if subject.get("checkFailure")
                  else "Try the planner's new approach")
         ask = answer.get("ask") or {"question": subject.get("question", "How should we continue?"),
             "options": [{"label": label, "means": answer["guidance"]}]}
         ask = {"question": ask["question"], "options": [
             {**o, "effect": "direct"} for o in ask["options"]]}
+        if lead_repair:
+            ask["question"] += "\n" + answer["why"]
         if frame and subject.get("checkFailure"):
             ask["question"] = subject["question"]
             ask["options"] = [o for o in ask["options"]
@@ -107,12 +122,22 @@ def coach(store, provider, subject, frame=False):
             ask["options"].append(option("Pause", "Pause here; your work is saved and can resume", "pause"))
         response = {**subject, "ask": ask, "planner": source}
     try:
-        inference.call(store, provider, questions.build("COACH", facts, coach_contracts=coach_contracts),
+        question = questions.build("COACH", facts, coach_contracts=coach_contracts)
+        if lead_repair:
+            question["prompt"] += (" Resolve this from the approved plan and the observed failure. "
+                "Ask the person only for knowledge or a decision only they can supply, and explain why.")
+        inference.call(store, provider, question,
                        consume=consume, field="guidance/contract/ask" if coach_contracts else "guidance/ask")
     except ConsumptionFailure as error:
         cause, shape = record_fault(store, error)
         recovery.failed(store, cause, shape=shape)
-        response = {**subject, "failure": shape["failure"], "ask": pause_ask(str(error))}
+        if lead_repair:
+            store.cursor(replace(store.cursor(), decision=None, failure=shape["failure"]))
+            paused = True
+        else:
+            response = {**subject, "failure": shape["failure"], "ask": pause_ask(str(error))}
+    if paused:
+        raise Waiting()
     return response
 
 
@@ -149,6 +174,10 @@ def step_fault(store, provider, error):
     repeated = shape in store.recovery(recovery.lineage(store))["seen"]
     recovery.failed(store, cause, shape=shape)
     subject = {"step": step, "tried": [failure], "failure": failure}
+    from . import lead
+    if lead.enabled(store) and features.enabled("leadSeldonOwns"):
+        store.cursor(replace(store.cursor(), failure=failure))
+        return lead_recovery(store, failure)
     if step == "PROVE":
         return owner_question(store, "Seldon", failure, retry="Run proof after the fault is fixed")
     if repeated:
@@ -170,6 +199,15 @@ def owner_question(store, owner, failure, *, retry=None):
         "question": f"{owner} owns the next change.\n{failure}", "options": options})
 
 
+def retired_owner_question(store, item):
+    from . import lead
+    subject = item["subject"]
+    owner = subject.get("inputOwner")
+    return (features.enabled("leadSeldonOwns") and lead.enabled(store)
+            and (owner in ("Seldon", "Builder")
+                 or owner == "Planner" and "ask" in item and "planner" not in subject))
+
+
 def route_repair(store, cause, owner, tree, failure, retry):
     cursor = store.cursor()
     unfinished = cursor.state == "BUILD" and owner == "Builder"
@@ -177,12 +215,21 @@ def route_repair(store, cause, owner, tree, failure, retry):
                                shape=[owner, tree] if unfinished else [owner, tree, failure])
     if owner == "Builder" and tree and not repeated:
         return
+    if features.enabled("leadSeldonOwns"):
+        return lead_recovery(store, failure, builder_stalled=unfinished and repeated)
     if owner == "Planner" and not repeated or owner == "Builder" and repeated:
         request(store, cursor.state, {"step": cursor.state, "inputOwner": "Planner", "failure": failure,
             "question": ("The builder returned to the same candidate tree.\n" + failure if unfinished else failure),
             "tried": [failure], **({"builderStalled": True} if unfinished else {})})
     else:
         owner_question(store, owner, failure, retry=retry)
+
+
+def lead_recovery(store, failure, *, builder_stalled=False):
+    step = store.cursor().state
+    question = ("The builder returned to the same candidate tree.\n" if builder_stalled else "") + failure
+    request(store, step, {"step": step, "inputOwner": "Planner", "failure": failure,
+        "question": question, "tried": [failure], "leadRecovery": True})
 
 
 def gate_ask(gate, subject):
@@ -405,6 +452,9 @@ def decide(store, provider, user):
     cursor = store.cursor()
     ref = cursor.decision
     item = store.read(ref)
+    if retired_owner_question(store, item):
+        store.cursor(replace(cursor, decision=None))
+        return
     if "ask" not in item:
         subject = coach(store, provider, item["subject"])
         if subject is None:
@@ -474,7 +524,8 @@ def decide(store, provider, user):
         if picked:
             direction = picked["label"] + ": " + picked["means"]
     if effect in ("pause", "direction") or (input_owner and effect == "direct" and
-            (words in prior_words or choice != "Other" and not item["subject"].get("builderStalled"))):
+            (words in prior_words or choice != "Other" and not (
+                item["subject"].get("builderStalled") or item["subject"].get("leadRecovery")))):
         raise Waiting()  # Keep the displayed request and step intact for a later answer.
     with store.transaction():
         cursor = store.cursor()
