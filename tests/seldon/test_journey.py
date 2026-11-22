@@ -1536,15 +1536,15 @@ def approve(request):
 @pytest.mark.parametrize("arm", ["hello-reopen", "cumulative-repair", "unchanged", "proof-owner", "plan-owner",
                                  "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay",
                                  "bound-note", "unresolved-plan", "missing-check", "guard-repair", "failed-witness",
-                                 "guard-feedback"])
+                                 "guard-feedback", "incomplete-witness", "unrelated-witness"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
     A replacement check can hide a regression, and a receipt can stall proof or lose a genuine question.
     Wave journeys never exercise Lead's B-bound spec, durable witness or owner-specific repair.
     missing-check catches an omitted builder witness blocking the guard before its real walk.
-    guard-repair catches a B-quoted defect described in prose falling through to C. Cumulative repair
-    uses a verbatim action label and does not check that unrelated guard actions carry forward.
+    guard-repair catches a demonstrated product defect falling through to C. Cumulative repair
+    does not check that unrelated guard actions carry forward.
     guide-replay catches a missing shell observation or a receipt typo unnecessarily reopening the builder.
     proof-owner catches an omitted proof subject disappearing at C or reopening the builder.
     The wave journeys do not exercise those Lead paths.
@@ -1556,6 +1556,9 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     Its timeout catches a fresh guard losing completed actions and large streams losing output.
     failed-witness catches PROVE masking an observed check failure when the guard has no separate defect.
     guard-feedback catches an empty guard observation reaching C; existing journeys always supply feedback.
+    incomplete-witness catches a green retained check hiding missing recorded steps of a multi-line B promise.
+    failed-witness uses a nonzero exit, and guard-repair observes the defect directly in the walk.
+    unrelated-witness catches an executed check for a different promise authorizing the same builder repair.
     """
     from types import SimpleNamespace
 
@@ -1595,6 +1598,12 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
                           "notMetIf": "The command exits with a status other than 2 or prints usage to stdout."}
     if arm == "bound-note":
         planned[0]["promises"][1]["notMetIf"] = "The command exits 2 or omits usage."
+    witness_result = ("Exit 2 with usage on stderr and empty stdout.\n"
+                      "Record status, stdout, and stderr as separate observed steps.\n"
+                      "A summary of the overall rejection loses the stream details.")
+    witness_case = arm in ("incomplete-witness", "unrelated-witness")
+    if witness_case:
+        planned[0]["promises"][1]["result"] = witness_result
 
     native = tmp_path / "lead_native.py"
     native.write_text(r"""
@@ -1778,6 +1787,20 @@ if arm == "guide-replay":
     checks.append({"command": [sys.executable, "-B", script.as_posix()], "promises": ["tryItGuide"]})
 else:
     checks[-1 if name == "hello" else 0]["promises"].append("tryItGuide")
+if arm in ("incomplete-witness", "unrelated-witness"):
+    if "resume" in args:
+        failure = facts["Exact failure"]
+        assert "B: Exit 2 with usage on stderr and empty stdout.\nRecord status, stdout, and stderr" in failure
+        assert "A summary of the overall rejection loses the stream details." in failure
+        assert "checks/usage.py" in failure and "Rejection summary" in failure and "exitCode': 0" in failure
+        assert "omits stdout and stderr" in failure
+        steps = "[('Status', r.returncode), ('Stdout', r.stdout), ('Stderr', r.stderr)]"
+    else:
+        steps = "[('Rejection summary', r.returncode == 2)]"
+    with err.open("a", encoding="utf-8") as output:
+        output.write("import json, os\nfrom pathlib import Path\n"
+                     "Path(os.environ['SELDON_EVIDENCE_DIR'], 'operation-lifecycle.json').write_text(\n"
+                     f"    json.dumps([{{'step': name, 'actual': value}} for name, value in {steps}]))\n")
 if arm in ("missing-check", "guard-repair"):
     checks = [checks[0]]
     checks[0]["promises"].append("tryItGuide")
@@ -1900,6 +1923,8 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                                                  ("Reject bad input", ["--help"], 2)):
                 if arm == "guard-repair" and facts.get("Previous walk") and expected_status == 0:
                     continue
+                if witness_case and not facts.get("Previous walk") and expected_status:
+                    continue
                 result = subprocess.run([sys.executable, "-B", "hello.py", *args], cwd=work,
                                         capture_output=True, text=True, check=False)
                 if arm != "guard-repair" or facts.get("Previous walk") or expected_status == 0:
@@ -1920,7 +1945,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                 red = subprocess.run(command, cwd=facts["Base"], capture_output=True, text=True)
                 actions.append({"action": "Say goodbye", "actual": bye.stdout, "baseline": red.stderr,
                                 "promises": ["scopeIn:bye"], "screenshots": []})
-            green = [row for row in facts["Observations"] if row["purpose"] == "milestone"]
+            green = [row for row in facts["Observations"].values() if row["purpose"] == "milestone"]
             assert all(row["cleanCheckout"] and row["executionStarted"] and row["cleanupVerified"]
                        and row["commit"] == facts["Candidate commit"] for row in green)
             assert arm in ("missing-check", "guard-repair") or any("usage error asserted" in row["stdout"] for row in green)
@@ -1932,22 +1957,45 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                 else:
                     answer["feedback"] = []
 
-            def finding(promise, kind, evidence, reason, quote=""):
-                answer["findings"].append({"promise": promise, "kind": kind, "quote": quote,
+            def defect(promise, reason, **link):
+                answer["findings"].append({"promise": promise, "kind": "defect", "field": "result",
+                                           "evidenceLink": link, "reason": reason})
+
+            def uncertain(evidence, reason):
+                answer["findings"].append({"promise": "quality:exact", "kind": "uncertain",
                                            "evidence": evidence, "reason": reason})
 
             if actions[0]["actual"] == "Broken, Ada!":
-                finding("scopeIn:hello", "defect", "Greet", "Restore the original greeting.",
-                        facts["Subjects"]["scopeIn:hello"]["result"])
+                defect("scopeIn:hello", "Restore the original greeting.", action=1)
             if arm == "guard-repair":
                 if facts.get("Previous walk"):
                     assert "+++ b/hello.py" in facts["Repair delta"] and "+    sys.exit(2)" in facts["Repair delta"]
                     assert actions[0]["actual"] == "Usage: pass a name"
                 elif actions[2]["actual"] == "Hello, --help!":
-                    finding("quality:exact", "defect", "python hello.py --help exited 0 and printed Hello, --help!",
-                            "The unsupported flag was treated as a name.", facts["Subjects"]["quality:exact"]["result"])
+                    defect("quality:exact", "python hello.py --help exited 0 and printed Hello, --help!", action=3)
             if arm == "bound-note":
-                finding("quality:exact", "uncertain", "Usage", "A remaining accessibility result is unverified.")
+                uncertain("Usage", "A remaining accessibility result is unverified.")
+            if witness_case:
+                (witness_id, witness), = [(ref, row) for ref, row in facts["Observations"].items()
+                                          if "quality:exact" in row["requirements"]]
+                assert witness["exitCode"] == 0
+                if facts.get("Previous walk"):
+                    assert witness["operationLifecycle"] == [
+                        {"step": "Status", "actual": 2}, {"step": "Stdout", "actual": ""},
+                        {"step": "Stderr", "actual": "Usage: pass a name\n"}]
+                else:
+                    assert witness["operationLifecycle"] == [{"step": "Rejection summary", "actual": True}]
+                    answer["feedback"] = [{"step": "Greet", "note": "The greeting is easy to scan."}]
+                    if arm == "incomplete-witness":
+                        defect("quality:exact", "The retained Rejection summary omits stdout and stderr.",
+                               observation=witness_id)
+                    elif facts.get("Exact corrections"):
+                        assert "does not cover quality:exact" in str(facts["Exact corrections"])
+                        uncertain("Greet", "No linked observation of the rejection was supplied.")
+                    else:
+                        unrelated, = [ref for ref, row in facts["Observations"].items()
+                                      if "scopeIn:hello" in row["requirements"]]
+                        defect("quality:exact", "I could not observe the rejection.", observation=unrelated)
             if arm == "weak-check":
                 actions[2]["baseline"] = ""
             if arm == "guide-replay":
@@ -1972,8 +2020,13 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             assert subject["review"]["revision"] == subject["plan"]
             assert reviewed_rejection in approved_milestone["promises"]
             assert all(text in approved_milestone["brief"] for text in reviewed_rejection.values())
+        if gate == "B" and witness_case:
+            approved, = request["subject"]["milestones"]
+            quality, = [p for p in approved["promises"] if p["vision"] == "quality:exact"]
+            assert quality["result"] == witness_result
         if gate == "CHECK-IN":
-            assert request["subject"]["guard"]["feedback"][0]["step"] == "Reject bad input"
+            step = "Greet" if arm == "unrelated-witness" else "Reject bad input"
+            assert request["subject"]["guard"]["feedback"][0]["step"] == step
         if gate == "C" and arm == "hello-reopen":
             guard = request["subject"]["guard"]
             assert Path(guard["evidenceFiles"]["command.txt"]).read_text("utf-8") == "Usage: pass a name"
@@ -1991,6 +2044,10 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             guard = {a["action"]: a for a in request["subject"]["guard"]["actions"]}
             assert guard["Reject bad input"]["commit"] == request["subject"]["commit"]
             assert guard["Greet"]["commit"] != request["subject"]["commit"]
+        if gate == "C" and arm == "incomplete-witness":
+            assert not request["subject"]["unverified"], "The green but incomplete witness never reached its builder"
+        if gate == "C" and arm == "unrelated-witness":
+            assert "guard:quality:exact" in request["subject"]["unverified"]
         if gate == "C" and arm in ("bound-note", "weak-check"):
             assert "guard:quality:exact" in request["subject"]["unverified"]
             if arm == "bound-note":
@@ -2123,9 +2180,23 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             stderr = (folder / "stderr.bin").read_bytes()
             assert len(stderr) > 4 * 1024**2 and stderr.rstrip().endswith(b"guard stderr end")
             assert run.store.records("outcome")[-1][2]["verification_complete"] is True
-        elif arm == "guard-repair":
+        elif arm in ("guard-repair", "incomplete-witness"):
             assert len(sessions) == 2 and sessions[0] == sessions[1]
             assert run.store.records("outcome")[-1][2]["verification_complete"] is True
+            if arm == "incomplete-witness":
+                (_, _, failure), = run.store.records("lead_failure")
+                assert failure["owner"] == "Builder" and failure["assignment"] == assignments[0][0]
+                assert failure["candidate"] != cursor.candidate
+                verdict = run.store.read(failure["evidence"][0])
+                finding, = verdict["findings"]
+                assert finding["quote"] == witness_result
+                ref = finding["evidenceLink"]["observation"]
+                observed = run.store.read(ref)
+                assert ref in failure["evidence"] and observed["commit"] == failure["candidate"]
+                assert observed["exitCode"] == 0 and observed["operationLifecycle"][0]["step"] == "Rejection summary"
+        elif arm == "unrelated-witness":
+            assert len(sessions) == 1 and not run.store.records("lead_failure")
+            assert run.store.records("outcome")[-1][2]["verification_complete"] is False
         elif milestone_count == 1:
             assert len(sessions) == (2 if arm == "plan-owner" else 1)
         else:

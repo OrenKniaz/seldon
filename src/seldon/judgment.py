@@ -6,8 +6,9 @@ from shutil import rmtree
 from tempfile import mkdtemp
 
 from . import architecture, features, fixups, gitwork, inference, plan, proof, questions
-from .observations import code_shape
-from .schema import REFS, TEXT, answer_schema, array, choice, folded_judge_schema, obj
+from .answers import Mismatch
+from .observations import code_shape, judge_fields
+from .schema import POSITION, REFS, TEXT, answer_schema, array, choice, folded_judge_schema, obj
 from .states import advance
 LEAD_BINDINGS = {"tryItGuide": {"result": "The documented steps work from a fresh checkout."},
                  "sourceAcceptance": {"result": "Real implementation with no stubs, mocks or missing behavior."}}
@@ -45,11 +46,18 @@ def milestone(store, provider, base, commit, subjects, current, refs):
         return source, prior
     prior = prior if prior.get("fixes") else {}
     subjects = {**subjects, **LEAD_BINDINGS}
+    observations = {ref: store.read(ref) for ref in refs}
+    executed = {ref: row for ref, row in observations.items() if row["commit"] == commit and proof.executed(row)}
+    links = [obj(action=POSITION)]
+    if executed:
+        links.append(obj(observation=choice(*executed)))
+    finding = dict(promise=choice(*subjects), reason=TEXT)
+    defect = obj(**finding, kind=choice("defect"), field=choice("action", "result", "notMetIf"),
+                 evidenceLink={"anyOf": links})
+    other = obj(**finding, kind=choice("uncertain", "amend", "note"), evidence=TEXT)
     schema = obj(answer=obj(why=TEXT, actions=array(obj(
         action=TEXT, actual=TEXT, promises=array(choice(*subjects)), baseline={"type": "string"}, screenshots=REFS)),
-        feedback=array(obj(step=TEXT, note=TEXT), minimum=1), findings=array(obj(
-            promise=choice(*subjects), kind=choice("defect", "uncertain", "amend", "note"),
-            quote={"type": "string"}, evidence=TEXT, reason=TEXT))))
+        feedback=array(obj(step=TEXT, note=TEXT), minimum=1), findings=array({"anyOf": [defect, other]})))
     runtime = Path(mkdtemp(prefix="guard-", dir=cursor.scratch))
     work, before, evidence_dir = (runtime / name for name in ("product", "base", "evidence"))
     question = questions.question("JUDGE",
@@ -60,16 +68,20 @@ def milestone(store, provider, base, commit, subjects, current, refs):
         "in scope. For keyboard access, Tab through the UI and operate controls with keys. Measure rendered "
         "text/background contrast. For SQLite integrity, query the file directly. "
         "Inspect source against B for stubs, mocks or gaps. Link actions or findings to each subject revisited. "
-        "Use uncertain for machine limits only; say what was partly seen and why. Give human feedback on a "
+        "Use uncertain for missing observations or machine limits; say what was partly seen and why. "
+        "Give human feedback on a "
         "screen or action, describing friction or ease. If blocked, describe the blocked step. "
-        "For a defect, quote B's result or notMetIf verbatim and record the reproducing action, expected and "
-        "actual in evidence, or cite the failed check ID. Use amend for ambiguous B and note for advice. "
+        "For a demonstrated defect, select the violated B field and link the evidence for that promise: "
+        "the one-based position in this answer's actions or an executed observation ID from Observations. "
+        "Explain how the linked result shows the product defect or materially broken retained witness, "
+        "even if its process exited successfully. Missing observation belongs to the guard. "
+        "Use amend for ambiguous B and note for advice. "
         "Use one plain command per action inside the copies and their runtime. Record denials without retrying. "
         "Use supplied clean-checkout observations for guide commands already run. On resume finish missing actions. "
         "Save evidence in SELDON_EVIDENCE_DIR, cite PNG names and stop your processes.",
         {"Candidate": str(work), "Candidate commit": commit, "Base": str(before), "Base commit": base,
          "Guide path": plan.GUIDE_PATH, "Subjects": subjects, "New promises": list(current),
-         "Observations": [store.read(ref) for ref in refs],
+         "Observations": observations,
          **({"Previous walk": {k: prior[k] for k in ("commit", "actions", "fixes", "limitations")},
              "Repair delta": gitwork.git(store.root.parent, "diff", "--no-ext-diff", "-U1", prior["commit"], commit)}
             if prior else {})}, schema,
@@ -79,34 +91,55 @@ def milestone(store, provider, base, commit, subjects, current, refs):
         execution={"walk": str(work)})
 
     def consume(ref, answer):
+        fixes, findings = [], []
+        for index, item in enumerate(answer["findings"]):
+            promise, kind, reason = (item[k] for k in ("promise", "kind", "reason"))
+            if kind != "defect":
+                findings.append({**item, "quote": ""})
+                continue
+            bound = subjects[promise]
+            quote = bound.get(item["field"]) if isinstance(bound, dict) else None
+            if not quote:
+                raise Mismatch(f"findings[{index}].field", f"Select an approved B field for {promise}.")
+            link = item["evidenceLink"]
+            if "action" in link:
+                position = link["action"]
+                action = answer["actions"][position - 1] if position <= len(answer["actions"]) else None
+                if not (action and promise in action["promises"] and action["action"].strip()
+                        and action["actual"].strip()):
+                    raise Mismatch(f"findings[{index}].evidenceLink",
+                                   f"Link a current action with an actual result for {promise}, or use uncertain.")
+                evidence, actual = action["action"], action["actual"]
+            else:
+                observation = link["observation"]
+                row = executed[observation]
+                if promise not in row["requirements"]:
+                    raise Mismatch(f"findings[{index}].evidenceLink",
+                                   f"Observation {observation} does not cover {promise}. "
+                                   "Link an observation or current action that covers it, or use uncertain.")
+                evidence = f"{observation}: {row['command']}"
+                details = judge_fields(row)
+                if row["evidenceFiles"]:
+                    details["evidenceFiles"] = row["evidenceFiles"]
+                actual = proof.explain([row]) + (f"\nRecorded witness: {details}" if details else "")
+            findings.append({**item, "quote": quote, "evidence": evidence})
+            fixes.append(f"B: {quote}\nReproduce: {evidence}\nObserved: {actual}\nDefect: {reason}")
+
         files = {p.name: store.artifact(p.read_bytes(), ref) for p in sorted(evidence_dir.iterdir())
                  if p.is_file() and p.resolve().parent == evidence_dir}
         actions = [{**a, "commit": commit, "screenshots": [
             files[n] for n in a["screenshots"] if n in files and proof.image(Path(files[n]).read_bytes())
         ]} for a in answer["actions"]]
-        broken = {key: row for row in proof.failures(store, refs) if proof.executed(row) for key in row["checks"]}
         walked = {p for a in actions for p in a["promises"]}
-        affected = walked | {f["promise"] for f in answer["findings"] if f["kind"] != "note"} | {
+        affected = walked | {f["promise"] for f in findings if f["kind"] != "note"} | {
             f["promise"] for f in prior.get("findings", []) if f["kind"] == "defect"}
         baselines = set(prior.get("baselines", [])) | {p for a in actions if a["baseline"].strip() for p in a["promises"]}
         result = {**answer, "source": ref, "commit": commit, "milestone": cursor.wave, "B": cursor.B,
                   "previous": source if prior else None, "baselines": sorted(baselines),
-                  "fixes": [], "amendments": [], "evidenceFiles": prior.get("evidenceFiles", {}) | files,
-                  "limitations": [f for f in prior.get("limitations", []) if f["promise"] not in affected]}
-        for item in answer["findings"]:
-            promise, kind, quote, evidence, reason = (item[k] for k in ("promise", "kind", "quote", "evidence", "reason"))
-            bound = subjects[promise] if isinstance(subjects[promise], dict) else {}
-            matches = quote and quote in (bound.get("result"), bound.get("notMetIf"))
-            check = broken.get(evidence)
-            observed = check and promise in check["requirements"]
-            if kind == "defect" and matches and (promise in walked or observed):
-                actual = proof.explain([check]) if observed else next(
-                    (a["actual"] for a in actions if a["action"] == evidence and promise in a["promises"]), reason)
-                result["fixes"].append(f"B: {quote}\nReproduce: {evidence}\nObserved: {actual}")
-            elif kind == "amend":
-                result["amendments"].append(f"{promise}: {reason}")
-            elif kind != "note":
-                result["limitations"].append(item)
+                  "fixes": fixes, "findings": findings, "evidenceFiles": prior.get("evidenceFiles", {}) | files,
+                  "amendments": [f"{f['promise']}: {f['reason']}" for f in findings if f["kind"] == "amend"],
+                  "limitations": [f for f in prior.get("limitations", []) if f["promise"] not in affected]
+                                 + [f for f in findings if f["kind"] == "uncertain"]}
         result["actions"] = actions + [
             {**a, "promises": kept} for a in prior.get("actions", [])
             if (kept := [p for p in a["promises"] if p not in affected])]
