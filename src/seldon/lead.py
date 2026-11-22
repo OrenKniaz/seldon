@@ -373,7 +373,7 @@ def prove(store, provider, cursor):
     try:
         if "error" in returned:
             raise ValueError(returned["error"])
-        checks, new = proof.milestone_checks(store, previous, cursor.wave, current, subjects, receipt, candidate)
+        checks = proof.milestone_checks(store, previous, cursor.wave, current, receipt, candidate)
     except ValueError as error:
         if returned.get("kind") == "RECEIPT":
             fail(store, cursor, str(error), "Seldon", candidate=candidate)
@@ -389,15 +389,13 @@ def prove(store, provider, cursor):
                        consume=lambda ref, _: store.cursor(replace(store.cursor(), leadReturn=ref)))
         return
 
-    declarations = checks | new
-    green = proof.observe(store, project, candidate, declarations, "milestone", candidate=candidate)
+    green = proof.observe(store, project, candidate, checks, "milestone", candidate=candidate)
     judge, verdict = judgment.milestone(store, provider, base, candidate, subjects, current, green)
     amendments, fixes = verdict["amendments"], verdict["fixes"]
     if amendments or fixes:
-        fail(store, cursor, ("Amend B proof: " if amendments else "") + "\n".join(amendments or fixes),
-             "Planner" if amendments else "Builder", candidate=candidate, evidence=[judge, *green],
-             replan=bool(amendments))
-        return
+        return fail(store, cursor, ("Amend B proof: " if amendments else "") + "\n".join(amendments or fixes),
+                    "Planner" if amendments else "Builder", candidate=candidate, evidence=[judge, *green],
+                    replan=bool(amendments))
     if failed := proof.failures(store, green):
         fail(store, cursor, proof.explain(failed), "Seldon", candidate=candidate, evidence=[judge, *red, *green])
         return
@@ -405,7 +403,7 @@ def prove(store, provider, cursor):
     with store.transaction():
         verdict = store.record("milestone_proof", {"milestone": cursor.wave, "plan": cursor.leadPlan,
             "commit": candidate, "assignment": cursor.leadBuild, "return": cursor.leadReturn,
-            "changed": changed, "checks": declarations,
+            "changed": changed, "checks": checks,
             "observations": green, "judge": judge,
             "previous": cursor.productVerdict})
         intent = store.record("publication", {"milestone": cursor.wave, "before": base,

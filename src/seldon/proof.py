@@ -167,12 +167,10 @@ def account(store, refs, delivered=None):
     return rows
 
 
-def milestone_checks(store, previous, milestone, current, subjects, receipt, candidate):
+def milestone_checks(store, previous, milestone, current, receipt, candidate):
     retained = dict(previous.get("checks", {}))
-    submitted = receipt["checks"] + ([{**receipt["walkthrough"], "promises": ["tryItGuide"]}]
-                                    if receipt.get("walkthrough") else [])
-    by_promise = [(key, check) for check in submitted for key in (check.get("promises") or [check["vision"]])]
-    required = set(current) | {"tryItGuide"}
+    submitted = receipt["checks"] + ([{**walkthrough, "promises": ["tryItGuide"]}]
+                                     if (walkthrough := receipt.get("walkthrough")) else [])
     root = store.root.parent
     # Backfill pre-witness receipts from the builder's recorded command and candidate.
     ancestor = previous
@@ -188,13 +186,11 @@ def milestone_checks(store, previous, milestone, current, subjects, receipt, can
         ancestor = store.read(ancestor["previous"]) if ancestor.get("previous") else {}
     retained = {key: check for key, check in retained.items() if "witness" in check}
     paths = list(dict.fromkeys(plan.safe_path(path) for path in receipt["checkPaths"]))
-    missing = set(paths) - set(gitwork.paths(root, candidate))
-    if missing:
+    if missing := set(paths) - set(gitwork.paths(root, candidate)):
         raise ValueError(f"Check files absent from candidate: {', '.join(sorted(missing))}.")
-    witness = {"commit": candidate, "paths": paths}
-    return retained, {f"milestone-{milestone}:{key}": {
-        "command": c["command"], "requirements": [key], "witness": witness}
-        for key, c in by_promise if key in required}
+    return retained | {f"milestone-{milestone}:{key}": {
+        "command": c["command"], "requirements": [key], "witness": {"commit": candidate, "paths": paths}}
+        for c in submitted for key in (c.get("promises") or [c["vision"]]) if key in current or key == "tryItGuide"}
 
 
 def gaps(store, candidate, observations):

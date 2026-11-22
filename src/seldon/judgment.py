@@ -39,79 +39,85 @@ def folded_subjects(document):
 
 def milestone(store, provider, base, commit, subjects, current, refs):
     cursor = store.cursor()
-    for ref, _, row in reversed(store.records("lead_verdict")):
-        if (row["commit"], row["milestone"], row["B"]) == (commit, cursor.wave, cursor.B):
-            return ref, row
+    source, prior = next(((ref, row) for ref, _, row in reversed(store.records("lead_verdict"))
+                          if (row["milestone"], row["B"]) == (cursor.wave, cursor.B)), (None, {}))
+    if prior.get("commit") == commit:
+        return source, prior
+    prior = prior if prior.get("fixes") else {}
     subjects = {**subjects, **LEAD_BINDINGS}
     schema = obj(answer=obj(why=TEXT, actions=array(obj(
         action=TEXT, actual=TEXT, promises=array(choice(*subjects)), baseline={"type": "string"}, screenshots=REFS)),
         feedback=array(obj(step=TEXT, note=TEXT)), findings=array(obj(
             promise=choice(*subjects), kind=choice("defect", "uncertain", "amend", "note"),
             quote={"type": "string"}, evidence=TEXT, reason=TEXT))))
-    fields = ("checks", "requirements", "purpose", "witness", "executedCommit", "commit", "command",
-              "exitCode", "executionStarted", "timedOut", "cleanCheckout", "cleanupVerified", "stdout",
-              "stderr", "operationLifecycle", "evidenceFiles")
-    observations = [{key: row[key] for key in fields if key in row} for row in map(store.read, refs)]
     runtime = Path(mkdtemp(prefix="guard-", dir=cursor.scratch))
     work, before, evidence_dir = (runtime / name for name in ("product", "base", "evidence"))
     question = questions.question("JUDGE",
-        "Walk the guide and every approved subject's action, result and notMetIf yourself on Candidate. "
-        "Use the real CLI, API or headless browser, including restart and failure. Inspect implementation "
-        "against the full approved scope for stubs, mocks and missing work, and record what you inspected. "
-        "Run the same user path for each new promise in Base without copying candidate files. "
-        "In baseline record the command and unmet result, or leave it empty. A missing shared entry point "
-        "need only be exercised once. Link each action you performed to all subjects it establishes. "
-        "Gather missing observations now. Link a subject only when recorded actions exercise it as a person "
-        "would; for partial coverage use uncertain, say partly observed and what remains missing. "
-        "Save browser PNGs and relevant output files directly in SELDON_EVIDENCE_DIR. Link screenshots by filename. "
-        "Report how screens and steps felt. A defect quotes B's result or notMetIf verbatim and cites an exact "
-        "action or failed check ID. Use amend for ambiguous B and note for advice. "
-        "Operate only in these copies and their runtime directories. Stop your processes.",
+        ("Re-walk failed and repair-affected subjects only. Reuse Base and unaffected evidence. "
+         if prior else "Walk each B promise on Candidate. For new promises record the unmet Base action in "
+         "baseline; reuse a shared Base failure for every promise it blocks. ")
+        + "Use the real CLI, API or headless browser. Exercise restart, failure and manual guide steps when "
+        "in scope. For keyboard access, Tab through the UI and operate controls with keys. Measure rendered "
+        "text/background contrast. For SQLite integrity, query the file directly. "
+        "Inspect source against B for stubs, mocks or gaps. Link actions or findings to each subject revisited. "
+        "Use uncertain for machine limits only; say what was partly seen and why. Describe how the UI felt. "
+        "For a defect, quote B's result or notMetIf verbatim and record the reproducing action, expected and "
+        "actual in evidence, or cite the failed check ID. Use amend for ambiguous B and note for advice. "
+        "Save evidence in SELDON_EVIDENCE_DIR, cite PNG names, stay in the copies and stop your processes.",
         {"Candidate": str(work), "Candidate commit": commit, "Base": str(before), "Base commit": base,
          "Guide path": plan.GUIDE_PATH, "Subjects": subjects, "New promises": list(current),
-         "Observations": observations}, schema,
-        [{"why": "The greeting is exact.", "actions": [{"action": "Run hello Ada", "actual": "Hello, Ada!",
-           "promises": [next(iter(subjects))], "baseline": "Run hello Ada: entry point absent.", "screenshots": []}],
-          "findings": [], "feedback": [{"step": "Greeting", "note": "The output is easy to scan."}]}],
+         "Observations": [store.read(ref) for ref in refs],
+         **({"Previous walk": {k: prior[k] for k in ("commit", "actions", "fixes", "limitations")},
+             "Repair delta": gitwork.git(store.root.parent, "diff", "--no-ext-diff", "-U1", prior["commit"], commit)}
+            if prior else {})}, schema,
+        [{"actions": [{"action": "Run hello Ada", "actual": "Hello, Ada!", "promises": [next(iter(subjects))],
+                      "baseline": "Run hello Ada: entry point absent.", "screenshots": []}],
+          "findings": [], "feedback": [{"step": "Greeting", "note": "Easy to scan."}], "why": "Exact greeting."}],
         execution={"walk": str(work)})
 
     def consume(ref, answer):
-        actions = answer["actions"]
-        files = {path.name: store.artifact(path.read_bytes(), ref) for path in sorted(evidence_dir.iterdir())
-                 if path.is_file() and path.resolve().parent == evidence_dir}
-        for action in actions:
-            action["screenshots"] = [files[name] for name in action["screenshots"]
-                                     if name in files and proof.image(Path(files[name]).read_bytes())]
-        walked = {row["action"]: row for row in actions}
+        files = {p.name: store.artifact(p.read_bytes(), ref) for p in sorted(evidence_dir.iterdir())
+                 if p.is_file() and p.resolve().parent == evidence_dir}
+        actions = [{**a, "commit": commit, "screenshots": [
+            files[n] for n in a["screenshots"] if n in files and proof.image(Path(files[n]).read_bytes())
+        ]} for a in answer["actions"]]
         broken = {key: row for row in proof.failures(store, refs) if proof.executed(row) for key in row["checks"]}
+        walked = {p for a in actions for p in a["promises"]}
+        affected = walked | {f["promise"] for f in answer["findings"] if f["kind"] != "note"} | {
+            f["promise"] for f in prior.get("findings", []) if f["kind"] == "defect"}
+        baselines = set(prior.get("baselines", [])) | {p for a in actions if a["baseline"].strip() for p in a["promises"]}
         result = {**answer, "source": ref, "commit": commit, "milestone": cursor.wave, "B": cursor.B,
-                  "fixes": [], "limitations": [], "amendments": [], "evidenceFiles": files}
+                  "previous": source if prior else None, "baselines": sorted(baselines),
+                  "fixes": [], "amendments": [], "evidenceFiles": prior.get("evidenceFiles", {}) | files,
+                  "limitations": [f for f in prior.get("limitations", []) if f["promise"] not in affected]}
         for item in answer["findings"]:
             promise, kind, quote, evidence, reason = (item[k] for k in ("promise", "kind", "quote", "evidence", "reason"))
             bound = subjects[promise] if isinstance(subjects[promise], dict) else {}
             matches = quote and quote in (bound.get("result"), bound.get("notMetIf"))
-            action, check = walked.get(evidence, {}), broken.get(evidence, {})
-            if kind == "defect" and matches and (promise in action.get("promises", ())
-                                                 or promise in check.get("requirements", ())):
-                actual = action["actual"] if action else proof.explain([check])
-                result["fixes"].append(f"B: {quote}\nReproduce: {evidence}\nObserved: {actual}\n{reason}")
+            check = broken.get(evidence)
+            observed = check and promise in check["requirements"]
+            if kind == "defect" and matches and (promise in walked or observed):
+                actual = proof.explain([check]) if observed else next(
+                    (a["actual"] for a in actions if a["action"] == evidence and promise in a["promises"]), reason)
+                result["fixes"].append(f"B: {quote}\nReproduce: {evidence}\nObserved: {actual}")
             elif kind == "amend":
                 result["amendments"].append(f"{promise}: {reason}")
             elif kind != "note":
                 result["limitations"].append(item)
-        limited = {item["promise"] for item in result["limitations"]}
-        for promise in (p for p in subjects if p not in limited):
-            linked = [a for a in actions if promise in a["promises"]]
-            if not linked or (promise in current and not any(a["baseline"].strip() for a in linked)):
-                reason = "No independent action recorded." if not linked else "Failure on the base was not observed."
-                result["limitations"].append({"promise": promise, "reason": reason})
+        result["actions"] = actions + [
+            {**a, "promises": kept} for a in prior.get("actions", [])
+            if (kept := [p for p in a["promises"] if p not in affected])]
+        linked = {p for a in result["actions"] for p in a["promises"]}
+        missing = dict.fromkeys(current.keys() - baselines, "Failure on the base was not observed.")
+        missing.update(dict.fromkeys(subjects.keys() - linked, "No independent action recorded."))
+        result["limitations"] += [{"promise": p, "reason": missing[p]} for p in subjects
+                                  if p in missing and not any(f["promise"] == p for f in result["limitations"])]
         store.record("lead_verdict", result)
 
-    evidence_dir.mkdir()
-    (runtime / "temp").mkdir()
+    for directory in (evidence_dir, runtime / "temp", work, before):
+        directory.mkdir()
     index = {"GIT_INDEX_FILE": str(runtime / "index")}
     for revision, copy in ((base, before), (commit, work)):
-        copy.mkdir()
         gitwork.git(store.root.parent, "read-tree", revision, env=index)
         gitwork.git(store.root.parent, "checkout-index", "--all", "--prefix=" + copy.as_posix() + "/", env=index)
     inference.call(store, provider, question, binding=commit, consume=consume)

@@ -1535,13 +1535,15 @@ def approve(request):
 @pytest.mark.fast
 @pytest.mark.parametrize("arm", ["hello-reopen", "cumulative-repair", "unchanged", "proof-owner", "plan-owner",
                                  "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay",
-                                 "bound-note", "unresolved-plan", "missing-check"])
+                                 "bound-note", "unresolved-plan", "missing-check", "guard-repair"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
     A replacement check can hide a regression, and a receipt can stall proof or lose a genuine question.
     Wave journeys never exercise Lead's B-bound spec, durable witness or owner-specific repair.
     missing-check catches an omitted builder witness blocking the guard before its real walk.
+    guard-repair catches a B-quoted defect described in prose falling through to C. Cumulative repair
+    uses a verbatim action label and does not check that unrelated guard actions carry forward.
     guide-replay catches a missing shell observation or a receipt typo unnecessarily reopening the builder.
     proof-owner catches an omitted proof subject disappearing at C or reopening the builder.
     The wave journeys do not exercise those Lead paths.
@@ -1659,6 +1661,12 @@ def implement(name, greeting):
         "    print('Usage: pass a name', file=sys.stderr)\n    sys.exit(2)\n"
         + f"print(f'{greeting}, {{sys.argv[1]}}!')\n", encoding="utf-8")
 implement(name, expected.split(",")[0])
+if arm == "guard-repair":
+    if "resume" in args:
+        assert "B: Exit 2 with usage on stderr and empty stdout" in facts["Exact failure"]
+        assert "python hello.py --help exited 0" in facts["Exact failure"]
+    else:
+        Path("hello.py").write_text("import sys\nprint(f'Hello, {sys.argv[1]}!')\n", encoding="utf-8")
 check_paths = [path.as_posix()]
 if arm == "hello-reopen":
     check_paths.append("hello.py")
@@ -1743,7 +1751,7 @@ if arm == "guide-replay":
     checks.append({"command": [sys.executable, "-B", script.as_posix()], "promises": ["tryItGuide"]})
 else:
     checks[-1 if name == "hello" else 0]["promises"].append("tryItGuide")
-if arm == "missing-check":
+if arm in ("missing-check", "guard-repair"):
     checks = [checks[0]]
     checks[0]["promises"].append("tryItGuide")
 receipt = {"outcome": "done", "summary": f"A visitor can run {name}. Resumed: {'resume' in args}.",
@@ -1844,15 +1852,19 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             actions = []
             for name, args, expected_status in (("Greet", ["Ada"], 0), ("Restart", ["Ada"], 0),
                                                  ("Reject bad input", ["--help"], 2)):
+                if arm == "guard-repair" and facts.get("Previous walk") and expected_status == 0:
+                    continue
                 result = subprocess.run([sys.executable, "-B", "hello.py", *args], cwd=work,
                                         capture_output=True, text=True, check=False)
-                assert result.returncode == expected_status
+                if arm != "guard-repair" or facts.get("Previous walk") or expected_status == 0:
+                    assert result.returncode == expected_status
                 promise = "quality:exact" if expected_status else "scopeIn:hello"
-                red = subprocess.run([sys.executable, "-B", "hello.py", *args], cwd=facts["Base"],
-                                     capture_output=True, text=True)
+                baseline = ""
+                if not (arm == "guard-repair" and facts.get("Previous walk")) and promise in facts["New promises"]:
+                    baseline = subprocess.run([sys.executable, "-B", "hello.py", *args], cwd=facts["Base"],
+                                              capture_output=True, text=True).stderr.strip()
                 actions.append({"action": name, "actual": (result.stdout or result.stderr).strip(),
-                                "promises": [promise, "tryItGuide"], "screenshots": [],
-                                "baseline": red.stderr.strip() if promise in facts["New promises"] else ""})
+                                "promises": [promise, "tryItGuide"], "screenshots": [], "baseline": baseline})
             if arm != "proof-owner":
                 actions.append({"action": "Inspect implementation", "actual": (work / "hello.py").read_text(),
                                 "promises": ["sourceAcceptance"], "baseline": "", "screenshots": []})
@@ -1865,7 +1877,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             green = [row for row in facts["Observations"] if row["purpose"] == "milestone"]
             assert all(row["cleanCheckout"] and row["executionStarted"] and row["cleanupVerified"]
                        and row["commit"] == facts["Candidate commit"] for row in green)
-            assert arm == "missing-check" or any("usage error asserted" in row["stdout"] for row in green)
+            assert arm in ("missing-check", "guard-repair") or any("usage error asserted" in row["stdout"] for row in green)
             answer = {"why": "Walked the command and rejection from the guide.", "actions": actions,
                       "findings": [], "feedback": [{"step": "Reject bad input", "note": "Usage is easy to scan."}]}
 
@@ -1876,6 +1888,13 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             if actions[0]["actual"] == "Broken, Ada!":
                 finding("scopeIn:hello", "defect", "Greet", "Restore the original greeting.",
                         facts["Subjects"]["scopeIn:hello"]["result"])
+            if arm == "guard-repair":
+                if facts.get("Previous walk"):
+                    assert "+++ b/hello.py" in facts["Repair delta"] and "+    sys.exit(2)" in facts["Repair delta"]
+                    assert actions[0]["actual"] == "Usage: pass a name"
+                elif actions[2]["actual"] == "Hello, --help!":
+                    finding("quality:exact", "defect", "python hello.py --help exited 0 and printed Hello, --help!",
+                            "The unsupported flag was treated as a name.", facts["Subjects"]["quality:exact"]["result"])
             if arm == "bound-note":
                 finding("quality:exact", "uncertain", "Usage", "A remaining accessibility result is unverified.")
             if arm == "weak-check":
@@ -1906,6 +1925,11 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         if gate == "C" and arm == "proof-owner":
             assert request["subject"]["unverified"] == {
                 "guard:sourceAcceptance": "not judged: No independent action recorded."}
+        if gate == "C" and arm == "guard-repair":
+            assert not request["subject"]["unverified"]
+            guard = {a["action"]: a for a in request["subject"]["guard"]["actions"]}
+            assert guard["Reject bad input"]["commit"] == request["subject"]["commit"]
+            assert guard["Greet"]["commit"] != request["subject"]["commit"]
         if gate == "C" and arm in ("bound-note", "weak-check"):
             assert "guard:quality:exact" in request["subject"]["unverified"]
             if arm == "bound-note":
@@ -2006,7 +2030,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             assert receipt["binding"] == proofs[0]["commit"]
         kept = [row for row in questions.observed(run.store, cursor.finalObservations)
                 if "scopeIn:hello" in row["requirements"]]
-        if milestone_count == 1 and arm not in ("guide-replay", "missing-check"):
+        if milestone_count == 1 and arm not in ("guide-replay", "missing-check", "guard-repair"):
             green = [run.store.read(ref) for ref in cursor.finalObservations]
             usage = [r for r in green if "quality:exact" in r["requirements"]]
             assert len(usage) == 1 and "tryItGuide" in usage[0]["requirements"]
@@ -2014,7 +2038,10 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         assert kept[0]["stdout"].strip() == "Hello, Ada!"
         assert gitwork.git(project, "rev-list", "--count", "HEAD") == str(1 + milestone_count)
         sessions = [row["session"] for _, _, row in run.store.records("call_session")]
-        if milestone_count == 1:
+        if arm == "guard-repair":
+            assert len(sessions) == 2 and sessions[0] == sessions[1]
+            assert run.store.records("outcome")[-1][2]["verification_complete"] is True
+        elif milestone_count == 1:
             assert len(sessions) == (2 if arm == "plan-owner" else 1)
         else:
             assert len(sessions) == 3 and sessions[0] != sessions[1] == sessions[2]
