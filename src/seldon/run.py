@@ -145,7 +145,7 @@ class Run:
                               ask=decisions.round_ask(answer, size_first=size_first))
 
         inference.call(store, self.provider, questions.align_round_brief(
-                           facts, sources=sources, size_first=size_first, micro=micro),
+                           facts, sources=sources, size_first=size_first, micro=micro, lead_mode=lead.enabled(store)),
                        check=lambda answer: questions.check_align_round(answer, sources, size),
                        consume=display, field="vision/questions")
 

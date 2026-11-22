@@ -156,7 +156,25 @@ def lead_milestone_example(handles, bound):
                          for handle in handles]}
 
 
-def align_round_brief(facts, *, sources, size_first=False, micro=False):
+LEAD_ALIGN_COACH = (
+    "Act as a product partner. Resolve what the person's words and prior choices already settle. "
+    "Look for the few places a reasonable builder could go two ways and the person would care: "
+    "ambiguous numbers or time windows, who can do what, edge cases they hinted at, and a concrete "
+    "improvement they may not have considered. When the same phrase could mean two different "
+    "user-visible results, quote the phrase and show which result each option would give. "
+    "Keep every option consistent with the stated requirements and earlier decisions. "
+    "Ask those open choices together, usually two to four for a rough first brief. For a detailed "
+    "brief, ask only what remains material. When the dream is genuinely unambiguous, ask zero "
+    "questions and say why in one line. "
+    "Name the affected commitment or scope. Give two to four concrete options with consequences, "
+    "putting your best recommendation first as a usable default. Seldon supplies Other. "
+    "Reflect the recommended choices in the displayed vision so the person can accept it as-is. "
+    "Use answers to shape the next proposal and keep independent work moving on sensible defaults "
+    "while an answer is open. Recommend done if the displayed vision is ready to accept. "
+    "Only the person can finish alignment at gate A.")
+
+
+def align_round_brief(facts, *, sources, size_first=False, micro=False, lead_mode=False):
     """Build one ALIGN round. Sources maps recorded handles to their exact user words."""
     schema, example = ALIGN_ROUND, tiny_round_example()
     sizing = micro and features.enabled("leadSizeByBuilder")
@@ -168,6 +186,33 @@ def align_round_brief(facts, *, sources, size_first=False, micro=False):
     if sizing:
         schema = obj(**schema["properties"], extraMilestoneReasons=REFS)
         example["extraMilestoneReasons"] = []
+    ask_well = lead_mode and features.enabled("leadAskWell")
+    if ask_well:
+        example.update(questions=[
+            {"affects": "scopeIn:greeting", "question": "What should the welcome desk show if a visitor gives no name?",
+             "options": [{"label": "Show a general welcome", "means": "The desk can greet visitors who skip their name"},
+                         {"label": "Ask for a name", "means": "Prompt the desk operator to enter a name before greeting"}]},
+            {"affects": "scopeIn:greeting", "question": "How long should a visitor's name stay visible at the shared desk?",
+             "options": [{"label": "Clear after the welcome", "means": "The next visitor arrives to a blank screen"},
+                         {"label": "Keep until the next entry", "means": "The desk can check the greeting before replacing it"}]},
+        ], why="A general welcome and a clear screen work for a shared desk; either default can be changed.")
+        example["vision"]["understanding"] = "Give visitors a personal welcome at a shared check-in desk"
+        example["vision"]["stories"][0]["outcome"] = (
+            "Show the supplied name or a general welcome, then clear the screen")
+        example["changed"] = "Visitors can skip giving a name, and the desk clears the welcome before the next visitor."
+        if micro:
+            example["microSpec"] = dict(
+                outcome=example["vision"]["understanding"],
+                design="Take an optional name at the desk, show the welcome and clear the screen. "
+                       "The guide exercises both kinds of welcome and the reset.",
+                promises=[
+                    {"vision": "scopeIn:greeting", "action": "Welcome Ada and then an unnamed visitor",
+                     "result": "See a named welcome, a cleared screen and a general welcome.",
+                     **({"notMetIf": "The second welcome still shows Ada."} if bound else {})},
+                    {"vision": "quality:clear", "action": "Read the welcome from the check-in spot",
+                     "result": "The greeting can be read before it clears.",
+                     **({"notMetIf": "The greeting clears before it can be read."} if bound else {})},
+                ])
     return question("ALIGN",
         "What product would you put in front of this person now? Name who makes what decision, "
         "what could mislead them, and what they would need tomorrow to repeat it. Rank the stories "
@@ -176,15 +221,16 @@ def align_round_brief(facts, *, sources, size_first=False, micro=False):
         "inventory tells you what is available. Carry values into scope only when the user required them. "
         "Cite the supplied Sources for choices that introduced or changed a story, criterion or exclusion. "
         "Keep earlier citations while they explain the current outcome. "
-        "Ask together only the choices whose answers materially change the proposed product. "
-        "Name the affected commitment or scope, show the proposed default first and explain what each "
-        "option changes for the user. Give two to four concrete options; Seldon supplies Other. "
-        "Give the changed outcome and why. Recommend done when the displayed defaults settle the product. "
+        + (LEAD_ALIGN_COACH + " Give the changed outcome and why. " if ask_well else
+           "Ask together only the choices whose answers materially change the proposed product. "
+           "Name the affected commitment or scope, show the proposed default first and explain what each "
+           "option changes for the user. Give two to four concrete options; Seldon supplies Other. "
+           "Give the changed outcome and why. Recommend done when the displayed defaults settle the product. ")
         + ALIGN_DESIGN + ("\n" + SIZE_ESTIMATE if size_first else "")
         + ("\n" + (BUILDER_SIZING if sizing else MICRO_SPEC) if micro else ""),
         {**facts, "Sources": sources, "Design guidance used by UI workers": CRAFT},
         obj(answer=schema), [example] if micro else [example, consequential_round_example()],
-        context={"sizeFirst": size_first})
+        context={"sizeFirst": size_first, **({"leadAskWell": True} if ask_well else {})})
 
 
 def check_align_round(answer, sources, owner_size=None):
@@ -404,10 +450,12 @@ def reviewed_decision(question, facts, context):
             task = ("Rank stories by value. Carry forward settled stories, handles and citations. Attach "
                     "exact required values to their supplied source and affected outcomes. Give each "
                     "quality promise something observable, including a distinctive direction for a UI. "
+                    + (LEAD_ALIGN_COACH + " " if context.get("leadAskWell") else
                     "Ask together only choices that materially change the product. Give two to four "
                     "concrete options with consequences, recommendation first. Seldon supplies Other. "
                     "Recommend done when settled. "
-                    "The user decides gate A. For an exact correction, address the rejected value and "
+                    "The user decides gate A. ")
+                    + "For an exact correction, address the rejected value and "
                     "its source.")
             if context.get("sizeFirst", SIZE_ESTIMATE in question["prompt"]):
                 task += ("\n\n" + SIZE_ESTIMATE + " Display micro/small/medium/big and use the schema values "

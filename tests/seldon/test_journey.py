@@ -1540,6 +1540,8 @@ def test_lead_sizes_by_builder_session(tmp_path, monkeypatch, staging):
 
     This catches the old non-tiny cutoff, a blank reason opening MILESTONES, and an ALIGN spec
     swallowing a requested split. The existing tiny Lead journeys miss the size cutoff.
+    For a single delivery, an unanswered export choice must keep its displayed default
+    when the owner locks A. The staged and tiny Lead cases have no product choice.
     """
     from seldon.decisions import Waiting
 
@@ -1550,6 +1552,10 @@ def test_lead_sizes_by_builder_session(tmp_path, monkeypatch, staging):
         dream += " " + review
     draft = questions.tiny_round_example()
     draft.update(questions=[], recommendation="done")
+    if staging == "single":
+        draft["questions"] = [{"affects": "scopeIn:export", "question": "Which books should the CSV include?",
+            "options": [{"label": "All saved books", "means": "Take the whole list to another app"},
+                        {"label": "Only finished books", "means": "Share just what has been read"}]}]
     vision = draft["vision"]
     vision.update(size="small", sizeWhy="Three commands sharing a small local store.", understanding=dream,
                   constraints=[], scopeOut=[], stories=[
@@ -1557,7 +1563,7 @@ def test_lead_sizes_by_builder_session(tmp_path, monkeypatch, staging):
          "constraints": [], "sources": ["kickoff"]}
         for handle, feature, story, outcome in (
             ("record", "Reading list", "Save a book and reopen the list.", "The saved title appears."),
-            ("export", "CSV export", "Export the reading list.", "The CSV contains the saved title."))])
+            ("export", "CSV export", "Export the reading list.", "The CSV contains every saved title."))])
     vision["quality"] = [{"handle": "errors", "criterion": "Missing titles get clear feedback",
                           "verification": "Try to add a book without a title.",
                           "constraints": [], "sources": ["kickoff"]}]
@@ -1594,6 +1600,11 @@ def test_lead_sizes_by_builder_session(tmp_path, monkeypatch, staging):
     def user(request):
         displayed[request["gate"]] = request["subject"]
         if request["gate"] == "A":
+            if staging == "single":
+                export_group = request["ask"]["groups"][0]
+                assert export_group["question"] == "Which books should the CSV include?"
+                assert next(o["label"] for o in export_group["options"]
+                            if o["id"] == export_group["default"]) == "All saved books"
             return {"request": request["request"], "replyId": "lock",
                     "selections": [{"groupId": "round", "optionId": "done"}]}
         raise Waiting()
@@ -1604,6 +1615,9 @@ def test_lead_sizes_by_builder_session(tmp_path, monkeypatch, staging):
         assert cursor.state == "B" and cursor.B is None, cursor.failure
         assert list(displayed) == ["A", "B"]
         assert displayed["A"]["vision"]["size"] == "small"
+        if staging == "single":
+            locked = run.store.read(cursor.A)["subject"]["vision"]
+            assert questions.commitments(locked)["scopeIn:export"]["outcome"] == "The CSV contains every saved title."
         approved = displayed["B"]["milestones"]
         expected = [[record, errors], [export]] if staging == "owner-review" else [[record, export, errors]]
         assert [item["promises"] for item in approved] == expected
