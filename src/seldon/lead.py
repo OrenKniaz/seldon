@@ -144,16 +144,18 @@ def review(store, provider, cursor):
     lines = {line: target for i, item in enumerate(items, 1) if i >= cursor.wave
              for line, target in spec_lines(item, i).items()}
     missing = {key: vision[key] for key in vision if not any(key in obligations(m, vision) for m in items)}
+    unresolved = {**REFS, "description": "A gap in the proposed plan that needs a decision before B."}
     schema = obj(answer=obj(amendments=array(obj(target=choice(*lines), replacement=TEXT)),
-                            unresolved=REFS, why=TEXT))
+                            unresolved=unresolved, why=TEXT))
     question = questions.question("REVIEW",
-        "Review coverage of the accepted promises and guide, and check staging. Reconcile each action, result "
-        "and any notMetIf with one another, the accepted constraints and the owner's exact words, which govern "
-        "conflicts. Each notMetIf must describe a wrong observable outcome of the action. For a material gap "
-        "or contradiction, give the editable line handle and full replacement text. Use unresolved for gaps "
-        "requiring a coverage or staging decision.",
+        "Review the proposed plan's coverage of accepted promises and guide, requested milestone order, and "
+        "prospective check design. Reconcile each action, result and any notMetIf with one another, the accepted "
+        "constraints and the owner's exact words, which govern conflicts. Each notMetIf must describe a wrong "
+        "observable outcome of the action. For a material gap or contradiction, give the editable line handle "
+        "and full replacement text. Use unresolved for unassigned promises or missing necessary plans and "
+        "decisions, not for post-build observations or evidence that cannot yet exist; those are checked after B.",
         {"Builder spec": "\n\n".join(m["brief"] for m in items), "Unassigned promises": missing},
-        schema, [{"amendments": [], "unresolved": [], "why": "The named greeting is specified and exercised."}])
+        schema, [{"amendments": [], "unresolved": [], "why": "The spec names the greeting and a check for it."}])
 
     def consume(source, answer):
         providers = store.read(cursor.kickoff)["setup"].get("providers", {})
