@@ -1537,7 +1537,8 @@ def approve(request):
 @pytest.mark.parametrize("arm", ["hello-reopen", "cumulative-repair", "unchanged", "proof-owner", "plan-owner",
                                  "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay",
                                  "bound-note", "unresolved-plan", "missing-check", "guard-repair", "failed-witness",
-                                 "guard-feedback", "incomplete-witness", "unrelated-witness"])
+                                 "guard-feedback", "incomplete-witness", "unrelated-witness", "carry-witness",
+                                 "carry-with-limit"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
@@ -1560,6 +1561,9 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     incomplete-witness catches a green retained check hiding missing recorded steps of a multi-line B promise.
     failed-witness uses a nonzero exit, and guard-repair observes the defect directly in the walk.
     unrelated-witness catches an executed check for a different promise authorizing the same builder repair.
+    carry-witness catches C treating a missing lifecycle row as missing product proof after a real guard walk.
+    carry-with-limit catches the wc04 repair loop when another aspect of the same promise remains uncertain.
+    incomplete-witness has no independent observation; neither carry case replaces its required repair.
     """
     from types import SimpleNamespace
 
@@ -1602,7 +1606,8 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     witness_result = ("Exit 2 with usage on stderr and empty stdout.\n"
                       "Record status, stdout, and stderr as separate observed steps.\n"
                       "A summary of the overall rejection loses the stream details.")
-    witness_case = arm in ("incomplete-witness", "unrelated-witness")
+    carry_case = arm in ("carry-witness", "carry-with-limit")
+    witness_case = carry_case or arm in ("incomplete-witness", "unrelated-witness")
     if witness_case:
         planned[0]["promises"][1]["result"] = witness_result
 
@@ -1788,7 +1793,7 @@ if arm == "guide-replay":
     checks.append({"command": [sys.executable, "-B", script.as_posix()], "promises": ["tryItGuide"]})
 else:
     checks[-1 if name == "hello" else 0]["promises"].append("tryItGuide")
-if arm in ("incomplete-witness", "unrelated-witness"):
+if arm in ("incomplete-witness", "unrelated-witness", "carry-witness", "carry-with-limit"):
     if "resume" in args:
         failure = facts["Exact failure"]
         assert "B: Exit 2 with usage on stderr and empty stdout.\nRecord status, stdout, and stderr" in failure
@@ -1798,10 +1803,17 @@ if arm in ("incomplete-witness", "unrelated-witness"):
         steps = "[('Status', r.returncode), ('Stdout', r.stdout), ('Stderr', r.stderr)]"
     else:
         steps = "[('Rejection summary', r.returncode == 2)]"
+    evidence_rows = f"[{{'step': name, 'actual': value}} for name, value in {steps}]"
+    if arm in ("carry-witness", "carry-with-limit"):
+        evidence_rows += (" + [{'step': 'Reject bad input', 'observed': False, 'reason': 'No stream record', "
+                          "'requirements': ['quality:exact']}]")
+    if arm == "carry-with-limit":
+        evidence_rows += (" + [{'step': 'Follow the guide manually', 'observed': False, "
+                          "'requirements': ['tryItGuide']}]")
     with err.open("a", encoding="utf-8") as output:
         output.write("import json, os\nfrom pathlib import Path\n"
                      "Path(os.environ['SELDON_EVIDENCE_DIR'], 'operation-lifecycle.json').write_text(\n"
-                     f"    json.dumps([{{'step': name, 'actual': value}} for name, value in {steps}]))\n")
+                     f"    json.dumps({evidence_rows}))\n")
 if arm in ("missing-check", "guard-repair"):
     checks = [checks[0]]
     checks[0]["promises"].append("tryItGuide")
@@ -1924,7 +1936,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                                                  ("Reject bad input", ["--help"], 2)):
                 if arm == "guard-repair" and facts.get("Previous walk") and expected_status == 0:
                     continue
-                if witness_case and not facts.get("Previous walk") and expected_status:
+                if witness_case and not carry_case and not facts.get("Previous walk") and expected_status:
                     continue
                 result = subprocess.run([sys.executable, "-B", "hello.py", *args], cwd=work,
                                         capture_output=True, text=True, check=False)
@@ -1937,6 +1949,10 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                                               capture_output=True, text=True).stderr.strip()
                 actions.append({"action": name, "actual": (result.stdout or result.stderr).strip(),
                                 "promises": [promise, "tryItGuide"], "screenshots": [], "baseline": baseline})
+                if carry_case and expected_status:
+                    assert (result.returncode, result.stdout, result.stderr) == (2, "", "Usage: pass a name\n")
+                    actions[-1]["actual"] = repr((result.returncode, result.stdout, result.stderr))
+                    rejection = len(actions)
             if arm != "proof-owner":
                 actions.append({"action": "Inspect implementation", "actual": (work / "hello.py").read_text(),
                                 "promises": ["sourceAcceptance"], "baseline": "", "screenshots": []})
@@ -1985,11 +2001,19 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                         {"step": "Status", "actual": 2}, {"step": "Stdout", "actual": ""},
                         {"step": "Stderr", "actual": "Usage: pass a name\n"}]
                 else:
-                    assert witness["operationLifecycle"] == [{"step": "Rejection summary", "actual": True}]
-                    answer["feedback"] = [{"step": "Greet", "note": "The greeting is easy to scan."}]
-                    if arm == "incomplete-witness":
+                    lifecycle = witness["operationLifecycle"]
+                    assert lifecycle[0] == {"step": "Rejection summary", "actual": True}
+                    if carry_case:
+                        assert lifecycle[1]["observed"] is False
+                    else:
+                        answer["feedback"] = [{"step": "Greet", "note": "The greeting is easy to scan."}]
+                    if arm == "incomplete-witness" or carry_case:
                         defect("quality:exact", "The retained Rejection summary omits stdout and stderr.",
                                observation=witness_id)
+                        if carry_case:
+                            answer["findings"][-1].update(witnessPath="checks/usage.py", provedAction=rejection)
+                            if arm == "carry-with-limit":
+                                uncertain("Reject bad input", "A separate shell rendering remains unobserved.")
                     elif facts.get("Exact corrections"):
                         assert "does not cover quality:exact" in str(facts["Exact corrections"])
                         uncertain("Greet", "No linked observation of the rejection was supplied.")
@@ -2047,6 +2071,16 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             assert guard["Greet"]["commit"] != request["subject"]["commit"]
         if gate == "C" and arm == "incomplete-witness":
             assert not request["subject"]["unverified"], "The green but incomplete witness never reached its builder"
+        if gate == "C" and carry_case:
+            subject = request["subject"]
+            gap, = subject["guard"]["carriedWitnesses"]
+            assert gap["witnessPath"] == "checks/usage.py" and gap["quote"] == witness_result
+            action = subject["guard"]["actions"][gap["provedAction"] - 1]
+            assert action["commit"] == subject["commit"] and action["actual"] == repr((2, "", "Usage: pass a name\n"))
+            assert subject["unverified"] == ({
+                "guard:quality:exact": "not judged: A separate shell rendering remains unobserved.",
+                "tryItGuide:walkthrough": "not judged: Follow the guide manually",
+            } if arm == "carry-with-limit" else {})
         if gate == "C" and arm == "unrelated-witness":
             assert "guard:quality:exact" in request["subject"]["unverified"]
         if gate == "C" and arm in ("bound-note", "weak-check"):
@@ -2195,6 +2229,9 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                 observed = run.store.read(ref)
                 assert ref in failure["evidence"] and observed["commit"] == failure["candidate"]
                 assert observed["exitCode"] == 0 and observed["operationLifecycle"][0]["step"] == "Rejection summary"
+        elif carry_case:
+            assert len(sessions) == 1 and not run.store.records("lead_failure")
+            assert run.store.records("outcome")[-1][2]["verification_complete"] is (arm == "carry-witness")
         elif arm == "unrelated-witness":
             assert len(sessions) == 1 and not run.store.records("lead_failure")
             assert run.store.records("outcome")[-1][2]["verification_complete"] is False

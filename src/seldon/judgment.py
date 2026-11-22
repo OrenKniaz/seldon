@@ -57,9 +57,12 @@ def milestone(store, provider, base, commit, subjects, current, refs):
     defect = obj(**finding, kind=choice("defect"), field=choice("action", "result", "notMetIf"),
                  evidenceLink={"anyOf": links})
     other = obj(**finding, kind=choice("uncertain", "amend", "note"), evidence=TEXT)
+    carry = features.enabled("leadWitnessCarry")
+    carried = store.read(cursor.productVerdict).get("carriedWitnesses", []) if cursor.productVerdict else []
+    witness = [obj(**defect["properties"], witnessPath=TEXT, provedAction=POSITION)] if carry else []
     schema = obj(answer=obj(why=TEXT, actions=array(obj(
         action=TEXT, actual=TEXT, promises=array(choice(*subjects)), baseline={"type": "string"}, screenshots=REFS)),
-        feedback=array(obj(step=TEXT, note=TEXT), minimum=1), findings=array({"anyOf": [defect, other]})))
+        feedback=array(obj(step=TEXT, note=TEXT), minimum=1), findings=array({"anyOf": [defect, other, *witness]})))
     runtime = Path(mkdtemp(prefix="guard-", dir=cursor.scratch))
     work, before, evidence_dir = (runtime / name for name in ("product", "base", "evidence"))
     question = questions.question("JUDGE",
@@ -78,11 +81,21 @@ def milestone(store, provider, base, commit, subjects, current, refs):
         "even if its process exited successfully. Missing observation belongs to the guard. "
         "Use amend for ambiguous B and note for advice. "
         "Use one plain command per action inside the copies and their runtime. Record denials without retrying. "
-        "Reuse exact clean-checkout guide observations. On resume finish missing actions. "
+        + ("Recheck carried gaps. For witness-only defects give the exact witnessPath and the one-based "
+           "provedAction of a separate successful real-product action for that B promise. If missing, obtain "
+           "the observation or report uncertain. Omit these fields for product defects or ambiguous scope. " if carry else "")
+        + ("Start with the recorded commands and clean-checkout observations. Reuse demonstrated steps. "
+           "Read the guide once for missing steps and focus source reads on the relevant product and witness paths. "
+           "Compare commands the witness actually runs with its recorded steps. Use one product launch for related "
+           "actions when practical. Aim for six tool calls on a straightforward walk and continue for any unresolved B evidence. "
+           if features.enabled("leadFocusedWalk") else
+           "Reuse exact clean-checkout guide observations. ")
+        + "On resume finish missing actions. "
         "Save evidence in SELDON_EVIDENCE_DIR, cite PNG names and stop your processes.",
         {"Candidate": str(work), "Candidate commit": commit, "Base": str(before), "Base commit": base,
          "Guide path": questions.GUIDE_PATH, "Subjects": subjects, "New promises": list(current),
          "Observations": observations,
+         **({"Carried witness tasks": carried} if carried and carry else {}),
          **({"Previous walk": {k: prior[k] for k in ("commit", "actions", "fixes", "limitations")},
              "Repair delta": gitwork.git(store.root.parent, "diff", "--no-ext-diff", "-U1", prior["commit"], commit)}
             if prior else {})}, schema,
@@ -123,6 +136,15 @@ def milestone(store, provider, base, commit, subjects, current, refs):
                 if row["evidenceFiles"]:
                     details["evidenceFiles"] = row["evidenceFiles"]
                 actual = proof.explain([row]) + (f"\nRecorded witness: {details}" if details else "")
+            position, path = item.get("provedAction", 0), item.get("witnessPath", "")
+            if position:
+                walk = answer["actions"][position - 1:position]
+                rows = [executed[link["observation"]]] if "observation" in link else executed.values()
+                scoped = path == questions.GUIDE_PATH or (path.startswith(("checks/", "docs/try-it/")) and any(
+                    promise in row["requirements"] and path in row.get("witness", {}).get("paths", ()) for row in rows))
+                if (scoped and position != link.get("action") and walk and promise in walk[0]["promises"]
+                        and walk[0]["action"].strip() and walk[0]["actual"].strip()):
+                    item = {**item, "carry": True}
             findings.append({**item, "quote": quote, "evidence": evidence})
             fixes.append(f"B: {quote}\nReproduce: {evidence}\nObserved: {actual}\nDefect: {reason}")
 
@@ -164,8 +186,12 @@ def milestone(store, provider, base, commit, subjects, current, refs):
 
 
 def walk_feedback(store, proof_ref):
-    verdict = store.read(store.read(proof_ref)["judge"])
-    return {key: verdict.get(key) for key in ("why", "actions", "feedback", "findings", "evidenceFiles")}
+    proof = store.read(proof_ref)
+    verdict = store.read(proof["judge"])
+    feedback = {key: verdict.get(key) for key in ("why", "actions", "feedback", "findings", "evidenceFiles")}
+    if "carriedWitnesses" in proof:
+        feedback["carriedWitnesses"] = proof["carriedWitnesses"]
+    return feedback
 
 
 def folded_brief(store, document, owner, observations):
@@ -433,19 +459,27 @@ def not_judged(store):
                                + [{"subject": ref, "answer": store.read(row.judgment).get("answer", {})}
                                   for ref, row in store.units().items() if row.judgment])
                      if v["answer"].get("verdict") == "not judged"})
+    # Lead's guard can substitute for a missing lifecycle result only at the same proof boundary.
+    proof = store.read(cursor.productVerdict) if cursor.productVerdict else {}
+    guard = store.read(proof["judge"]) if "judge" in proof else {}
+    covered = {gap["promise"] for gap in proof.get("carriedWitnesses", ())
+               if gap["commit"] == cursor.candidate and gap["judge"] == proof["judge"]}
     limits = []
     for ref in cursor.finalObservations:
         observation = store.read(ref)
         if observation["commit"] != cursor.candidate or observation["purpose"] not in ("final", "milestone"):
             continue
+        observed_promises = covered.intersection(observation.get("requirements", ()))
         for row in observation.get("operationLifecycle", ()):
+            promises = row.get("requirements") or observation.get("requirements")
+            if isinstance(promises, list) and promises and all(isinstance(p, str) and p in observed_promises for p in promises):
+                continue
             step = row.get("step") or row.get("operation") or row.get("command_or_interaction")
             if row.get("observed") is False and isinstance(step, str) and step.strip():
                 reason = row.get("reason")
                 limits.append(f"{step}: {reason}" if isinstance(reason, str) and reason.strip() else step)
-    if cursor.productVerdict and (judge := store.read(cursor.productVerdict).get("judge")):
-        deferred.update({f"guard:{item['promise']}": "not judged: " + item["reason"]
-                         for item in store.read(judge).get("limitations", [])})
+    deferred.update({f"guard:{item['promise']}": "not judged: " + item["reason"]
+                     for item in guard.get("limitations", [])})
     if limits:
         deferred["tryItGuide:walkthrough"] = "not judged: " + "; ".join(dict.fromkeys(limits))
     return deferred

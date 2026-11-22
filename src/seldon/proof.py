@@ -188,9 +188,13 @@ def milestone_checks(store, previous, milestone, current, receipt, candidate):
     paths = list(dict.fromkeys(gitwork.safe_path(path) for path in receipt["checkPaths"]))
     if missing := set(paths) - set(gitwork.paths(root, candidate)):
         raise ValueError(f"Check files absent from candidate: {', '.join(sorted(missing))}.")
-    return retained | {f"milestone-{milestone}:{key}": {
+    carried = {gap["promise"] for gap in previous.get("carriedWitnesses", ())}
+    renewed = {f"milestone-{milestone}:{key}": {
         "command": c["command"], "requirements": [key], "witness": {"commit": candidate, "paths": paths}}
-        for c in submitted for key in (c.get("promises") or [c["vision"]]) if key in current or key == "tryItGuide"}
+        for c in submitted for key in (c.get("promises") or [c["vision"]])
+        if key in current or key in carried or key == "tryItGuide"}
+    replaced = carried & {c["requirements"][0] for c in renewed.values()}
+    return {key: c for key, c in retained.items() if replaced.isdisjoint(c["requirements"])} | renewed
 
 
 def gaps(store, candidate, observations):

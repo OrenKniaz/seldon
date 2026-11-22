@@ -199,6 +199,10 @@ def render_builder(question):
     context = questions.labelled({k: v for k, v in facts.items() if k != "Milestone brief" and k not in projected})
     if rendered:
         rules = rules.removesuffix(questions.GUIDE_WALKTHROUGH).rstrip()
+    if features.enabled("leadSharedWitness"):
+        rules += ("\nUse one runnable path for guide and regression coverage wherever they exercise the same "
+                  "behavior. Link its command to every promise it demonstrates. Record each actual command "
+                  "or interaction and result when it runs, including helper invocations required by B.")
     return "\n\n".join((brief, rules, context, "Return schema\n" + encode(question["schema"]),
                         "Example receipt\n" + encode(question["examples"][0]))), rules
 
@@ -256,9 +260,16 @@ def build(store, provider, cursor):
     if not cursor.leadBuild:
         gitwork.unchanged(project, cursor.candidate)
         workspace = gitwork.admit(project, cursor.scratch, cursor.candidate)
+        carried = store.read(cursor.productVerdict).get("carriedWitnesses", []) if cursor.productVerdict else []
+        brief = item["brief"]
+        if carried:
+            brief = ("First task: repair and redeclare these carried witnesses before building the milestone.\n"
+                     + "\n".join(f"- {gap['witnessPath']} ({gap['promise']}): {gap['reason']}\n"
+                                 f"  Approved standard: {gap['quote']}" for gap in carried)
+                     + "\n\n" + brief)
         with store.transaction():
             ref = store.record("lead_assignment", {"milestone": cursor.wave, "plan": cursor.leadPlan,
-                "B": cursor.B, "base": cursor.candidate, "workspace": workspace, "brief": item["brief"]})
+                "B": cursor.B, "base": cursor.candidate, "workspace": workspace, "brief": brief})
             cursor = store.cursor(replace(cursor, leadBuild=ref))
     assignment = store.read(cursor.leadBuild)
     calls = attempts(store, cursor.leadBuild)
@@ -361,6 +372,7 @@ def prove(store, provider, cursor):
     current = obligations(items[cursor.wave - 1], vision)
     subjects = {key: p for item in items[:cursor.wave] for key, p in obligations(item, vision).items()}
     previous = store.read(cursor.productVerdict) if cursor.productVerdict else {}
+    pending = previous.get("carriedWitnesses", [])
     _, candidate, changed = gitwork.snapshots(assignment["workspace"], base, ["**"], [], cursor.scratch)
     tree = gitwork.git(project, "rev-parse", f"{candidate}^{{tree}}")
     snap = next((row for _, _, row in reversed(store.records("lead_candidate"))
@@ -393,19 +405,27 @@ def prove(store, provider, cursor):
     green = proof.observe(store, project, candidate, checks, "milestone", candidate=candidate)
     judge, verdict = judgment.milestone(store, provider, base, candidate, subjects, current, green)
     amendments, fixes = verdict["amendments"], verdict["fixes"]
-    if amendments or fixes:
+    carried = [{**item, "judge": judge, "commit": candidate} for item in verdict["findings"]
+               if item.get("carry") and features.enabled("leadWitnessCarry")]
+    if amendments or len(carried) != len(fixes):
         return fail(store, cursor, ("Amend B proof: " if amendments else "") + "\n".join(amendments or fixes),
                     "Planner" if amendments else "Builder", candidate=candidate, evidence=[judge, *green],
                     replan=bool(amendments))
     if failed := proof.failures(store, green):
         fail(store, cursor, proof.explain(failed), "Seldon", candidate=candidate, evidence=[judge, *green])
         return
+    renewed = {promise for c in checks.values() if c["witness"]["commit"] == candidate for promise in c["requirements"]}
+    resolved = renewed - {item["promise"] for item in verdict["limitations"]}
+    replaced = {(gap["promise"], gap["witnessPath"]) for gap in carried}
+    carried += [gap for gap in pending if gap["promise"] not in resolved
+                and (gap["promise"], gap["witnessPath"]) not in replaced]
     gitwork.unchanged(project, base)
     with store.transaction():
         verdict = store.record("milestone_proof", {"milestone": cursor.wave, "plan": cursor.leadPlan,
             "commit": candidate, "assignment": cursor.leadBuild, "return": cursor.leadReturn,
             "changed": changed, "checks": checks,
             "observations": green, "judge": judge,
+            **({"carriedWitnesses": carried} if carried else {}),
             "previous": cursor.productVerdict})
         intent = store.record("publication", {"milestone": cursor.wave, "before": base,
             "commit": candidate, "verdict": verdict, "observations": green})
