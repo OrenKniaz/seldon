@@ -1,5 +1,6 @@
 """C12/C19/C23/I6; R6/R9/R11: Git snapshots, isolated worktrees and replayable publication."""
 
+import fnmatch
 import json
 import os
 import subprocess
@@ -8,11 +9,24 @@ import uuid
 from dataclasses import replace
 from functools import lru_cache
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .desktop import environment
-from .plan import matches, safe_path
 from .states import advance
+
+
+def safe_path(value):
+    path = PurePosixPath(value)
+    if (not value or "\\" in value or ":" in value or path.is_absolute()
+            or path.as_posix() != value
+            or any(p in ("..", ".git", ".seldon") or p.endswith((".", " ")) for p in path.parts)):
+        raise ValueError(f"Use a project-relative path or pattern: {value!r}")
+    return value
+
+
+def matches(path, patterns):
+    # ** spans directories; a directory's /** includes its complete subtree.
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 
 def git(root, *args, data=None, env=None, binary=False):

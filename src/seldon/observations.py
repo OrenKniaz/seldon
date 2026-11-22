@@ -144,3 +144,8 @@ def judge_fields(body):
     if "operationLifecycle" in body:
         facts["operationLifecycle"] = _lifecycle_facts(body["operationLifecycle"])
     return facts
+
+
+def final_guide_checks(store):
+    from .plan import execution, guide_checks
+    return guide_checks(execution(store))

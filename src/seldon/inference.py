@@ -1,10 +1,9 @@
 """C1/C4/C18/I10; R8/R12/R13: recorded strict calls and two bounded transport recoveries."""
 
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
-from . import architecture, features, questions
+from . import answers, features, questions
 from .answers import ConsumptionFailure, Mismatch, normalised, recorder
 from .providers import Deadline, ProviderFailure, ResumeUnavailable, role_for
 
@@ -93,6 +92,7 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
             with store.transaction():
                 record = recorder(store)
                 if kind == "ARCHITECT" and original["facts"].get("Previous architecture") and "scope" not in answer:
+                    from . import architecture
                     facts = original["facts"]
                     previous = facts["Previous architecture"]
                     finished = len(previous["waves"]) - len(facts.get("Remaining waves", previous["waves"]))
@@ -133,7 +133,7 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                 if not retained:
                     store.record("attempt_end", {"attempt": attempt, "result": result, "finishedAt": time.time()})
             return result, answer
-        except architecture.ContractGap:
+        except answers.ContractGap:
             raise  # A missing agreement is a planner decision, not an unusable answer.
         except Exception as error:
             failed_field = error.field if isinstance(error, Mismatch) else field
@@ -150,29 +150,3 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
             correction = {"Rejected answer": answer, "Errors": [reason]}
             retained = None
             question = {**original, "facts": {**original["facts"], "Exact corrections": [correction]}}
-
-
-def batch(store, provider, pending, check=lambda answer, question: None,
-          consume=lambda subject, source, answer: None, field="answer"):
-    """Record independent replies on one candidate; only the controller applies their outcomes."""
-    cursor = store.cursor()
-    bindings = {s: [cursor.candidate, cursor.revision, q["kind"], s] for s, q in pending.items()}
-    recorded = {tuple(b["binding"]): (r, b["answer"]) for r, _, b in store.records("answer")
-                if b.get("binding")}
-
-    def ask(subject):
-        try:
-            question = pending[subject]
-            retained = recorded.get(tuple(bindings[subject]))
-            return call(store, provider, question, check=lambda a: check(a, question),
-                binding=bindings[subject], consume=lambda r, a: consume(subject, r, a), field=field,
-                retained=retained[0] if retained else None)
-        finally:
-            store.close()
-
-    with ThreadPoolExecutor(max_workers=store.read(cursor.kickoff)["capacity"]) as pool:
-        replies = dict(zip(pending, pool.map(ask, pending), strict=True))
-    latest = store.cursor()
-    if (latest.candidate, latest.revision) != (cursor.candidate, cursor.revision):
-        raise ValueError("Final replies require their original candidate and plan")
-    return replies

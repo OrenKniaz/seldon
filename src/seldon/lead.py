@@ -5,7 +5,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
-from . import architecture, decisions, features, gitwork, inference, judgment, plan, proof, questions, recovery
+from . import decisions, features, gitwork, inference, judgment, proof, questions, recovery
 from .providers import ProviderFailure, recorded
 from .schema import REFS, TEXT, array, choice, lead_plan_schema, obj, validate
 from .states import advance
@@ -22,7 +22,7 @@ WRITE_RULES = (
     "commit or change global settings. Return unattended commands with handles for every promise "
     "they cover, including tryItGuide for the walkthrough. Use headless browsers. List all witness files "
     "in checkPaths. Return done when written. Put doubts in summary and leave question empty unless "
-    "you need an answer. " + plan.GUIDE_WALKTHROUGH
+    "you need an answer. " + questions.GUIDE_WALKTHROUGH
 )
 BOUND_RULES = ("Write checks against exactly the approved action, result and notMetIf. "
                "Put walkthrough scratch, fresh copies, dependencies and generated build outputs "
@@ -48,7 +48,7 @@ def progress(store):
 
 
 def commitments(store, cursor):
-    return architecture.commitments(questions.vision_body(store.read(cursor.vision)["answer"]))
+    return questions.commitments(questions.vision_body(store.read(cursor.vision)["answer"]))
 
 
 def obligations(item, vision):
@@ -84,7 +84,7 @@ def spec_context(store, cursor):
     vision = questions.vision_body(store.read(cursor.vision)["answer"])
     return {**words, "Owner replies": "\n\n".join(words["Owner replies"]),
             **{f"Accepted constraint {c['handle']}": c["value"] for c in vision.get("constraints", [])},
-            "Try-it guide": plan.GUIDE_WALKTHROUGH}
+            "Try-it guide": questions.GUIDE_WALKTHROUGH}
 
 
 def propose(store, provider, cursor):
@@ -198,7 +198,7 @@ def render_builder(question):
     projected = {"Approved spec", "Promises", "Owner words", "Guide path"} if rendered else set()
     context = questions.labelled({k: v for k, v in facts.items() if k != "Milestone brief" and k not in projected})
     if rendered:
-        rules = rules.removesuffix(plan.GUIDE_WALKTHROUGH).rstrip()
+        rules = rules.removesuffix(questions.GUIDE_WALKTHROUGH).rstrip()
     return "\n\n".join((brief, rules, context, "Return schema\n" + encode(question["schema"]),
                         "Example receipt\n" + encode(question["examples"][0]))), rules
 
@@ -277,7 +277,7 @@ def build(store, provider, cursor):
                  "Approved spec": spec if isinstance(spec["test"], str) else {**spec, "test": "See promises."},
                  "Promises": obligations(item, commitments(store, cursor)),
                  "Owner words": user_words(store, cursor), "Write scope": assignment["workspace"],
-                 "Guide path": plan.GUIDE_PATH}
+                 "Guide path": questions.GUIDE_PATH}
         if cursor.productVerdict:
             previous = store.read(cursor.productVerdict)
             facts["Previous checkpoint"] = previous
@@ -464,7 +464,7 @@ def step(store, provider, user):
     elif state == "C":
         eligible(store)
         decisions.request(store, "C", {"commit": cursor.candidate, "proof": cursor.productVerdict,
-            "guide": plan.GUIDE_PATH, "observations": questions.observed(store, cursor.finalObservations),
+            "guide": questions.GUIDE_PATH, "observations": questions.observed(store, cursor.finalObservations),
             "guard": judgment.walk_feedback(store, cursor.productVerdict),
             "unverified": judgment.not_judged(store)})
     return store.cursor().state

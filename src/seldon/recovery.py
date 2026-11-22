@@ -27,15 +27,14 @@ def failed(store, cause, unit=None, *, key=None, shape=None, direct=False):
     asked = direct or (repeated if shape is not None else bool(state["answer"]) or state["stage"] >= 1)
     state["waiting"] = asked
     store.recovery(key, state)
-    row = store.unit(unit) if unit else store.cursor()
     if unit:
-        store.unit(unit, replace(row, lineage=key, recoveries=state["rounds"]))
+        store.unit(unit, replace(store.unit(unit), lineage=key, recoveries=state["rounds"]))
     else:
-        store.cursor(replace(row, lineage=key))
+        store.cursor(replace(store.cursor(), lineage=key))
     return asked
 
 
-def recover(store, ref, failure, *, key=None, cause=None, direct=False, charged=False, checks=None,
+def recover(store, ref, failure, *, key=None, cause=None, direct=False, checks=None,
             **updates):
     with store.transaction():
         row = store.unit(ref)
@@ -43,8 +42,7 @@ def recover(store, ref, failure, *, key=None, cause=None, direct=False, charged=
             "unit": ref, "state": row.state, "failure": failure,
             "evidence": row.observations, "attempt": row.callAttempt, "checks": checks})
         key = key or lineage(store, ref)
-        asked = store.recovery(key).get("waiting", False) if charged else failed(
-            store, cause, ref, key=key, direct=direct)
+        asked = failed(store, cause, ref, key=key, direct=direct)
         advance(store, "asked" if asked else "recover", cause, unit=ref, failure=failure,
                 lineage=key, recoveries=store.recovery(key)["rounds"],
                 report=None, T=None, P=None, observations=[], judgment=None, **updates)
@@ -63,8 +61,8 @@ def repeated(store, unit):
 
     answered = int(state["answer"][1:])
     last = failed_checks(state["attempts"][-1])
-    earlier = [failed_checks(r) for r in state["attempts"][:-1] if int(r[1:]) < answered]
-    return last if last and last in earlier else None
+    if last and any(last == failed_checks(r) for r in state["attempts"][:-1] if int(r[1:]) < answered):
+        return last
 
 
 def planning(store, cause, shape, event=None, outline=True, **updates):
@@ -85,7 +83,7 @@ def planning(store, cause, shape, event=None, outline=True, **updates):
     raise decisions.Waiting()
 
 
-def subject(store, gate, body):
+def subject(store, body):
     key = lineage(store, body.get("unit"))
     state = store.recovery(key)
     if state["answer"]:

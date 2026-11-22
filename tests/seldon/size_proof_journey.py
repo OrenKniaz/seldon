@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from seldon import features, gitwork, plan
+from seldon import features, gitwork, plan, questions
 from seldon.run import Run, eligible
 from test_journey import Scripted, approve, strict_schema
 
@@ -123,7 +123,7 @@ class QuietBenchProof(Scripted):
             bench = root / "bench.py"
             bench.write_text(bench.read_text("utf-8").replace("'sample', 'desired'", "'sample_index', 'desired'"),
                              encoding="utf-8")
-            guide = root / plan.GUIDE_PATH
+            guide = root / questions.GUIDE_PATH
             guide.write_text(guide.read_text("utf-8") +
                              "python bench.py list --data $Data\npython bench.py export ID --data $Data\n",
                              encoding="utf-8")
@@ -155,7 +155,7 @@ assert csv.startswith(b"sample_index,")
                 "command": [sys.executable, "-B", "docs/try-it/walk.py"],
                 "expectedEvidence": "Stored session reloads its 8192 delivered samples.",
                 "requirements": list(facts["Requirements"])})
-        (root / plan.GUIDE_PATH).write_text(
+        (root / questions.GUIDE_PATH).write_text(
             self.guide.replace("<settings JSON>", self.settings), encoding="utf-8")
         return json.dumps({"answer": {"outcome": "done", "summary": "Ship the literal c01 setup and reload it.",
             "checkPaths": ["docs/try-it/walk.py"], "checks": checks, "discoveries": [], "why": "Follow the guide."}})
@@ -194,8 +194,8 @@ def test_size_proof_recorded_walkthrough(tmp_path, monkeypatch):
         owner, = store.units()
 
         # A new integrated candidate with the recorded broken guide must run new checks.
-        (run.project / plan.GUIDE_PATH).write_text(provider.guide, encoding="utf-8")
-        _, broken, _ = gitwork.snapshots(run.project, cursor.candidate, [plan.GUIDE_PATH], [], cursor.scratch)
+        (run.project / questions.GUIDE_PATH).write_text(provider.guide, encoding="utf-8")
+        _, broken, _ = gitwork.snapshots(run.project, cursor.candidate, [questions.GUIDE_PATH], [], cursor.scratch)
         gitwork.checkout(run.project, broken)
         store.cursor(replace(cursor, candidate=broken))
         assert run.step() == "EXECUTE"

@@ -59,3 +59,18 @@ class Mismatch(ValueError):
 class ConsumptionFailure(ValueError):
     """The same question could not be consumed, even after its exact correction."""
 
+
+class ContractGap(ValueError):
+    def __init__(self, message, areas):
+        super().__init__(message)
+        self.areas = areas
+
+
+def index(items, field="areas/contracts", *, key="handle", record=None):
+    result = {item[key]: item for item in items}
+    if any(item != result[item[key]] for item in items):
+        raise Mismatch(field, f"Seldon expected one entry per handle in {field}; got "
+                       f"conflicting entries among {len(items)} entries for {len(result)} handles. "
+                       "Send one agreed entry per handle.")
+    normalised(record, field, len(items), len(result), f"Removed identical entries in {field}.")
+    return result

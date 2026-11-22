@@ -191,7 +191,7 @@ def _render_question(question, provider="codex", images=(), *, prompts2=None, pl
 
     Pass an explicit arm for offline replay and the actual attachment paths for that invocation.
     """
-    from .questions import labelled, planner_work, reviewed_brief  # imported through recovery
+    from .questions import labelled, reviewed_brief
     image_directions = NATIVE[provider].prompt(images)
     if question["execution"].get("walk"):
         instructions = question["prompt"]
@@ -213,6 +213,7 @@ def _render_question(question, provider="codex", images=(), *, prompts2=None, pl
                         + " Do not launch providers, install software, commit or change global settings.")
         stdin_instruction = instructions if provider == "claude" else ""
         if assigned:
+            from .unit_questions import planner_work
             return planner_work(question, brief, stdin_instruction, image_directions), instructions
         return reviewed_brief(question, stdin_instruction, image_directions), instructions
 

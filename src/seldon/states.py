@@ -3,6 +3,8 @@
 from dataclasses import replace
 
 
+TERMINAL = {"ACCEPTED", "SCRIPTED_C", "STOPPED"}
+
 RUN = {
     "NEW": {"start": "ALIGN"},
     "ALIGN": {"aligned": "A"},

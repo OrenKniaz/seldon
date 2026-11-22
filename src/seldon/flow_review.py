@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 
-from . import architecture, fixups, inference, judgment, observations, plan, proof, questions
+from . import architecture, fixups, judgment, observations, plan, proof, questions, unit_questions
 from .states import advance
 
 
@@ -69,7 +69,7 @@ def brief(store, feature):
     images = questions.images(store, refs)
     question = {
         "kind": "FLOW",
-        "prompt": questions.PROMPTS["FLOW"],
+        "prompt": unit_questions.PROMPTS["FLOW"],
         "facts": facts, "targets": list(requirements), "schema": judgment.review_schema(document, "FLOW"),
         "examples": [{"answer": {"verdict": "satisfied", "gaps": [],
                      "why": "The observed flow meets its acceptance across the supplied contracts"}}],
@@ -160,7 +160,7 @@ def step(store, provider):
     selected = [f for f in plan.select(document, "feature") if f not in done]
     batch = {f: brief(store, f) for f in selected}
     reviewed = {}
-    inference.batch(store, provider, batch,
+    unit_questions.batch(store, provider, batch,
         consume=lambda feature, source, answer: reviewed.update({feature: review(store, feature, source, answer)}),
         field="gaps.target/owners")
     gaps, verdicts = [], list(cursor.demoVerdicts)

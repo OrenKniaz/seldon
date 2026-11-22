@@ -1,6 +1,6 @@
 """C11/R2: one bounded review of each wave, one repair, remaining gaps visible in its review."""
 
-from . import architecture, fixups, inference, plan, questions
+from . import architecture, fixups, plan, questions, unit_questions
 from .states import advance
 from . import features
 
@@ -10,7 +10,7 @@ def step(store, provider, capacity):
     document = store.plan(cursor.revision)
     vision = document["nodes"]["vision"]["body"]
     outline = document["architecture"]
-    goals = architecture.commitments(vision)
+    goals = questions.commitments(vision)
     pending = {}
     for area in outline["areas"]:
         area_ref = area["handle"]
@@ -18,7 +18,7 @@ def step(store, provider, capacity):
                  if u["area"] == area_ref and r != "guide"}
         requirements = {r for u in units.values() for r in u["requirements"]}
         feature_refs = {f for r in requirements for f in document["nodes"][r]["body"]["features"]}
-        pending[area_ref] = questions.build("REVIEW", {
+        pending[area_ref] = unit_questions.build("REVIEW", {
             "Review subject": area_ref, "User's words": questions.user_words(store),
             "Accepted commitments": {r: goals[r] for r in area["commitments"]},
             "Area": area, "Units": units,
@@ -29,7 +29,7 @@ def step(store, provider, capacity):
         projections[area] = ([{**g, "area": area} for g in answer.get("gaps", [])],
             {"reason": answer["why"], "neededFacts": answer["neededFacts"]}
             if answer["verdict"] == "uncertain" else None)
-    replies = inference.batch(store, provider, pending, consume=consume, field="verdict/gaps")
+    replies = unit_questions.batch(store, provider, pending, consume=consume, field="verdict/gaps")
     gaps = [g for gs, _ in projections.values() for g in gs]
     unknown = {area: unknown for area, (_, unknown) in projections.items() if unknown}
     ref = store.record("plan_review", {"revision": cursor.revision,

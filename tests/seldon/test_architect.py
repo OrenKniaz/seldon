@@ -3,7 +3,7 @@ from copy import deepcopy
 import json
 
 import pytest
-from seldon import architecture, inference, plan, questions
+from seldon import inference, plan, questions
 from seldon.run import Run
 from seldon.states import advance
 from test_journey import Scripted, approve, finish, prepare, strict_schema
@@ -147,7 +147,7 @@ def test_quiet_bench_choice_trace_at_b(tmp_path, scalar_align):
         at_b = at_b_subject["plan"]
         vision = at_b["nodes"]["vision"]["body"]
         assert vision == locked and "machine-inventory.exe" not in json.dumps(vision)
-        commitments = architecture.commitments(vision)
+        commitments = questions.commitments(vision)
         traces = {f["story"]: commitments[f["commitments"][0]] for f in plan.select(at_b, "feature").values()}
         compare = traces["Compare two saved runs"]
         assert store.read(compare["sources"][0]) == {

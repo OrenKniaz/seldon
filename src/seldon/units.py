@@ -5,10 +5,100 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import features, fixups, gitwork, inference, judgment, plan, proof, questions, recovery
+from . import decisions, features, fixups, gitwork, inference, judgment, plan, proof, questions, recovery
+from . import unit_questions
 from .providers import Deadline, ProviderFailure, ResumeUnavailable, recorded
 from .schema import validate
 from .states import advance
+
+
+def affected(store, ref):
+    contracts = plan.select(plan.execution(store), "unit")
+    refs = {ref}
+    while added := {r for r, u in contracts.items() if r not in refs
+                    and refs.intersection(u["dependencies"])}:
+        refs.update(added)
+    return refs
+
+
+def again(store, subject, source, direction):
+    ref = subject["unit"]
+    for owner, unit in store.units().items():
+        if unit.state == "ASKED" and recovery.lineage(store, owner) == recovery.lineage(store, ref):
+            advance(store, "again", source, unit=owner, thread=None,
+                    base=unit.base if unit.worktree else store.cursor().candidate,
+                    callFolder=None, callAttempt=None,
+                    failure=unit.failure + "\nDirection: " + direction)
+
+
+def contract_gap(store, ref):
+    return store.recovery(recovery.lineage(store, ref)).get("contractGap")
+
+
+def ask_unit(store, provider, ref):
+    try:
+        row = store.unit(ref)
+        tried = [b["failure"] for _, _, b in store.records("unit_failure") if b["unit"] == ref]
+        subject = {"unit": ref, "tried": tried, "failure": row.failure,
+                   "affects": sorted(affected(store, ref) - {ref}), "recommendation": row.failure}
+        attempts = store.recovery(recovery.lineage(store, ref))["attempts"]
+        if attempts:
+            report = attempts[-1]
+            source = store.read(report)
+            if source.get("kind") == "WORK" and source["unit"] == ref:
+                receipt = source["answer"]
+                subject.update(report=report, receipt=receipt, tried=[*tried, row.failure])
+                if worker_question := receipt.get("question"):
+                    subject["workerQuestion"] = worker_question
+        checks = recovery.repeated(store, ref)
+        if checks and (missing := judged(store, ref)):
+            # Builders could not fix what a judge found missing; the owner chooses the outcome.
+            subject["question"] = (f"The builders could not fix what the judge found missing in {ref}, "
+                f"even after the approach you chose: {missing} Tried: {len(attempts)} rounds of corrections. "
+                "How should we continue?")
+        elif checks and features.enabled("checkContract") and check_failure(store, ref):
+            subject.update(checkFailure=True, question=(
+                f"The builders could not make these checks pass for {ref} after trying the chosen approach: "
+                f"{', '.join(checks)}. Expected them to pass. The same checks failed again. "
+                "What should we change so the builders can continue?"), recommendation=(
+                "Offer a concrete change to the agreement or approach based on the observed failure."))
+        elif checks:
+            subject["ask"] = {"question": f"This is Seldon's fault: {ref} failed the same checks again "
+                f"({', '.join(checks)}) after the approach you chose. Expected them to pass; got the "
+                "failure shown. We recommend Pause until Seldon is fixed.",
+                "options": [decisions.option("Pause", "Pause here; your work is saved and can resume", "pause"),
+                            decisions.option("Try again", "Retry this unit if its cause has been fixed", "direct"),
+                            decisions.option("Leave this out", "Leave out this unit and its dependents", "drop")]}
+        if "ask" not in subject:
+            subject = decisions.coach(store, provider, subject, frame=bool(checks))
+        if subject:
+            decisions.request(store, "UNIT", subject)
+    finally:
+        store.close()
+
+
+def judged(store, ref):
+    """What a judge found missing in the unit's latest correction; None for a check or code failure."""
+    attempts = store.recovery(recovery.lineage(store, ref))["attempts"]
+    body = store.read(attempts[-1]) if attempts else {}
+    sources = [store.read(g["source"]) for g in body.get("gaps", []) if g["kind"] != "check"]
+    return " ".join(f"{g['target']}: {g['correction']}" for b in sources
+                    for g in questions.must_fix(b.get("answer", {"gaps": []}))) or None
+
+
+def check_failure(store, ref):
+    """Repeated proof failures carry check IDs or a check gap, unlike controller faults."""
+    attempt = store.recovery(recovery.lineage(store, ref))["attempts"][-1]
+    body = store.read(attempt)
+    return body.get("checks") or any(g["kind"] == "check" for g in body.get("gaps", []))
+
+
+def drop(store, ref, approval):
+    for owner in sorted(affected(store, ref)):
+        if store.unit(owner).state == "WAITING":
+            advance(store, "asked", approval, unit=owner)
+        if store.unit(owner).state == "ASKED":
+            advance(store, "drop", approval, unit=owner, waiting="")
 
 
 def recovered_report(store, ref):
@@ -59,7 +149,7 @@ def work(store, provider, ref):
     report = recovered_report(store, ref)
     if report is None:
         thread_from_recording(store, ref)
-        question = questions.work_brief(store, ref)
+        question = unit_questions.work_brief(store, ref)
         store.record("writer_start", {"unit": ref, "session": store.unit(ref).thread,
                                       "startedAt": time.time()})
         try:
@@ -73,10 +163,10 @@ def work(store, provider, ref):
                 row = store.unit(ref)
                 store.unit(ref, replace(row, thread=None,
                                         failure=row.failure + "\nResume unavailable: " + str(error)))
-            report, answer = inference.call(store, provider, questions.work_brief(store, ref), unit=ref,
+            report, answer = inference.call(store, provider, unit_questions.work_brief(store, ref), unit=ref,
                 consume=consume, field="outcome/checkPaths/checks/discoveries")
     else:
-        report, answer = inference.call(store, provider, questions.work_brief(store, ref), unit=ref,
+        report, answer = inference.call(store, provider, unit_questions.work_brief(store, ref), unit=ref,
             consume=consume, field="outcome/checkPaths/checks/discoveries", retained=report)
     if needs_answer(answer):
         recovery.recover(store, ref, answer.get("question", answer["summary"]), cause=report, direct=True)
@@ -138,10 +228,10 @@ def run_unit(store, provider, ref):
                     advance(store, "proven", observations, unit=ref)
                 elif unit.state == "JUDGING":
                     if ref == "guide":
-                        if (not gitwork.blobs(unit.worktree, unit.P, [plan.GUIDE_PATH]).get(plan.GUIDE_PATH, b"").strip()
+                        if (not gitwork.blobs(unit.worktree, unit.P, [questions.GUIDE_PATH]).get(questions.GUIDE_PATH, b"").strip()
                                 or not plan.assigned(document).get("guide")):
                             raise ValueError("Write docs/try-it.md and declare its walkthrough check")
-                        result = store.record("guide_written", {"commit": unit.P, "path": plan.GUIDE_PATH,
+                        result = store.record("guide_written", {"commit": unit.P, "path": questions.GUIDE_PATH,
                             "scopeTree": gitwork.scope_tree(unit.worktree, unit.P, contract["scope"],
                                                             store.cursor().scratch)})
                     elif (judgment.folded_owner(store, document) == ref
@@ -165,7 +255,7 @@ def run_unit(store, provider, ref):
                             result = store.record("unit_verdict", {"commit": unit.P, "answer": answer,
                                 "source": result, "scopeTree": tree})
                             advance(store, "approved", result, unit=ref, judgment=result)
-                        inference.call(store, provider, questions.judge_brief(store, ref),
+                        inference.call(store, provider, unit_questions.judge_brief(store, ref),
                                        consume=consume, field="verdict/gaps")
                         continue
                     advance(store, "approved", result, unit=ref, judgment=result)
@@ -204,7 +294,7 @@ def judge_wave(store, provider, observations):
                 store, ref, source, answer, tree, observations, question)
             gaps.extend(judgment.corrections(store, ref, result, combined))
 
-        inference.batch(store, provider, {owner: question}, consume=consume, field="findings")
+        unit_questions.batch(store, provider, {owner: question}, consume=consume, field="findings")
         return gaps
     batch, trees = {}, {}
     for ref, contract in plan.select(document, "unit").items():
@@ -222,7 +312,7 @@ def judge_wave(store, provider, observations):
             continue
         trees[ref] = tree
         refs = [r for r in observations if store.read(r)["unit"] == ref]
-        batch[ref] = questions.judge_brief(store, ref, cursor.candidate, refs)
+        batch[ref] = unit_questions.judge_brief(store, ref, cursor.candidate, refs)
     gaps = []
     def consume(ref, source, answer):
         if answer["verdict"] == "uncertain":
@@ -241,5 +331,5 @@ def judge_wave(store, provider, observations):
                          else [ref], "source": result, "correction": "; ".join(
                              f"{g['target']}: {g['correction']}" for g in questions.must_fix(answer))
                          + " Judge: " + answer["why"] if contracted else str(answer)})
-    inference.batch(store, provider, batch, consume=consume, field="verdict/gaps")
+    unit_questions.batch(store, provider, batch, consume=consume, field="verdict/gaps")
     return gaps

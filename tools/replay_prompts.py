@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from seldon import plan, providers, schema  # noqa: E402
+from seldon import gitwork, providers, schema  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 PIN = "6f832ee67621d6605ff34ef3533739fbf7fe305f"
@@ -307,7 +307,7 @@ def capture(repo, workspace, base, original_tree, scope):
     final = git_stage(repo, workspace, files)
     changed = git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", original_tree, final)
     outside = [name for name in changed.decode().strip("\0").split("\0") if name and
-               not plan.matches(name, scope)]
+               not gitwork.matches(name, scope)]
     diff = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--binary", original_tree, final)
     return diff, outside
 

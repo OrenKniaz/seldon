@@ -5,7 +5,7 @@ from pathlib import Path
 from shutil import rmtree
 from tempfile import mkdtemp
 
-from . import architecture, features, fixups, gitwork, inference, plan, proof, questions
+from . import features, gitwork, inference, proof, questions
 from .answers import Mismatch
 from .observations import code_shape, judge_fields
 from .schema import POSITION, REFS, TEXT, answer_schema, array, choice, folded_judge_schema, obj
@@ -22,6 +22,7 @@ WALKTHROUGH_CHECKOUT = (
 
 
 def folded_owner(store, document):
+    from . import plan
     if owner := plan.sole_owner(document):
         row = store.unit(owner)
         if row and row.state != "DROPPED" and plan.select(document, "unit")[owner]["requirements"]:
@@ -29,6 +30,7 @@ def folded_owner(store, document):
 
 
 def folded_subjects(document):
+    from . import plan
     return {
         **plan.select(document, "feature"),
         **subjects(document, "FLOW"),
@@ -79,7 +81,7 @@ def milestone(store, provider, base, commit, subjects, current, refs):
         "Reuse exact clean-checkout guide observations. On resume finish missing actions. "
         "Save evidence in SELDON_EVIDENCE_DIR, cite PNG names and stop your processes.",
         {"Candidate": str(work), "Candidate commit": commit, "Base": str(before), "Base commit": base,
-         "Guide path": plan.GUIDE_PATH, "Subjects": subjects, "New promises": list(current),
+         "Guide path": questions.GUIDE_PATH, "Subjects": subjects, "New promises": list(current),
          "Observations": observations,
          **({"Previous walk": {k: prior[k] for k in ("commit", "actions", "fixes", "limitations")},
              "Repair delta": gitwork.git(store.root.parent, "diff", "--no-ext-diff", "-U1", prior["commit"], commit)}
@@ -167,8 +169,9 @@ def walk_feedback(store, proof_ref):
 
 
 def folded_brief(store, document, owner, observations):
+    from . import plan, unit_questions
     commit = store.cursor().candidate
-    question = questions.judge_brief(store, owner, commit, observations)
+    question = unit_questions.judge_brief(store, owner, commit, observations)
     subjects_to_judge = folded_subjects(document)
     facts = question["facts"]
     if features.enabled("judgeEvidence"):
@@ -190,7 +193,7 @@ def folded_brief(store, document, owner, observations):
     facts["Subjects"] = subjects_to_judge
     facts["Requirement to feature links"] = {
         ref: row["features"] for ref, row in subjects(document, "FLOW").items()}
-    facts["Guide path"] = plan.GUIDE_PATH
+    facts["Guide path"] = questions.GUIDE_PATH
     checks = plan.guide_checks(document)
     facts["Walkthrough checks"] = list(checks)
     facts["Walkthrough checkout"] = WALKTHROUGH_CHECKOUT
@@ -199,7 +202,7 @@ def folded_brief(store, document, owner, observations):
         "for every listed subject. Use the base and delivered observations to judge the meaning of the "
         "checks. For the guide, look for an execution of its actual steps from a fresh checkout. "
         "Name missing facts as uncertainty and send concrete repairs to the owner. "
-        + questions.JUDGMENT_LEEWAY)
+        + unit_questions.JUDGMENT_LEEWAY)
     sample = {subject: {"verdict": "satisfied", "gaps": [],
                         "why": "The delivered reader reloads the value it stored."}
               for subject in subjects_to_judge}
@@ -224,8 +227,8 @@ def record_folded(store, owner, source, answer, tree, observations, question):
                 "verdict": "gap" if questions.must_fix(finding) else "satisfied"}
     facts = question["facts"]
     guide = findings["tryItGuide"]
-    guide_text = (facts["Product files"].get(plan.GUIDE_PATH)
-                  or facts["Check sources"].get(plan.GUIDE_PATH, ""))
+    guide_text = (facts["Product files"].get(questions.GUIDE_PATH)
+                  or facts["Check sources"].get(questions.GUIDE_PATH, ""))
     if guide["verdict"] == "satisfied" and not (guide_text.strip() and facts["Walkthrough checks"]):
         findings["tryItGuide"] = {**guide, "verdict": "not judged", "gaps": [],
             "neededFacts": ["A delivered guide and its declared fresh-copy walkthrough check"]}
@@ -238,6 +241,7 @@ def record_folded(store, owner, source, answer, tree, observations, question):
 
 
 def folded_evidence(store, document, owner, observations):
+    from . import plan
     cursor = store.cursor()
     refs = [store.read(r) for r in observations]
     checks = plan.assigned(document)[owner]
@@ -274,12 +278,13 @@ def folded_answer(store, document, owner):
 
 
 def subjects(document, kind):
+    from . import plan
     if kind == "FLOW":
         return plan.select(document, "requirement")
     commitments = {ref: {"criterion": text,
         "verification": "Trace the accepted experience end to end across its areas",
         "areas": [a["handle"] for a in document["architecture"]["areas"] if ref in a["commitments"]]}
-        for ref, text in architecture.commitments(document["nodes"]["vision"]["body"]).items()
+        for ref, text in questions.commitments(document["nodes"]["vision"]["body"]).items()
         if ref.startswith(("scopeIn:", "improvements:"))}
     return {**plan.select(document, "criterion"), **commitments, "tryItGuide": {
         "criterion": "The try-it guide is usable from the delivered directory",
@@ -287,6 +292,7 @@ def subjects(document, kind):
 
 
 def trace(document, kind, subject):
+    from . import plan
     body = subjects(document, kind)[subject]
     if "areas" in body:
         walkthroughs = plan.guide_checks(document)
@@ -298,6 +304,7 @@ def trace(document, kind, subject):
 
 
 def owners(document, kind, subject):
+    from . import plan
     body = subjects(document, kind)[subject]
     guide = plan.guide_owner(document)
     if "areas" in body:
@@ -312,6 +319,7 @@ def owners(document, kind, subject):
 
 
 def scope_trees(store, owned):
+    from . import plan
     cursor = store.cursor()
     trees = {b["unit"]: b["scopeTree"] for r in cursor.finalObservations for b in [store.read(r)]
              if b["unit"] in owned and b["commit"] == cursor.candidate}
@@ -328,6 +336,7 @@ def current(verdict, trees):
 
 
 def brief(store, kind, selected, *, trees=None):
+    from . import plan, unit_questions
     subject = selected[0]
     cursor = store.cursor()
     document = plan.execution(store)
@@ -366,33 +375,35 @@ def brief(store, kind, selected, *, trees=None):
             for ref in cursor.demoVerdicts for row in [store.read(ref)] if row["feature"] in features]
     if subject == "tryItGuide":
         facts["Walkthrough checkout"] = WALKTHROUGH_CHECKOUT
-        facts["Guide file"] = {"path": plan.GUIDE_PATH, "commit": cursor.finalCommit,
+        facts["Guide file"] = {"path": questions.GUIDE_PATH, "commit": cursor.finalCommit,
                                "text": gitwork.git(store.root.parent, "show",
-                                                   f"{cursor.finalCommit}:{plan.GUIDE_PATH}")}
+                                                   f"{cursor.finalCommit}:{questions.GUIDE_PATH}")}
         guide = plan.guide_owner(document)
         paths = plan.select(document, "unit")[guide]["checkPaths"]
         if plan.select(document, "unit")[guide]["requirements"]:
-            paths = [p for p in paths if plan.matches(p, ["docs/try-it/**"])]
+            paths = [p for p in paths if gitwork.matches(p, ["docs/try-it/**"])]
         facts["Walkthrough check sources"] = {p: b.decode("utf-8", errors="replace") for p, b in
             gitwork.blobs(store.root.parent, cursor.finalCommit, paths).items()}
     context = {"audience": document["nodes"]["vision"]["body"]["users"],
                "productMode": "commitment" if "areas" in body else
                               "guide" if subject == "tryItGuide" else "criterion"}
-    question = questions.build(kind, facts, selected, images=questions.images(store, refs), context=context)
+    question = unit_questions.build(kind, facts, selected, images=questions.images(store, refs), context=context)
     if "areas" in body:
         question["prompt"] = ("Was this accepted commitment delivered end to end across its areas? "
             "Passing features alone may leave a gap between them. Use the feature verdicts and guide "
             "walkthrough evidence; name the responsible correction owners for any behaviour gap. "
-            + questions.JUDGMENT_LEEWAY)
+            + unit_questions.JUDGMENT_LEEWAY)
     return {**question, "schema": review_schema(document, kind)}
 
 
 def review_schema(document, kind):
+    from . import plan
     return answer_schema(kind, sorted(subjects(document, kind)),
                          sorted([*plan.select(document, "unit"), *plan.select(document, "contract")]))
 
 
 def corrections(store, subject, source, answer):
+    from . import plan
     contracts = plan.select(plan.execution(store), "contract")
     owners = {}
     for gap in questions.must_fix(answer):
@@ -462,6 +473,7 @@ def combined(verdicts):
 
 
 def step(store, provider):
+    from . import fixups, plan, unit_questions
     cursor = store.cursor()
     kind = "PRODUCT"
     document = plan.execution(store)
@@ -510,7 +522,7 @@ def step(store, provider):
             store.cursor(replace(row, qualityVerdicts=row.qualityVerdicts + [ref]))
         gaps.extend(local_gaps)
 
-    inference.batch(store, provider, {
+    unit_questions.batch(store, provider, {
         area: brief(store, kind, ss, trees=trees) for area, ss in groups.items()},
         consume=consume, field="gaps.target/owners")
     if contracted := [g for g in gaps if g["kind"] == "contract"]:

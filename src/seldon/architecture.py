@@ -2,16 +2,10 @@
 
 from copy import deepcopy
 
-from . import plan
+from . import answers, gitwork, plan, questions
 from .answers import Mismatch, links, normalised
 from .schema import ARCHITECT, DETAIL_SPLIT, FEATURE, GROWN_FEATURE, detail_plan, vision_body
 from .schema import validate as validate_schema
-
-
-class ContractGap(ValueError):
-    def __init__(self, message, areas):
-        super().__init__(message)
-        self.areas = areas
 
 
 class DetailCorrection(ValueError):
@@ -50,7 +44,7 @@ def validate(document):
         raise ValueError("Name an area and its responsibility")
     for area in areas.values():
         for pattern in area["scope"]:
-            plan.safe_path(pattern)
+            gitwork.safe_path(pattern)
     for ref, decision in plan.select(document, "decision").items():
         if set(decision["areas"]) - areas.keys():
             raise ValueError(f"{ref}: decisions must name existing areas")
@@ -73,26 +67,6 @@ def stale_units(before, after):
     old, new = (plan.select(d, "contract") for d in (before, after))
     return {u for r in old.keys() | new.keys() if old.get(r) != new.get(r)
             for c in (old.get(r), new.get(r)) if c for u in [c["provider"], *c["consumers"]]}
-
-
-def index(items, field="areas/contracts", *, key="handle", record=None):
-    result = {item[key]: item for item in items}
-    if any(item != result[item[key]] for item in items):
-        raise Mismatch(field, f"Seldon expected one entry per handle in {field}; got "
-                       f"conflicting entries among {len(items)} entries for {len(result)} handles. "
-                       "Send one agreed entry per handle.")
-    normalised(record, field, len(items), len(result), f"Removed identical entries in {field}.")
-    return result
-
-
-def commitments(vision):
-    vision = vision_body(vision)
-    if "stories" in vision:
-        return {f"{prefix}:{handle}": value
-                for field, prefix in (("stories", "scopeIn"), ("quality", "quality"))
-                for handle, value in index(vision[field], f"vision.{field}").items()}
-    return {f"{field}:{i}": value for field in ("scopeIn", "improvements", "quality")
-            for i, value in enumerate(vision[field], 1)}
 
 
 def planning_approach(setup, vision, *, continuing):
@@ -120,8 +94,8 @@ def merge(previous, answer, completed=(), *, record=None):
         return answer
     result = deepcopy(previous)
     for field in ("areas", "contracts"):
-        items = index(result[field], field)
-        for item in index(answer.get(field, []), field, record=record).values():
+        items = answers.index(result[field], field)
+        for item in answers.index(answer.get(field, []), field, record=record).values():
             items[item["handle"]] = {**items.get(item["handle"], {}), **deepcopy(item)}
         result[field] = list(items.values())
     for decision in answer.get("decisions", []):
@@ -138,7 +112,7 @@ def merge(previous, answer, completed=(), *, record=None):
 
 def detail_areas(outline, wave, previous=None):
     active = set(outline["waves"][wave - 1]["commitments"])
-    old = index(previous["contracts"]) if previous else {}
+    old = answers.index(previous["contracts"]) if previous else {}
     old = {r: {**c, "consumers": sorted(c["consumers"])} for r, c in old.items()}
     changed = {a for c in outline["contracts"]
                if old.get(c["handle"]) != {**c, "consumers": sorted(c["consumers"])}
@@ -150,13 +124,13 @@ def detail_areas(outline, wave, previous=None):
 def outline(answer, vision=None, *, record=None):
     if "scope" in answer:
         return answer
-    accepted = commitments(vision) if vision is not None else {
+    accepted = questions.commitments(vision) if vision is not None else {
         r: None for a in answer["areas"] for r in a["commitments"]}
     if not answer["waves"]:
         raise Mismatch("waves", "Seldon expected a wave horizon; got no waves. Send at least "
                        "one wave with its goal and commitments; when steering, an empty list keeps the horizon.")
-    areas = index(answer["areas"], "areas", record=record)
-    contracts = index(answer["contracts"], "contracts", record=record)
+    areas = answers.index(answer["areas"], "areas", record=record)
+    contracts = answers.index(answer["contracts"], "contracts", record=record)
     answer["areas"], answer["contracts"] = list(areas.values()), list(contracts.values())
     for ref, area in areas.items():
         claimed = links(area["commitments"], accepted, record=record, field="areas.commitments", subject=ref)
@@ -246,7 +220,7 @@ def local_plan(area, answer, vision, *, record=None):
         structure["units"] = [{k: v for k, v in unit.items() if k != "brief"}
                               for unit in structure["units"]]
     validate_schema(structure, detail_plan(GROWN_FEATURE if grown else FEATURE, continuing=True))
-    edits = index(answer["edits"], "edits.targetHandle", key="targetHandle", record=record)
+    edits = answers.index(answer["edits"], "edits.targetHandle", key="targetHandle", record=record)
     answer["edits"] = list(edits.values())
     features = {r: e["typedBody"] for r, e in edits.items() if e["kind"] == "feature"}
     requirements = {r: e["typedBody"] for r, e in edits.items() if e["kind"] == "requirement"}
@@ -278,7 +252,7 @@ def local_plan(area, answer, vision, *, record=None):
             unit["scope"] = plan.product_scope(unit["scope"], "units.scope", subject, record)
             missing = [p for p in unit["scope"] if not any(plan.contains(s, p) for s in area["scope"])]
             if missing:
-                raise ContractGap(f"Area {area['handle']}: keep work inside its named area scopes; "
+                raise answers.ContractGap(f"Area {area['handle']}: keep work inside its named area scopes; "
                                   f"ARCHITECT must assign missing scope for {missing}", [area["handle"]])
         unit["requirements"] = links(unit["requirements"], requirements, via=trace, record=record,
                                      field="units.requirements", subject=f"{area['handle']} unit:{i}")
@@ -315,7 +289,7 @@ def local_plan(area, answer, vision, *, record=None):
 
 def subdivision(parent, answer, known_contracts, *, record=None):
     validate_schema({k: v for k, v in answer.items() if k != "why"}, DETAIL_SPLIT)
-    children = index(answer["subareas"], "subareas", record=record)
+    children = answers.index(answer["subareas"], "subareas", record=record)
     answer["subareas"] = list(children.values())
     if len(children) < 2:
         raise Mismatch("subareas", "A subdivision needs two distinct areas. Send their responsibilities and scopes, "
@@ -337,7 +311,7 @@ def subdivision(parent, answer, known_contracts, *, record=None):
              "decisions": [], "waves": [{"goal": "Detail the parent responsibility",
                                          "commitments": parent["commitments"]}]}
     outline(local, record=record)
-    if index(local["contracts"]).keys() & known_contracts.keys():
+    if answers.index(local["contracts"]).keys() & known_contracts.keys():
         raise ValueError("Each new contract needs a distinct handle")
     return children, local
 
@@ -345,8 +319,8 @@ def subdivision(parent, answer, known_contracts, *, record=None):
 def expand(architecture, parent, answer, *, record=None):
     """Preserve parent agreements across a split; merge resolves the unique implementing unit."""
     result = deepcopy(architecture)
-    children, local = subdivision(parent, answer, index(result["contracts"]), record=record)
-    if children.keys() & index(result["areas"]).keys():
+    children, local = subdivision(parent, answer, answers.index(result["contracts"]), record=record)
+    if children.keys() & answers.index(result["areas"]).keys():
         raise ValueError("Sub-area handles must be distinct from existing areas")
     result["areas"] = [a for a in result["areas"] if a["handle"] != parent["handle"]]
     # Parent endpoint membership is retained explicitly, never inferred from source or prose.

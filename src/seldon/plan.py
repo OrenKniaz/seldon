@@ -1,43 +1,14 @@
 """C9/C12/I6/I7; R6/R14: scoped unit ownership and check declarations."""
 
-import fnmatch
 from graphlib import CycleError, TopologicalSorter
-from pathlib import PurePosixPath
 
-from .answers import Mismatch, links, normalised, recorder
+from . import gitwork, questions
+from .answers import Mismatch, index, links, normalised, recorder
 from .schema import BODIES, GROWN_FEATURE, vision_body, vision_contract
 from .schema import validate as validate_schema
 
-GUIDE_PATH = "docs/try-it.md"
-GUIDE_SCOPE = (GUIDE_PATH, "docs/try-it/**")
-GUIDE_WALKTHROUGH = ("In docs/try-it.md, show how to try every accepted user surface, with one runnable "
-                     "example per CLI command when there is a CLI. Supply inputs or show how to create them. "
-                     "Declare a check under docs/try-it/ that uses the same commands in the reader's shell "
-                     "from a clean checkout wherever safe, including input setup, launch and stop. Where "
-                     "practical, have the reader and the check use the same runnable script. Assert the "
-                     "promised results and stop what you start. For checks and local walkthrough probes, use the "
-                     "supplied SELDON_EVIDENCE_DIR for generated evidence; do not override it or write "
-                     "generated evidence into the product checkout. In SELDON_EVIDENCE_DIR/operation-lifecycle.json, "
-                     "record a JSON array linking each exercised step to the guide with its actual command "
-                     "or interaction and observed result. Use only approved runtimes already available. "
-                     "If the exact runtime is unavailable, preserve it in the guide, record observed=false "
-                     "with the reason for its steps, and exercise the other supported steps.")
-GUIDE_WORK = (GUIDE_WALKTHROUGH + " Use the contracts to walk through this wave's commitments. "
+GUIDE_WORK = (questions.GUIDE_WALKTHROUGH + " Use the contracts to walk through this wave's commitments. "
               "Leave unseen forms to the page owner's check and capture relevant visual evidence.")
-
-
-def safe_path(value):
-    path = PurePosixPath(value)
-    if (not value or "\\" in value or ":" in value or path.is_absolute()
-            or path.as_posix() != value
-            or any(p in ("..", ".git", ".seldon") or p.endswith((".", " ")) for p in path.parts)):
-        raise ValueError(f"Use a project-relative path or pattern: {value!r}")
-    return value
-
-
-def matches(path, patterns):
-    # ** spans directories; a directory's /** includes its complete subtree.
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 
 def prefix(pattern):
@@ -53,21 +24,21 @@ def overlaps(left, right):
     # Conservative for general glob intersections: never admit potentially shared paths.
     def intersect(a, b):
         if prefix(a) == a:
-            return matches(a, [b])
+            return gitwork.matches(a, [b])
         if prefix(b) == b:
-            return matches(b, [a])
+            return gitwork.matches(b, [a])
         return prefix(a).startswith(prefix(b)) or prefix(b).startswith(prefix(a))
     return any(intersect(a, b) for a in left for b in right)
 
 
 def product_scope(scope, field, subject, record=None):
     """Reserve the guide before checking or binding planner-proposed ownership."""
-    guide_dir = GUIDE_SCOPE[1].removesuffix("**")
+    guide_dir = questions.GUIDE_SCOPE[1].removesuffix("**")
     remaining = list(dict.fromkeys(p for p in scope if p not in (guide_dir, guide_dir.rstrip("/"))
-                 and not overlaps([safe_path(p)], GUIDE_SCOPE)))
+                 and not overlaps([gitwork.safe_path(p)], questions.GUIDE_SCOPE)))
     if not remaining:
         raise Mismatch(field, f"{subject}: expected a product write scope; got {scope}, "
-                       f"which overlaps {GUIDE_PATH} or docs/try-it/ reserved for the walkthrough owner. "
+                       f"which overlaps {questions.GUIDE_PATH} or docs/try-it/ reserved for the walkthrough owner. "
                        "Send at least one project-relative product path or narrower pattern outside the guide.")
     if record and remaining != scope:
         record("scope_normalisation", {"field": field, "subject": subject,
@@ -83,7 +54,7 @@ def select(document, kind):
 def guide_owner(document):
     """The approved write scope owns the guide for the lifetime of the plan."""
     return next((ref for ref, unit in select(document, "unit").items()
-                 if GUIDE_PATH in unit["scope"]), None)
+                 if questions.GUIDE_PATH in unit["scope"]), None)
 
 
 def sole_owner(document):
@@ -93,11 +64,9 @@ def sole_owner(document):
 
 
 def applicable_constraints(vision, commitments):
-    from . import architecture
-
     if "stories" not in vision:
         return []
-    goals = architecture.commitments(vision)
+    goals = questions.commitments(vision)
     attached = {h for goal in goals.values() for h in goal["constraints"]}
     relevant = {h for ref in commitments for h in goals.get(ref, {}).get("constraints", [])}
     return [c for c in vision["constraints"] if c["handle"] in relevant or c["handle"] not in attached]
@@ -122,7 +91,7 @@ def guide_checks(document):
     owner = guide_owner(document)
     return {ref: check for ref, check in select(document, "check").items()
             if check["owner"] == owner and (owner == "guide"
-                or any(matches(arg, GUIDE_SCOPE[1:]) for arg in check["command"]))}
+                or any(gitwork.matches(arg, questions.GUIDE_SCOPE[1:]) for arg in check["command"]))}
 
 
 def saved_checks(declaration, ref, requirements):
@@ -199,7 +168,7 @@ def execution(store):
             ref, {"checkPaths": [], "checks": []})
         unit["handed"] = {d["owner"]: d["correction"] for d in declaration.get("discoveries", [])
                           if d["owner"] != ref}
-        unit["checkPaths"] = [p for p in declaration["checkPaths"] if matches(p, unit["scope"])]
+        unit["checkPaths"] = [p for p in declaration["checkPaths"] if gitwork.matches(p, unit["scope"])]
         checks, _ = saved_checks(declaration, ref, unit["requirements"])
         eligible = check_requirements(document, ref)
         for handle, check in checks.items():
@@ -282,14 +251,13 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
     """Accumulate one wave; a scope keeps its owner and its earlier requirements."""
     from copy import deepcopy
     from . import architecture as owner
-
     document = deepcopy(previous) if previous else {"nodes": {}}
     nodes = document["nodes"]
     prior_features = linked_features(document)
     vision = vision_body(vision)
     grown = "stories" in vision
     nodes["vision"] = {"kind": "vision", "body": vision}
-    goals = owner.commitments(vision)
+    goals = questions.commitments(vision)
     units = select(document, "unit")
     draft_units = set()
     if not retain_trace:
@@ -312,7 +280,7 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
         local_contracts = {r: {**c,
             "provider": area["handle"] if c["provider"] in area.get("ancestors", []) else c["provider"],
             "consumers": [area["handle"] if a in area.get("ancestors", []) else a for a in c["consumers"]]}
-            for r, c in owner.index(architecture["contracts"]).items()}
+            for r, c in index(architecture["contracts"]).items()}
         owner.local_plan(area, answer, vision)
         # Requirements use the final feature refs, even if the reply sent them first.
         handles = {}
@@ -342,7 +310,7 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
         indexed = enumerate(answer["units"], 1)
         for i, unit in sorted(indexed, key=lambda pair: "scope" in pair[1]):
             scope = unit.get("scope")
-            owners = {r: [p for p in u["scope"] if r != folded or p not in GUIDE_SCOPE]
+            owners = {r: [p for p in u["scope"] if r != folded or p not in questions.GUIDE_SCOPE]
                       for r, u in units.items() if u["area"] == area["handle"]
                       and r not in local_units.values()}
             if scope is None:
@@ -386,7 +354,7 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
             if ref in continued:
                 body["scope"] = before["scope"]
             elif ref == folded:
-                body["scope"].extend(GUIDE_SCOPE)
+                body["scope"].extend(questions.GUIDE_SCOPE)
             nodes[ref] = {"kind": "unit", "body": body}
             units[ref] = body
             for handle, contract in local_contracts.items():
@@ -411,13 +379,13 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
             guide = None
     if guide is None and fold_guide and len(units) == len(architecture["areas"]) == len(architecture["waves"]) == 1:
         guide, = units
-        units[guide]["scope"].extend(GUIDE_SCOPE)
+        units[guide]["scope"].extend(questions.GUIDE_SCOPE)
     for area in architecture["areas"]:
         ref = area["handle"]
         nodes[ref] = {"kind": "area", "body": {
             "responsibility": area["responsibility"], "scope": list(area["scope"])}}
         if guide and units[guide]["area"] == ref:
-            nodes[ref]["body"]["scope"].extend(GUIDE_SCOPE)
+            nodes[ref]["body"]["scope"].extend(questions.GUIDE_SCOPE)
         for commitment, criterion in goals.items():
             if commitment.startswith("quality:") and commitment in area["commitments"]:
                 handle = commitment if grown else f"quality:{int(commitment.split(':')[1]):03}"
@@ -466,12 +434,10 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
 
 
 def validate_records(document):
-    from . import architecture
-
     nodes = document["nodes"]
     vision = nodes["vision"]["body"]
     validate_schema(vision, vision_contract(vision))
-    accepted = architecture.commitments(vision) if "stories" in vision else {}
+    accepted = questions.commitments(vision) if "stories" in vision else {}
     relation_types = {"feature": ("vision", "vision"), "requirement": ("features", "feature"),
                       "unit": ("requirements", "requirement")}
     for ref, node in nodes.items():
@@ -511,7 +477,7 @@ def validate_owned_work(document):
     for ref, unit in units.items():
         for pattern in unit["scope"]:
             try:
-                safe_path(pattern)
+                gitwork.safe_path(pattern)
             except ValueError as error:
                 raise Mismatch("units.scope", f"{ref}: got {pattern!r}. Send a project-relative write "
                     "scope inside the unit's area.") from error
@@ -557,7 +523,7 @@ def add_guide(document, wave=1, *, brief=""):
     previous = select(result, "unit").get("guide")
     area = previous["area"] if previous else next(iter(select(result, "area")))
     area_scope = result["nodes"][area]["body"]["scope"]
-    area_scope.extend(p for p in GUIDE_SCOPE if p not in area_scope)
+    area_scope.extend(p for p in questions.GUIDE_SCOPE if p not in area_scope)
     current = {r for r, u in select(result, "unit").items()
                if any(q.startswith(f"{wave}.") for q in u["requirements"])}
     readers = {c["handle"]: c["consumers"] for c in document["architecture"]["contracts"]}
@@ -568,7 +534,7 @@ def add_guide(document, wave=1, *, brief=""):
         if current.intersection([contract["provider"], *contract["consumers"]]) and not later:
             contract["consumers"].append("guide")
     result["nodes"]["guide"] = {"kind": "unit", "body": {
-        "scope": list(GUIDE_SCOPE), "requirements": [],
+        "scope": list(questions.GUIDE_SCOPE), "requirements": [],
         "area": area, "dependencies": [],
         "instructions": GUIDE_WORK + "\nThis wave: " + document["architecture"]["waves"][wave - 1]["goal"],
         **({"brief": brief} if brief else {})}}

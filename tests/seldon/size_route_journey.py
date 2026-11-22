@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from seldon import architecture, gitwork, plan
+from seldon import gitwork, plan, questions
 from seldon.run import Run
 from test_journey import NATIVE, Scripted, approve
 
@@ -173,7 +173,7 @@ if 'Existing checks' in facts and not""",
         before = run.store.plan(run.store.cursor().revision)
         outline = before["architecture"]
         assert before["nodes"]["vision"]["body"]["size"] == "tiny"
-        approved_handles = set(architecture.commitments(before["nodes"]["vision"]["body"]))
+        approved_handles = set(questions.commitments(before["nodes"]["vision"]["body"]))
         assert approved_handles == {r for w in outline["waves"] for r in w["commitments"]}
         if staged:
             assert outline["waves"] == recording["r23"]["waves"]
@@ -213,7 +213,7 @@ if 'Existing checks' in facts and not""",
         if not staged:
             def guide_writer(document):
                 return next((ref, u["area"]) for ref, u in plan.select(document, "unit").items()
-                            if plan.GUIDE_PATH in u["scope"])
+                            if questions.GUIDE_PATH in u["scope"])
 
             assert guide_writer(after) == guide_writer(earlier)
         assert all(after["nodes"][r] == record for r, record in earlier["nodes"].items()

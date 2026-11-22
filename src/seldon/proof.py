@@ -5,7 +5,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from . import features, gitwork, observations as evidence_facts, plan
+from . import features, gitwork, observations as evidence_facts
 from .processes import execute
 from .providers import ROLES
 
@@ -40,7 +40,7 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
         gitwork.checkout(checkout, commit)
     cleanup_verified, dirty = True, False
     witness_commits, trees, executions = {}, {}, {}
-    walkthroughs = plan.guide_checks(plan.execution(store)) if purpose == "final" else ()
+    walkthroughs = evidence_facts.final_guide_checks(store) if purpose == "final" else ()
     try:
         for ref, check in declarations.items():
             retained = check.get("witness")
@@ -177,7 +177,7 @@ def milestone_checks(store, previous, milestone, current, receipt, candidate):
     while any("witness" not in c for c in retained.values()) and ancestor:
         old = store.read(ancestor["return"])["answer"]
         commit = ancestor["commit"]
-        paths = [p for p in gitwork.paths(root, commit) if plan.matches(p, old["checkPaths"])]
+        paths = [p for p in gitwork.paths(root, commit) if gitwork.matches(p, old["checkPaths"])]
         commands = [c["command"] for c in [*old["checks"], old.get("walkthrough")] if c]
         for key, check in retained.items():
             if ("witness" not in check and key.startswith(f"milestone-{ancestor['milestone']}-")
@@ -185,7 +185,7 @@ def milestone_checks(store, previous, milestone, current, receipt, candidate):
                 check.update(witness={"commit": commit, "paths": paths})
         ancestor = store.read(ancestor["previous"]) if ancestor.get("previous") else {}
     retained = {key: check for key, check in retained.items() if "witness" in check}
-    paths = list(dict.fromkeys(plan.safe_path(path) for path in receipt["checkPaths"]))
+    paths = list(dict.fromkeys(gitwork.safe_path(path) for path in receipt["checkPaths"]))
     if missing := set(paths) - set(gitwork.paths(root, candidate)):
         raise ValueError(f"Check files absent from candidate: {', '.join(sorted(missing))}.")
     return retained | {f"milestone-{milestone}:{key}": {
@@ -195,6 +195,7 @@ def milestone_checks(store, previous, milestone, current, receipt, candidate):
 
 def gaps(store, candidate, observations):
     """Return observed check failures to the fixup owner; never change a unit or the run."""
+    from . import plan
     document = plan.execution(store)
     units = plan.select(document, "unit")
     contracts = plan.select(document, "contract") if features.enabled("checkContract") else {}
@@ -233,6 +234,7 @@ def gaps(store, candidate, observations):
 
 def prove(store, ref, contract, checks):
     from dataclasses import replace
+    from . import plan
     unit = store.unit(ref)
     root = Path(unit.worktree)
     if unit.P is None:

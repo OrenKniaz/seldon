@@ -115,8 +115,9 @@ def replan(store, gaps):
 
 def replan_worker_agreements(store):
     """Only after all other work has drained, return unresolved worker agreements to ARCHITECT."""
+    from . import units
     pending = {unit: source for unit, row in store.units().items() if row.state == "ASKED"
-               and (source := decisions.contract_gap(store, unit))}
+               and (source := units.contract_gap(store, unit))}
     if not pending:
         return False
     cursor = store.cursor()
@@ -138,7 +139,7 @@ def replan_worker_agreements(store):
             history = store.recovery(key)
             history.update(contractGap=None, coached=False, waiting=False)
             store.recovery(key, history)
-            decisions.again(store, {"unit": unit}, source, message)
+            units.again(store, {"unit": unit}, source, message)
         ref = store.record("architecture_gap", {"vision": cursor.vision, "source": list(pending.values()),
             "outline": outline, "gap": "\n".join(messages), "workerAgreements": subject})
         advance(store, "plan-gap", ref, finalCommit=None, failure=(
@@ -151,7 +152,7 @@ def replan_worker_agreements(store):
 
 def corrected_checks(store):
     """Rework both sides of a corrected check agreement once, when its revised plan is reviewed."""
-    from .architecture import index
+    from .answers import index
 
     for _, _, transition in reversed(store.records("transition")):
         if transition["unit"] is not None:

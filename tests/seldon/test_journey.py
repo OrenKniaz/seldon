@@ -9,6 +9,7 @@ from threading import Barrier
 
 import pytest
 
+from seldon import unit_questions
 from seldon import gitwork, plan, questions
 from seldon.providers import ROLES, Codex, ProviderFailure
 from seldon.run import Run
@@ -259,7 +260,7 @@ def test_grow_align_receipt_and_lock_journey(tmp_path, monkeypatch):
     Scalar approval tests miss the interruption between receiving several choices and
     folding them, and cannot catch a draft reaching ARCHITECT or B as the accepted vision.
     """
-    from seldon import architecture, decisions, features, frontdoor, schema
+    from seldon import decisions, features, frontdoor, schema
 
     enabled = {"growAlign", "sizeFirst", "answerRepair"}
     monkeypatch.setattr(features, "enabled", enabled.__contains__)
@@ -408,7 +409,7 @@ def test_grow_align_receipt_and_lock_journey(tmp_path, monkeypatch):
         locked = b["nodes"]["vision"]["body"]
         assert architect == [locked] == [shown["subject"]["vision"]]
         feature = next(f for f in plan.select(b, "feature").values() if f["acceptance"] == changed)
-        story = architecture.commitments(locked)[feature["commitments"][0]]
+        story = questions.commitments(locked)[feature["commitments"][0]]
         assert run.store.read(story["sources"][1]) == receipts[0]
         approval = run.store.read(run.store.cursor().A)
         assert approval["request"] == shown["request"] and approval["subject"]["vision"] == locked
@@ -833,7 +834,7 @@ def test_directed_checkin_architect_continuation_journey(tmp_path, monkeypatch):
 
     from seldon import features
     from seldon.providers import render_question
-    from seldon.run import TERMINAL
+    from seldon.states import TERMINAL
 
     monkeypatch.setattr(features, "enabled", {"growAlign", "answerRepair"}.__contains__)
     monkeypatch.setattr(features, "planning_setup", lambda: {})
@@ -906,7 +907,7 @@ def test_directed_checkin_architect_continuation_journey(tmp_path, monkeypatch):
                     continuing = facts["Continuing owner"]
                     assert facts["What exists here"][continuing]["scope"] == ["unit-001/**"]
                     guide = facts["Walkthrough ownership"]
-                    assert guide["owner"] == "guide" and guide["paths"] == list(plan.GUIDE_SCOPE)
+                    assert guide["owner"] == "guide" and guide["paths"] == list(questions.GUIDE_SCOPE)
                     del answer["units"][-1 if repairing else 0]["scope"]
                     export = next(edit for edit in answer["edits"] if edit["targetHandle"] == "r1")
                     export["typedBody"]["acceptance"] = "CSV exports the original saved value."
@@ -1057,7 +1058,7 @@ def test_recorded_shelflife_repair_coaching_journey(tmp_path, scalar_align, miss
             assert request["gate"] == "EXECUTE" and failures
             body = failures[-1][2]
             assert "not a tree object" in body["message"]
-            assert body["location"].startswith("src/seldon/questions.py:")
+            assert body["location"].startswith("src/seldon/")
             assert body["location"].endswith(" execution_facts")
         else:
             assert request["gate"] == "UNIT" and not failures
@@ -1329,7 +1330,7 @@ class Scripted:
                 assert "Requirements" not in q["facts"]
             if self.parallel:
                 self.parallel.wait(timeout=60)  # Hang guard, not a timing assertion.
-                if plan.GUIDE_PATH in q["facts"]["Write scope"]:
+                if questions.GUIDE_PATH in q["facts"]["Write scope"]:
                     assert q["facts"]["This wave's commitments"] == {"scopeIn:1": VISION["scopeIn"][0]}
                     assert "value-001" in str(q["facts"]["Contracts consumed"])
             return self.native.invoke(q, started)
@@ -1888,7 +1889,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                 promises.pop()
         elif kind == "REVIEW":
             document = facts["Builder spec"]
-            assert dream in document and plan.GUIDE_WALKTHROUGH in document
+            assert dream in document and questions.GUIDE_WALKTHROUGH in document
             assert "Accepted constraint greeting\nHello, Ada!" in document
             reviewed.append(document)
             answer = {"amendments": [], "unresolved": [], "why": "The spec exercises the named action."}
@@ -1917,7 +1918,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             work = Path(question["execution"]["walk"])
             if arm == "hello-reopen":
                 return invoke(question, started)
-            assert (work / plan.GUIDE_PATH).is_file()
+            assert (work / questions.GUIDE_PATH).is_file()
             actions = []
             for name, args, expected_status in (("Greet", ["Ada"], 0), ("Restart", ["Ada"], 0),
                                                  ("Reject bad input", ["--help"], 2)):
@@ -2312,7 +2313,7 @@ def test_planner_brief_golden(tmp_path, monkeypatch, arm):
             continued = True
         elif arm in ("planner", "continuation"):
             scope = q["facts"]["Write scope"][0]
-            brief = guide if scope == plan.GUIDE_PATH else briefs[scope]
+            brief = guide if scope == questions.GUIDE_PATH else briefs[scope]
             assert prompt.startswith(brief + "\n\nWrite scope\n")
             assert prompt.index("Person's exact words\nRead named values\n") < prompt.index("Answer schema\n")
             assert "Write code a senior engineer" not in prompt
@@ -2324,7 +2325,7 @@ def test_planner_brief_golden(tmp_path, monkeypatch, arm):
         else:
             assert prompt == providers.render_question(q, planner_brief=False)[0]
     if arm in ("planner", "continuation"):
-        assert assigned == {*briefs, plan.GUIDE_PATH}
+        assert assigned == {*briefs, questions.GUIDE_PATH}
     assert continued == (arm == "continuation")
 
 
@@ -2587,7 +2588,7 @@ def test_quietbench_peer_agreements_journey(tmp_path, route, monkeypatch):
             if kind in ("ALIGN", "ARCHITECT", "DETAIL"):
                 answer = fixture[{"ALIGN": "r12", "ARCHITECT": "r23", "DETAIL": "r60"}[kind]]
             elif kind == "WORK":
-                if plan.GUIDE_PATH in facts["Write scope"]:
+                if questions.GUIDE_PATH in facts["Write scope"]:
                     return super().invoke(q, started)
                 seen.append("work")
                 if route == "brief" and agreements(facts) == expected:
@@ -2647,7 +2648,7 @@ def test_repeating_worker_question_journey(tmp_path, scalar_align, monkeypatch):
     The existing question golden answers once without a restart and cannot catch a lost
     receipt or a second WORK dispatch on an acknowledgement after the same question returns.
     """
-    from seldon import decisions
+    from seldon import units
     from seldon.decisions import Waiting
 
     slot = tmp_path / "repeat-question"
@@ -2689,7 +2690,7 @@ def test_repeating_worker_question_journey(tmp_path, scalar_align, monkeypatch):
             raise ControllerInterrupted()
 
         with monkeypatch.context() as interrupted:
-            interrupted.setattr(decisions, "ask_unit", interrupt)
+            interrupted.setattr(units, "ask_unit", interrupt)
             with pytest.raises(ControllerInterrupted):
                 while True:
                     run.step()
@@ -3272,7 +3273,7 @@ def test_progressive_wave_plan_journey(tmp_path, scalar_align, steering):
         architecture.outline(merged, before["nodes"]["vision"]["body"])
         scope = {"scope": "Include live hardware", "why": "Needs user agreement"}
         assert architecture.merge(previous, scope) is scope
-        brief = questions.architect_brief(before["nodes"]["vision"]["body"],
+        brief = unit_questions.architect_brief(before["nodes"]["vision"]["body"],
                                            questions.user_words(run.store), built=built)
         _, answer = inference.call(run.store, lambda q: json.dumps({"answer":
             partial if steering == "partial" else resent}), brief,
@@ -3771,7 +3772,7 @@ def test_saved_area_order_does_not_reassign_review_or_validation_journey(tmp_pat
         project.mkdir()
         gitwork.git(project, "init", "--quiet")
         guide = gitwork.git(project, "hash-object", "-w", "--stdin", data=b"Open the ShelfLife walkthrough.\n")
-        candidate, = gitwork.import_commits(project, None, [[(plan.GUIDE_PATH, "100644", guide)]])
+        candidate, = gitwork.import_commits(project, None, [[(questions.GUIDE_PATH, "100644", guide)]])
         document = {"architecture": {"areas": order}, "nodes": fixture["nodes"]}
         store = Store(project)
         try:
@@ -4046,7 +4047,7 @@ def test_later_wave_piece_journey(tmp_path, scalar_align, forced):
     original = run.provider.invoke
 
     def invoke(q, started):
-        if q["kind"] == "WORK" and plan.GUIDE_PATH in q["facts"]["Write scope"] and "Readers" in q["facts"]:
+        if q["kind"] == "WORK" and questions.GUIDE_PATH in q["facts"]["Write scope"] and "Readers" in q["facts"]:
             briefs.append(q["facts"])
         return original(q, started)
 

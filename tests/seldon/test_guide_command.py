@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from seldon import features, gitwork, plan
+from seldon import features, gitwork, plan, questions
 from test_journey import finish, prepare
 
 
@@ -95,7 +95,7 @@ if 'docs/try-it.md' in facts['Write scope']:
                             if row["check"] == check and row["purpose"] == "final")
             execution = observation
             checkout = observation["workingDirectory"]
-            guide = facts["Product files"][plan.GUIDE_PATH]
+            guide = facts["Product files"][questions.GUIDE_PATH]
         elif not folded and question["kind"] == "PRODUCT" and question["targets"] == ["tryItGuide"]:
             observation, = facts["Final observations"]
             execution = observation
@@ -139,7 +139,7 @@ if 'docs/try-it.md' in facts['Write scope']:
             evidence.parent.mkdir()
             evidence.write_text("{}", encoding="utf-8")
             with pytest.raises(ValueError, match="Out-of-scope writes: evidence/probe.json"):
-                gitwork.snapshots(checkout, cursor.candidate, list(plan.GUIDE_SCOPE), [], cursor.scratch)
+                gitwork.snapshots(checkout, cursor.candidate, list(questions.GUIDE_SCOPE), [], cursor.scratch)
         context = "unit-001" if folded else "docs"
         brief = json.loads((slot / f"context-{context}.json").read_text(encoding="utf-8"))
         guidance = brief["Try-it guide"] if folded else brief["Unit"]

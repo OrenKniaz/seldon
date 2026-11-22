@@ -66,17 +66,6 @@ BODIES["unit"] = {"anyOf": [BODIES["unit"], obj(**BODIES["unit"]["properties"],
                                               brief={"type": "string"})]}
 SEVERITY = choice("must-fix", "nit", "pre-existing")
 GAP = obj(target=TEXT, correction=TEXT, severity=SEVERITY)
-PLAN_BODIES = {**BODIES, "feature": FEATURE,
-               "contract": obj(**{**BODIES["contract"]["properties"],
-                                  "provider": POSITION, "consumers": array(POSITION)})}
-PLANNED_UNIT = obj(scope=array(TEXT, 1), requirements=array(TEXT, 1),
-                   dependencies=array(POSITION), instructions=TEXT)
-PLAN = obj(edits=array({"anyOf": [obj(kind=choice(kind), targetHandle=TEXT,
-                                     typedBody=body)
-                                  for kind, body in PLAN_BODIES.items() if kind != "unit"]}, 1),
-           units=array({"anyOf": [obj(**PLANNED_UNIT["properties"], area=TEXT),
-                                 obj(**PLANNED_UNIT["properties"], area=TEXT, provides=REFS)]}, 1))
-
 # Architecture names areas, never work units. DETAIL owns only its local records.
 AREA = obj(handle=TEXT, responsibility=TEXT, scope=array(TEXT, 1), commitments=array(TEXT, 1))
 AREA_CONTRACT = obj(handle=TEXT, **BODIES["contract"]["properties"])
@@ -85,7 +74,7 @@ ARCHITECT = obj(areas=array(AREA), contracts=array(AREA_CONTRACT),
 
 
 def detail_plan(feature, *, planner_brief=False, guide_brief=False, continuing=False):
-    unit = {**PLANNED_UNIT["properties"], "requirements": REFS}
+    unit = dict(scope=array(TEXT, 1), requirements=REFS, dependencies=array(POSITION), instructions=TEXT)
     if planner_brief:
         unit["brief"] = TEXT
     assignments = [obj(**unit), obj(**unit, provides=REFS)]
@@ -94,13 +83,11 @@ def detail_plan(feature, *, planner_brief=False, guide_brief=False, continuing=F
         assignments.extend([obj(**unit), obj(**unit, provides=REFS)])
     return obj(verdict=choice("planned"), edits=array({"anyOf": [
         obj(kind=choice("feature"), targetHandle=TEXT, typedBody=feature),
-        obj(kind=choice("requirement"), targetHandle=TEXT, typedBody=PLAN_BODIES["requirement"])]}, 1),
+        obj(kind=choice("requirement"), targetHandle=TEXT, typedBody=BODIES["requirement"])]}, 1),
         units=array({"anyOf": assignments}, 1),
         **({"guideBrief": TEXT} if guide_brief else {}))
 
 
-DETAIL_PLAN = detail_plan(FEATURE)
-GROWN_DETAIL_PLAN = detail_plan(GROWN_FEATURE)
 DETAIL_SPLIT = obj(verdict=choice("subdivide"), subareas=array(AREA, 2), contracts=array(AREA_CONTRACT))
 DETAIL_GAP = obj(verdict=choice("contract_gap"), need=TEXT)
 CHECK = dict(purpose=TEXT, command=array(TEXT, 1), expectedEvidence=TEXT, requirements=REFS)
@@ -130,37 +117,34 @@ def folded_judge_schema(subjects, owner):
 
 def answer_schema(kind, targets=(), owners=(), *, grown=False, coach_contracts=False,
                   planner_brief=False, guide_brief=False, continuing=False):
-    gap = obj(target=choice(*targets), correction=TEXT, owners=array(choice(*owners), 1), severity=SEVERITY)
-    payload = {
-        "ALIGN": VISION, "ARCHITECT": obj(**{**ARCHITECT["properties"],
-            "waves": array(ARCHITECT["properties"]["waves"]["items"])}),
-        "DETAIL": GROWN_DETAIL_PLAN if grown else DETAIL_PLAN,
-        "DECIDE": obj(choice=choice(*targets,
-                                    "Other", "Stop", "Unclear")),
-        "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
-        "WORK": obj(outcome=choice("done"), summary=TEXT,
-                    checkPaths=REFS, checks=array({"anyOf": [
-                        obj(**CHECK), obj(update=TEXT, **CHECK), obj(retire=TEXT)]}),
-                    discoveries=array(obj(owner=choice(*owners), correction=TEXT))),
-        "COACH": obj(guidance=TEXT),
-        "JUDGE": obj(verdict=choice("satisfied", "gap"),
-                     gaps=array(obj(**GAP["properties"], owners=gap["properties"]["owners"]))),
-        "FLOW": obj(verdict=choice("satisfied", "gap"), gaps=array(gap)),
-        "PRODUCT": obj(verdict=choice("satisfied", "gap"), gaps=array(gap)),
-    }[kind]
-    if kind == "DETAIL" and (planner_brief or continuing):
-        payload = detail_plan(GROWN_FEATURE if grown else FEATURE, planner_brief=planner_brief,
-                              guide_brief=guide_brief, continuing=continuing)
-    uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1))
-    alternatives = ((payload, DETAIL_SPLIT, DETAIL_GAP) if kind == "DETAIL" else
-                    (payload, obj(scope=TEXT)) if kind == "ARCHITECT" else
-                    (payload, obj(**{**payload["properties"], "outcome": choice("question"),
-                                     "question": TEXT})) if kind == "WORK" else
-                    (payload, obj(ask=ASK)) if kind == "COACH" else
-                    (payload, uncertain) if kind in ("JUDGE", "FLOW", "PRODUCT", "REVIEW") else
-                    (payload,))
+    if kind == "ALIGN":
+        alternatives = [VISION]
+    elif kind == "ARCHITECT":
+        props = ARCHITECT["properties"]
+        alternatives = [obj(**{**props, "waves": array(props["waves"]["items"])}), obj(scope=TEXT)]
+    elif kind == "DETAIL":
+        alternatives = [detail_plan(GROWN_FEATURE if grown else FEATURE, planner_brief=planner_brief,
+                                    guide_brief=guide_brief if planner_brief or continuing else False,
+                                    continuing=continuing), DETAIL_SPLIT, DETAIL_GAP]
+    elif kind == "DECIDE":
+        alternatives = [obj(choice=choice(*targets, "Other", "Stop", "Unclear"))]
+    elif kind == "COACH":
+        alternatives = [obj(guidance=TEXT), obj(ask=ASK)]
+    elif kind == "WORK":
+        receipt = dict(summary=TEXT, checkPaths=REFS,
+                       checks=array({"anyOf": [obj(**CHECK), obj(update=TEXT, **CHECK), obj(retire=TEXT)]}),
+                       discoveries=array(obj(owner=choice(*owners), correction=TEXT)))
+        alternatives = [obj(outcome=choice("done"), **receipt), obj(outcome=choice("question"), **receipt, question=TEXT)]
+    elif kind in ("REVIEW", "JUDGE", "FLOW", "PRODUCT"):
+        gap = (GAP if kind == "REVIEW" else obj(**GAP["properties"], owners=array(choice(*owners), 1))
+               if kind == "JUDGE" else obj(target=choice(*targets), correction=TEXT,
+                                           owners=array(choice(*owners), 1), severity=SEVERITY))
+        alternatives = [obj(verdict=choice("adequate" if kind == "REVIEW" else "satisfied", "gap"), gaps=array(gap)),
+                        obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1))]
+    else:
+        raise KeyError(kind)
     if coach_contracts:
-        alternatives += (obj(contract=obj(resolution=choice("answer", "gap"), text=TEXT)),)
+        alternatives.append(obj(contract=obj(resolution=choice("answer", "gap"), text=TEXT)))
     return obj(answer={"anyOf": [obj(**item["properties"], why=TEXT) for item in alternatives]})
 
 

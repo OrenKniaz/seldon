@@ -4,7 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 import traceback
 
-from . import features, inference, plan, questions, recovery
+from . import features, inference, questions, recovery
 from .answers import ConsumptionFailure, recorder
 from .providers import InputRejected, ProviderFailure
 from .states import advance
@@ -24,25 +24,6 @@ def holds(store):
     if item["gate"] == "CHECK-IN":
         return cursor.state in ("EXECUTE", "C")
     return cursor.state == item["subject"].get("step", item["gate"])
-
-
-def affected(store, ref):
-    contracts = plan.select(plan.execution(store), "unit")
-    refs = {ref}
-    while added := {r for r, u in contracts.items() if r not in refs
-                    and refs.intersection(u["dependencies"])}:
-        refs.update(added)
-    return refs
-
-
-def again(store, subject, source, direction):
-    ref = subject["unit"]
-    for owner, unit in store.units().items():
-        if unit.state == "ASKED" and recovery.lineage(store, owner) == recovery.lineage(store, ref):
-            advance(store, "again", source, unit=owner, thread=None,
-                    base=unit.base if unit.worktree else store.cursor().candidate,
-                    callFolder=None, callAttempt=None,
-                    failure=unit.failure + "\nDirection: " + direction)
 
 
 def previous_worker_question(store, answer):
@@ -65,23 +46,28 @@ def coach(store, provider, subject, frame=False):
                 "options": [option("Provide a fix", "Describe the changed information or decision", "direction"),
                             option("Pause", "Keep this question pending", "pause")]}}
     coach_contracts = bool(ref) and features.enabled("askContracts")
-    document = plan.execution(store) if store.cursor().revision else {}
+    cursor = store.cursor()
+    document = {}
+    if ref or cursor.revision:
+        from . import plan
+        document = plan.execution(store) if cursor.revision else {}
     facts = {"Unresolved work": subject, "Earlier user answers": questions.user_words(store),
-             "Vision": store.read(store.cursor().vision) if store.cursor().vision else None,
+             "Vision": store.read(cursor.vision) if cursor.vision else None,
              "Decisions": document.get("architecture", {}).get("decisions", []),
              "User answers": [b for _, _, b in store.records("user_words")]}
     if ref:
-        facts.update({"Execution facts": questions.execution_facts(store, ref),
+        from . import unit_questions
+        facts.update({"Execution facts": unit_questions.execution_facts(store, ref),
             "Runtime": questions.runtime(store.read(store.cursor().kickoff)["setup"]),
-            "Requirements": questions.requirement_facts(document,
+            "Requirements": unit_questions.requirement_facts(document,
                 plan.select(document, "unit")[ref]["requirements"]),
-            **questions.agreement_facts(document, ref)})
+            **unit_questions.agreement_facts(document, ref)})
     else:
         facts["Requirements and agreements"] = document
     response = None
     def consume(source, answer):
         nonlocal subject, response
-        key, subject = recovery.subject(store, "UNIT" if ref else subject["step"], subject)
+        key, subject = recovery.subject(store, subject)
         history = store.recovery(key)
         contract = answer.get("contract")
         if contract and (contract["resolution"] == "gap" or history["coached"] or frame):
@@ -95,6 +81,7 @@ def coach(store, provider, subject, frame=False):
             direction = store.record("planner_answer", {"subject": subject, "source": source,
                 "guidance": guidance, "words": guidance, "origin": "planner"})
             if ref:
+                from .units import again
                 again(store, subject, source, guidance)
             else:
                 store.record("approval", {"request": store.cursor().decision, "subject": subject,
@@ -129,75 +116,6 @@ def coach(store, provider, subject, frame=False):
     return response
 
 
-def contract_gap(store, ref):
-    return store.recovery(recovery.lineage(store, ref)).get("contractGap")
-
-
-def ask_unit(store, provider, ref):
-    try:
-        row = store.unit(ref)
-        tried = [b["failure"] for _, _, b in store.records("unit_failure") if b["unit"] == ref]
-        subject = {"unit": ref, "tried": tried, "failure": row.failure,
-                   "affects": sorted(affected(store, ref) - {ref}), "recommendation": row.failure}
-        attempts = store.recovery(recovery.lineage(store, ref))["attempts"]
-        if attempts:
-            report = attempts[-1]
-            source = store.read(report)
-            if source.get("kind") == "WORK" and source["unit"] == ref:
-                receipt = source["answer"]
-                subject.update(report=report, receipt=receipt, tried=[*tried, row.failure])
-                if worker_question := receipt.get("question"):
-                    subject["workerQuestion"] = worker_question
-        checks = recovery.repeated(store, ref)
-        if checks and (missing := judged(store, ref)):
-            # Builders could not fix what a judge found missing; that is a product choice, not a fault.
-            subject["question"] = (f"The builders could not fix what the judge found missing in {ref}, "
-                f"even after the approach you chose: {missing} Tried: "
-                f"{len(store.recovery(recovery.lineage(store, ref))['attempts'])} rounds of corrections. "
-                "How should we continue?")
-            if subject := coach(store, provider, subject, frame=True):
-                request(store, "UNIT", subject)
-        elif checks and features.enabled("checkContract") and check_failure(store, ref):
-            subject["checkFailure"] = True
-            subject["question"] = (
-                f"The builders could not make these checks pass for {ref} after trying the chosen approach: "
-                f"{', '.join(checks)}. Expected them to pass. The same checks failed again. "
-                "What should we change so the builders can continue?")
-            subject["recommendation"] = (
-                "Offer a concrete change to the agreement or approach based on the observed failure.")
-            if subject := coach(store, provider, subject, frame=True):
-                request(store, "UNIT", subject)
-        elif checks:
-            # Like a repeated step fault: the same approach again would only loop (R15, R17).
-            subject["ask"] = {"question": f"This is Seldon's fault: {ref} failed the same checks again "
-                f"({', '.join(checks)}) after the approach you chose. Expected them to pass; got the "
-                "failure shown. We recommend Pause until Seldon is fixed.",
-                "options": [option("Pause", "Pause here; your work is saved and can resume", "pause"),
-                            option("Try again", "Retry this unit if its cause has been fixed", "direct"),
-                            option("Leave this out", "Leave out this unit and its dependents", "drop")]}
-            request(store, "UNIT", subject)
-        elif subject := coach(store, provider, subject):
-            request(store, "UNIT", subject)
-    finally:
-        store.close()
-
-
-def judged(store, ref):
-    """What a judge found missing in the unit's latest correction; None for a check or code failure."""
-    attempts = store.recovery(recovery.lineage(store, ref))["attempts"]
-    body = store.read(attempts[-1]) if attempts else {}
-    sources = [store.read(g["source"]) for g in body.get("gaps", []) if g["kind"] != "check"]
-    return " ".join(f"{g['target']}: {g['correction']}" for b in sources
-                    for g in questions.must_fix(b.get("answer", {"gaps": []}))) or None
-
-
-def check_failure(store, ref):
-    """Repeated proof failures carry check IDs or a check gap, unlike controller faults."""
-    attempt = store.recovery(recovery.lineage(store, ref))["attempts"][-1]
-    body = store.read(attempt)
-    return body.get("checks") or any(g["kind"] == "check" for g in body.get("gaps", []))
-
-
 def option(label, means, effect):
     return {"label": label, "means": means, "effect": effect}
 
@@ -228,31 +146,27 @@ def pause_ask(reason):
 def step_fault(store, provider, error):
     cause, shape = record_fault(store, error)
     step, failure = shape["step"], shape["failure"]
-    key = recovery.lineage(store)
-    repeated = shape in store.recovery(key)["seen"]
+    repeated = shape in store.recovery(recovery.lineage(store))["seen"]
     recovery.failed(store, cause, shape=shape)
     subject = {"step": step, "tried": [failure], "failure": failure}
     if step == "PROVE":
         return owner_question(store, "Seldon", failure, retry="Run proof after the fault is fixed")
     if repeated:
-        if isinstance(error, InputRejected):
-            subject["ask"] = pause_ask(f"{failure} Seldon owns preparing a smaller evidence packet.")
-        else:
-            subject["ask"] = pause_ask(str(error))
+        reason = (f"{failure} Seldon owns preparing a smaller evidence packet."
+                  if isinstance(error, InputRejected) else str(error))
+        subject["ask"] = pause_ask(reason)
     else:
         subject = coach(store, provider, subject)
     if subject:
         request(store, step, subject)
 
 
-def owner_question(store, owner, failure, *, retry=None, subject=None):
+def owner_question(store, owner, failure, *, retry=None):
     step = store.cursor().state
     options = [option("Pause", "Keep this question pending", "pause")]
-    if retry:
-        options.append(option(retry, "Confirm the named input is ready to try again", "retry"))
-    else:
-        options.append(option("Provide a fix", "Describe the concrete change that resolves this failure", "direction"))
-    request(store, step, {**(subject or {}), "step": step, "inputOwner": owner, "failure": failure}, ask={
+    options.append(option(retry, "Confirm the named input is ready to try again", "retry") if retry
+                   else option("Provide a fix", "Describe the concrete change that resolves this failure", "direction"))
+    request(store, step, {"step": step, "inputOwner": owner, "failure": failure}, ask={
         "question": f"{owner} owns the next change.\n{failure}", "options": options})
 
 
@@ -268,7 +182,7 @@ def route_repair(store, cause, owner, tree, failure, retry):
         owner_question(store, owner, failure, retry=retry)
 
 
-def gate_ask(store, gate, subject):
+def gate_ask(gate, subject):
     if "ask" in subject:
         return subject["ask"]
     if gate == "A":
@@ -277,14 +191,12 @@ def gate_ask(store, gate, subject):
     elif gate == "B":
         opts = [option("Build this plan", "Approve the plan", "approve"),
                 option("Build it and do not stop at check-ins", "Approve and waive later check-ins", "waive")]
-    elif gate == "CHECK-IN":
-        opts = [option("approve", "Continue with the proposed next work", "approve"),
-                option("ask for changes", "Describe the changes you want", "direct"),
-                option("stop", "End the dream here", "stop")]
-    elif gate == "C":
-        opts = [option("accept", "Accept the demonstrated product", "approve"),
-                option("ask for changes", "Describe the changes you want", "direct"),
-                option("stop", "End without accepting the product", "stop")]
+    elif gate in ("CHECK-IN", "C"):
+        label, means, stop_reason = (
+            ("approve", "Continue with the proposed next work", "End the dream here") if gate == "CHECK-IN"
+            else ("accept", "Accept the demonstrated product", "End without accepting the product"))
+        opts = [option(label, means, "approve"), option("ask for changes", "Describe the changes you want", "direct"),
+                option("stop", stop_reason, "stop")]
     else:
         return None  # A planning question is coached by decide before it reaches the user.
     return {"question": f"How should we continue at {gate}?", "options": opts}
@@ -307,20 +219,20 @@ def request(store, gate, subject, *, ask=None):
             subject = {**subject, "open gaps": [b for _, _, b in store.records("open_gap")]}
         key = None
         if gate == "UNIT" or "step" in subject:
-            key, subject = recovery.subject(store, gate, subject)
+            key, subject = recovery.subject(store, subject)
             if ("workerQuestion" in subject and subject["workerQuestion"] !=
                     previous_worker_question(store, subject.get("previousAnswer"))):
                 subject.pop("recurrence", None)
-        ask = ask if ask is not None else gate_ask(store, gate, subject)
+        ask = ask if ask is not None else gate_ask(gate, subject)
         summary = []
-        if gate in ("A", "B"):
-            vision = subject.get("round", cursor.vision)
-            summary = [b["summary"] for _, _, b in store.records("answer_normalisation")
-                       if b.get("answer") == vision]
         if gate in ("A", "B", "CHECK-IN"):
+            rows = store.records("answer_normalisation")
+            if gate != "CHECK-IN":
+                vision = subject.get("round", cursor.vision)
+                summary = [b["summary"] for _, _, b in rows if b.get("answer") == vision]
             stages = {"A": {"A"}, "B": {"ARCHITECT", "DETAIL", "REVIEW"},
                       "CHECK-IN": {"ARCHITECT", "DETAIL", "REVIEW", "EXECUTE", "WAVE-VERIFY"}}[gate]
-            summary.extend(b["summary"] for _, _, b in store.records("answer_normalisation")
+            summary.extend(b["summary"] for _, _, b in rows
                 if b.get("vision") == cursor.vision and b.get("wave") == cursor.wave and b.get("stage") in stages)
         if gate in ("B", "CHECK-IN"):
             summary.extend(b["summary"] for _, _, b in store.records("scope_normalisation")
@@ -574,21 +486,15 @@ def decide(store, provider, user):
         if effect == "stop":
             stop(store, words)
             return
-        updates = {"decision": None, "failure": ""}
-        if input_owner:
-            updates["failure"] = item["subject"]["failure"]
+        updates = {"decision": None, "failure": item["subject"]["failure"] if input_owner else ""}
         if effect == "waive":
             updates["waived"] = True
         if item["gate"] == "UNIT":
+            from . import units
             if effect == "drop":
-                for owner in sorted(affected(store, item["subject"]["unit"])):
-                    row = store.unit(owner)
-                    if row.state == "WAITING":
-                        advance(store, "asked", approval, unit=owner)
-                    if store.unit(owner).state == "ASKED":
-                        advance(store, "drop", approval, unit=owner, waiting="")
+                units.drop(store, item["subject"]["unit"], approval)
             else:
-                again(store, item["subject"], raw, direction)
+                units.again(store, item["subject"], raw, direction)
             store.cursor(replace(store.cursor(), **updates))
         elif "step" in item["subject"]:
             store.cursor(replace(cursor, **updates, requestedChange=directed))

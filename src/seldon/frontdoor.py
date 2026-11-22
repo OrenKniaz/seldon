@@ -14,7 +14,8 @@ from typing import NotRequired, TypedDict
 
 from . import decisions, lead, providers
 from .decisions import Waiting
-from .run import TERMINAL, Run
+from .run import Run
+from .states import TERMINAL
 from .store import Store
 
 
