@@ -1541,14 +1541,12 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
 
     A replacement check can hide a regression, and a receipt can stall proof or lose a genuine question.
     Wave journeys never exercise Lead's B-bound spec, durable witness or owner-specific repair.
-    guide-replay catches a passing walkthrough that skips the reader shell status action;
-    proof-owner separately protects the runner-owned missing-evidence wait.
-    lr01 guards against asking for a faulty CLI when the base has none. The weak-check twin catches
-    accepting a base pass without review or losing the judge's correction on the next Builder turn.
-    bound-note catches an unquoted demand sending a working product back to the builder, and
-    generated walkthrough dependencies reaching the judge. It also catches an omitted proof standard
-    accepted before REVIEW or a named review amendment lost between B and WORK.
+    guide-replay catches a missing shell observation or a receipt typo unnecessarily reopening the builder.
+    proof-owner catches an omitted proof subject disappearing at C or reopening the builder.
+    The wave journeys do not exercise those Lead paths.
     unresolved-plan catches a missing accepted promise disappearing at B or triggering a whole-plan retry.
+    hello-reopen launches the native guard adapter to catch disabled tools, a missing candidate copy,
+    a product file leaking onto the base through checkPaths, and evidence lost during cleanup.
     """
     from types import SimpleNamespace
 
@@ -1594,6 +1592,37 @@ schema = Path(args[args.index("--output-schema") + 1])
 q = json.loads(schema.with_name("question.json").read_text(encoding="utf-8"))
 prompt = schema.with_name("prompt.txt").read_text(encoding="utf-8")
 facts = q["facts"]
+if q["kind"] == "JUDGE":
+    import base64, os, subprocess, tempfile
+
+    assert 'sandbox_mode="danger-full-access"' in args and 'features.shell_tool=false' not in args
+    assert "never open files or pages in desktop apps" in prompt and os.environ["GIT_EDITOR"] == "true"
+    assert Path.cwd().resolve() == Path(args[args.index("--cd") + 1]).resolve()
+    assert not Path(".git").exists() and Path(facts["Guide path"]).is_file()
+    assert Path(tempfile.gettempdir()).parent == Path.cwd().parent
+    evidence = Path(os.environ["SELDON_EVIDENCE_DIR"])
+    assert evidence.parent == Path.cwd().parent
+    base = Path(facts["Base"])
+    assert not (base / "hello.py").exists()
+    actions = []
+    for step, arg, code in (("Greet", "Ada", 0), ("Restart", "Ada", 0), ("Reject bad input", "--help", 2)):
+        result = subprocess.run([sys.executable, "-B", "hello.py", arg], capture_output=True, text=True)
+        assert result.returncode == code
+        red = subprocess.run([sys.executable, "-B", "hello.py", arg], cwd=base, capture_output=True, text=True)
+        assert "can't open file" in red.stderr
+        actions.append({"action": step, "actual": (result.stdout or result.stderr).strip(),
+                        "baseline": red.stderr.strip(), "screenshots": ["view.png"] if code == 0 else [],
+                        "promises": ["tryItGuide", "quality:exact" if code else "scopeIn:hello"]})
+    actions.append({"action": "Inspect hello.py", "actual": Path("hello.py").read_text(),
+                    "baseline": "", "screenshots": [], "promises": ["sourceAcceptance"]})
+    (evidence / "command.txt").write_text(actions[2]["actual"], encoding="utf-8")
+    (evidence / "view.png").write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR1sAAAAASUVORK5CYII="))
+    answer = {"why": "Walked the command and rejection from the guide.", "actions": actions, "findings": [],
+              "feedback": [{"step": "Reject bad input", "note": "Usage is easy to scan."}]}
+    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({"answer": answer})}}))
+    print(json.dumps({"type": "turn.completed"}))
+    raise SystemExit
 assert prompt.startswith(facts["Milestone brief"] + "\n\n")
 assert "provider-native sub-agents and skills" in prompt and "Return schema" in prompt
 assert "features.multi_agent=true" in args and "skills.bundled.enabled=true" in args
@@ -1606,7 +1635,7 @@ assert "`python hello.py --help`" in facts["Owner words"]["Dream"]
 if arm == "plan-owner" and "positional" in facts["Approved spec"]["how"]:
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(
         {"answer": {"outcome": "plan correction", "summary": "The approved design has an ambiguous parser.",
-                    "checks": [], "checkPaths": [], "walkthrough": {}, "question": ""}})}}),
+                    "checks": [], "checkPaths": [], "question": ""}})}}),
           flush=True)
     print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
     raise SystemExit
@@ -1630,6 +1659,8 @@ def implement(name, greeting):
         + f"print(f'{greeting}, {{sys.argv[1]}}!')\n", encoding="utf-8")
 implement(name, expected.split(",")[0])
 check_paths = [path.as_posix()]
+if arm == "hello-reopen":
+    check_paths.append("hello.py")
 if name == "hello":
     err = Path("checks/usage.py")
     setup = ""
@@ -1658,7 +1689,7 @@ if name == "hello":
     Path("preview.png").write_bytes(base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j6ioAAAAASUVORK5CYII="))
 elif "resume" in args:
-    assert "Expected Hello, Ada!, got Broken, Ada!" in facts["Exact failure"]
+    assert "Observed: Broken, Ada!" in facts["Exact failure"]
     if arm != "unchanged":
         implement("hello", "Hello")
 else:
@@ -1704,28 +1735,15 @@ if arm == "guide-replay":
             output.write("Run in PowerShell: `python hello.py --help; $LASTEXITCODE`. Expect 2.\n")
     script = Path("docs/try-it/replay.py")
     script.parent.mkdir(parents=True, exist_ok=True)
-    if "resume" in args:
-        assert facts["Exact failure"].endswith("Exercise the documented PowerShell $LASTEXITCODE step and record its result.")
-        script.write_text(
-            "import json, os, subprocess\nfrom pathlib import Path\n"
-            + f"r = subprocess.run([{shell!r}, '-NoProfile', '-Command', "
-            + "'python hello.py --help; $LASTEXITCODE'], capture_output=True, text=True)\n"
-            + "assert r.returncode == 0 and r.stdout.strip() == '2' and 'Usage:' in r.stderr\n"
-            + "Path(os.environ['SELDON_EVIDENCE_DIR'], 'operation-lifecycle.json').write_text("
-            + "json.dumps([{'command': 'python hello.py --help; $LASTEXITCODE', 'result': r.stdout.strip()}]))\n"
-            + "print('PowerShell $LASTEXITCODE: ' + r.stdout.strip())\n", encoding="utf-8")
-    else:
-        script.write_text("print('guide check passed without shell status')\n", encoding="utf-8")
+    script.write_text("print('guide check passed without shell status')\n", encoding="utf-8")
     check_paths.append(script.as_posix())
-for check in checks:
-    check["expectedExit"] = 0
-walk = dict(checks[-1] if name == "hello" else checks[0])
-walk.pop("vision")
+checks = [{"command": check["command"], "promises": [check["vision"]]} for check in checks]
 if arm == "guide-replay":
-    walk = {"purpose": "Replay documented PowerShell step", "command": [sys.executable, "-B", script.as_posix()],
-            "expectedEvidence": "PowerShell status", "expectedExit": 0}
+    checks.append({"command": [sys.executable, "-B", script.as_posix()], "promises": ["tryItGuide"]})
+else:
+    checks[-1 if name == "hello" else 0]["promises"].append("tryItGuide")
 receipt = {"outcome": "done", "summary": f"A visitor can run {name}. Resumed: {'resume' in args}.",
-           "checks": checks, "checkPaths": check_paths, "walkthrough": walk, "question": ""}
+           "checks": checks, "checkPaths": check_paths, "question": ""}
 # Retained e2dc3f5 lh01 r57 and lh02 r40, with the fixture's runnable witnesses attached.
 if arm == "lh01":
     receipt.update(outcome="question", summary=(
@@ -1740,6 +1758,13 @@ if arm == "lh02":
         "process exit status, so the unattended check outcomes were not fully proven. Browser testing is not "
         "applicable because this product has no browser path. The next step is to rerun each check while "
         "asserting its exit status is 0."))
+if arm == "guide-replay":
+    receipt["checkPaths"].append("mistyped-guide-name.py")
+if arm == "bound-note":
+    err.write_text(err.read_text() +
+        "import json, os\nfrom pathlib import Path\n"
+        "Path(os.environ['SELDON_EVIDENCE_DIR'], 'operation-lifecycle.json').write_text("
+        "json.dumps([{'step': 'Read shell exit status', 'observed': False, 'reason': 'Unavailable'}]))\n")
 if arm == "explicit-question":
     receipt["question"] = "Which of the two Windows Python runtimes should the guide target?"
 print(json.dumps({"type": "item.completed", "item": {"type": "agent_message",
@@ -1759,6 +1784,8 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         if kind == "WORK":
             expected = reviewed[-1].replace(planned[0]["design"], amendments) if arm == "bound-note" else reviewed[-1]
             assert facts["Milestone brief"] in expected
+            if facts.get("Previous checkpoint"):
+                assert facts["How the previous milestone felt"][0]["note"] == "Usage is easy to scan."
             return invoke(question, started)
         if kind == "ALIGN":
             answer = draft
@@ -1795,92 +1822,67 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         elif kind == "DECIDE":
             assert facts["User's words"] == "yes, please continue"
             answer = {"choice": "Unclear", "why": "No change to the named input."}
+        elif kind == "RECEIPT":
+            assert arm == "guide-replay" and "mistyped-guide-name.py" in facts["Error"]
+            answer = deepcopy(facts["Return"])
+            answer["checkPaths"].remove("mistyped-guide-name.py")
+        elif kind == "COACH":
+            raise Waiting()
         else:
+            import shutil
+            import subprocess
+
             assert kind == "JUDGE"
-            if arm in ("lh01", "lh02"):
-                assert ("Planner-owned blocker" if arm == "lh01" else "process exit status") in facts["Builder notes"]
-            assert "hello.py" in facts["Code shape (measured)"]
-            assert "checks/kit/browser.cjs" in facts["Candidate file inventory"]
-            assert "preview.png" in facts["Candidate file inventory"] and "preview.png" not in facts["Product files"]
-            assert any(Path(image).read_bytes().startswith(b"\x89PNG") for image in question["images"])
+            work = Path(question["execution"]["walk"])
+            if arm == "hello-reopen":
+                return invoke(question, started)
+            assert (work / plan.GUIDE_PATH).is_file()
+            actions = []
+            for name, args, expected_status in (("Greet", ["Ada"], 0), ("Restart", ["Ada"], 0),
+                                                 ("Reject bad input", ["--help"], 2)):
+                result = subprocess.run([sys.executable, "-B", "hello.py", *args], cwd=work,
+                                        capture_output=True, text=True, check=False)
+                assert result.returncode == expected_status
+                promise = "quality:exact" if expected_status else "scopeIn:hello"
+                red = subprocess.run([sys.executable, "-B", "hello.py", *args], cwd=facts["Base"],
+                                     capture_output=True, text=True)
+                actions.append({"action": name, "actual": (result.stdout or result.stderr).strip(),
+                                "promises": [promise, "tryItGuide"], "screenshots": [],
+                                "baseline": red.stderr.strip() if promise in facts["New promises"] else ""})
+            if arm != "proof-owner":
+                actions.append({"action": "Inspect implementation", "actual": (work / "hello.py").read_text(),
+                                "promises": ["sourceAcceptance"], "baseline": "", "screenshots": []})
+            if "scopeIn:bye" in facts["Subjects"]:
+                command = [sys.executable, "-B", "bye.py", "Ada"]
+                bye = subprocess.run(command, cwd=work, capture_output=True, text=True, check=True)
+                red = subprocess.run(command, cwd=facts["Base"], capture_output=True, text=True)
+                actions.append({"action": "Say goodbye", "actual": bye.stdout, "baseline": red.stderr,
+                                "promises": ["scopeIn:bye"], "screenshots": []})
             green = [row for row in facts["Observations"] if row["purpose"] == "milestone"]
             assert all(row["cleanCheckout"] and row["executionStarted"] and row["cleanupVerified"]
-                       and row["commit"] == facts["Candidate"] for row in green)
-            assert any(row["requirements"] == ["quality:exact"] and "usage error asserted" in row["stdout"]
-                       and row["exitCode"] == 0 and row["command"][-1] == "checks/usage.py" for row in green)
-            assert {row["commit"] for row in facts["Observations"] if row["purpose"] == "milestone"} == {
-                facts["Candidate"]}
-            assert any("Hello, Ada!" in row["stdout"] for row in facts["Observations"])
-            answer = {"findings": {key: {"verdict": "satisfied", "gaps": [],
-                                         "why": "The named CLI action and source support the subject."}
-                                   for key in facts["Subjects"]}, "why": "Checked the delivered commands."}
+                       and row["commit"] == facts["Candidate commit"] for row in green)
+            assert any("usage error asserted" in row["stdout"] for row in green)
+            answer = {"why": "Walked the command and rejection from the guide.", "actions": actions,
+                      "findings": [], "feedback": [{"step": "Reject bad input", "note": "Usage is easy to scan."}]}
+
+            def finding(promise, kind, evidence, reason, quote=""):
+                answer["findings"].append({"promise": promise, "kind": kind, "quote": quote,
+                                           "evidence": evidence, "reason": reason})
+
+            if actions[0]["actual"] == "Broken, Ada!":
+                finding("scopeIn:hello", "defect", "Greet", "Restore the original greeting.",
+                        facts["Subjects"]["scopeIn:hello"]["result"])
             if arm == "bound-note":
-                assert not any(path.endswith("generated.txt") for path in facts["Candidate file inventory"])
-                assert any(path in question["images"] and item.get("image")
-                           for row in green for path, item in row["artifacts"].items())
-                answer["findings"]["scopeIn:hello"] = {"verdict": "gap", "why": "A style preference.",
-                    "gaps": [{"target": "scopeIn:hello", "owners": ["builder"], "severity": "must-fix",
-                              "correction": "Add a second punctuation case."}]}
-                answer["findings"]["codeQuality"] = {"verdict": "uncertain", "why": "No code style trace.",
-                    "neededFacts": ["A subjective style review."]}
+                finding("quality:exact", "uncertain", "Usage", "A remaining accessibility result is unverified.")
+            if arm == "weak-check":
+                actions[2]["baseline"] = ""
             if arm == "guide-replay":
-                walkthrough = next(row for row in green if row["command"][-1] == "docs/try-it/replay.py")
-                if "guide check passed without shell status" in walkthrough["stdout"]:
-                    answer["findings"]["tryItGuide"] = {"verdict": "gap",
-                        "why": "The check omits the documented shell action.",
-                        "gaps": [{"target": "tryItGuide", "owners": ["builder"], "severity": "must-fix",
-                                  "quote": facts["Subjects"]["tryItGuide"]["result"],
-                                  "evidence": walkthrough["stdout"],
-                                  "correction": "Exercise the documented PowerShell $LASTEXITCODE step and record its result."}]}
-                else:
-                    assert "PowerShell $LASTEXITCODE: 2" in walkthrough["stdout"]
-                    assert walkthrough["operationLifecycle"] == [
-                        {"command": "python hello.py --help; $LASTEXITCODE", "result": "2"}]
-            if arm == "proof-owner":
-                answer["findings"]["tryItGuide"] = {"verdict": "uncertain",
-                    "why": "No runner observation of the guide lifecycle.",
-                    "quote": facts["Subjects"]["tryItGuide"]["result"],
-                    "evidence": "The runner recorded no documented operation lifecycle.",
-                    "neededFacts": ["Runner's documented-step evidence"]}
-            if arm in ("lr01", "weak-check"):
-                usage = next(row for row in green if row["requirements"] == ["quality:exact"])
-                if "Milestone base" not in facts:
-                    # lr01 r56's unresolved clear-errors finding, mapped to this journey's usage promise.
-                    answer["findings"]["quality:exact"] = {"verdict": "uncertain",
-                        "why": "The candidate check exercises argument rejection and passes. The RED run "
-                               "instead failed because hello.py was missing.",
-                        "neededFacts": ["A RED observation against an existing product that fails because "
-                                        "an unknown flag does not produce the required diagnostic."]}
-                else:
-                    base = [row for row in facts["Observations"] if row["purpose"] == "milestone-base"]
-                    assert {row["check"] for row in base} == {row["check"] for row in green}
-                    assert all(row["commit"] == base_commit for row in base)
-                    assert all(row["runnerResult"] == "GREEN" for row in green)
-                    assert facts["Milestone base"] == base_commit and usage["check"] in facts["New promise checks"]
-                    original = next(row for row in base if row["check"] == usage["check"])
-                    assert original["command"] == usage["command"]
-                    source = facts["Product files"]["checks/usage.py"]
-                    assert usage["executedCommit"] == usage["commit"]
-                    overlay = original["executedCommit"]
-                    assert gitwork.git(project, "rev-parse", f"{overlay}^") == base_commit
-                    assert gitwork.git(project, "diff", "--name-only", base_commit, overlay).splitlines() == sorted(
-                        original["witness"]["paths"])
-                    assert all("tracked witness in a clean checkout" in row["stdout"]
-                               for row in (original, usage))
-                    if "assert (r.returncode, r.stdout, r.stderr)" in source:
-                        assert original["runnerResult"] == "RED" and original["exitCode"] != 0
-                        assert "assert (r.returncode, r.stdout, r.stderr)" in original["stderr"]
-                        answer["findings"]["quality:exact"]["why"] = (
-                            "The base lacks the CLI. The check asserts the exact status and streams "
-                            "on the real candidate and would catch incorrect argument rejection.")
-                    else:
-                        assert arm == "weak-check" and original["runnerResult"] == "GREEN"
-                        answer["findings"]["quality:exact"] = {"verdict": "gap",
-                            "why": "Python's missing-file diagnostic satisfies the check without running the CLI.",
-                            "gaps": [{"target": "quality:exact", "owners": ["builder"], "severity": "must-fix",
-                                      "quote": facts["Subjects"]["quality:exact"]["result"],
-                                      "evidence": "Python's missing-file diagnostic satisfies the base check.",
-                                      "correction": "In checks/usage.py, assert the CLI's usage line, exit 2 and empty stdout."}]}
+                shell = shutil.which("powershell") or shutil.which("pwsh")
+                status = subprocess.run([shell, "-NoProfile", "-Command", "python hello.py --help; $LASTEXITCODE"],
+                                        cwd=work, capture_output=True, text=True, check=True)
+                assert status.stdout.strip() == "2" and "Usage:" in status.stderr
+                actions.append({"action": "Read PowerShell $LASTEXITCODE", "actual": status.stdout.strip(),
+                                "baseline": "", "promises": ["tryItGuide"], "screenshots": []})
         return json.dumps({"answer": answer}), None
 
     monkeypatch.setattr(provider, "invoke", scripted)
@@ -1889,11 +1891,21 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
     def user(request):
         gate = request["gate"]
         displayed.append(gate)
-        if gate == "CHECK-IN" and arm == "bound-note":
-            notes = {note["target"]: note for note in request["subject"]["judgeNotes"]}
-            assert all(note["severity"] == "note" for note in notes.values())
-            assert notes["scopeIn:hello"]["correction"] == "Add a second punctuation case."
-            assert notes["codeQuality"]["verdict"] == "uncertain"
+        if gate == "CHECK-IN":
+            assert request["subject"]["guard"]["feedback"][0]["step"] == "Reject bad input"
+        if gate == "C" and arm == "hello-reopen":
+            guard = request["subject"]["guard"]
+            assert Path(guard["evidenceFiles"]["command.txt"]).read_text("utf-8") == "Usage: pass a name"
+            assert Path(guard["actions"][0]["screenshots"][0]).read_bytes().startswith(b"\x89PNG")
+            assert not list((tmp_path / "workers").glob("guard-*"))
+            assert not request["subject"]["unverified"]
+        if gate == "C" and arm == "proof-owner":
+            assert request["subject"]["unverified"] == {
+                "guard:sourceAcceptance": "not judged: No independent action recorded."}
+        if gate == "C" and arm in ("bound-note", "weak-check"):
+            assert "guard:quality:exact" in request["subject"]["unverified"]
+            if arm == "bound-note":
+                assert "tryItGuide:walkthrough" in request["subject"]["unverified"]
         if gate == "A":
             return {"request": request["request"], "replyId": "lock",
                     "selections": [{"groupId": "round", "optionId": "done"}]}
@@ -1936,39 +1948,41 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             assert ask["question"] == "Which of the two Windows Python runtimes should the guide target?"
             assert not run.store.records("observation")
             return
-        if arm in ("unchanged", "proof-owner"):
+        if arm == "unchanged":
             request = cursor.decision
             assert request and cursor.state == ("BUILD" if arm == "unchanged" else "PROVE")
             question = run.store.read(request)
-            assert question["subject"]["inputOwner"] == ("Builder" if arm == "unchanged" else "Seldon")
-            assert question["ask"]["question"].startswith(question["subject"]["inputOwner"] + " owns")
+            assert question["subject"]["inputOwner"] == ("Planner" if arm == "unchanged" else "Seldon")
             assert len(run.store.records("call_session")) == (3 if arm == "unchanged" else 1)
             work_count = len(run.store.records("call_session"))
             run.close()
             run = Run.reopen(project, provider, lambda _: "yes, please continue")
             assert run.run().decision == request
             assert len(run.store.records("call_session")) == work_count
-            assert not [q for _, _, q in run.store.records("question") if q["kind"] == "COACH"]
+            coached = [q for _, _, q in run.store.records("question") if q["kind"] == "COACH"]
+            assert bool(coached) == (arm == "unchanged")
             if arm == "unchanged":
                 first, repeated = [row for _, _, row in run.store.records("lead_failure")]
-                assert first["tree"] == repeated["tree"]
-                assert "Expected Hello, Ada!, got Broken, Ada!" in question["subject"]["failure"]
+                assert first["candidate"] == repeated["candidate"]
+                assert len(run.store.records("lead_verdict")) == 2  # First milestone and the regressed candidate.
+                assert "Observed: Broken, Ada!" in question["subject"]["failure"]
                 failed = [run.store.read(ref) for ref in first["evidence"]]
-                assert any(row["check"] == "milestone-1:scopeIn:hello" and row["exitCode"] != 0
-                           for row in failed)
-                assert any(row["check"] == "milestone-2:scopeIn:hello" and row["exitCode"] == 0
+                assert any(row.get("check") == "milestone-1:scopeIn:hello" and row["exitCode"] != 0
                            for row in failed)
             return
         assert cursor.state == "SCRIPTED_C", frontdoor.state(str(project))
-        if arm in ("lh01", "lh02", "lr01", "bound-note"):
+        if arm in ("lh01", "lh02", "lr01", "bound-note", "proof-owner"):
             assert not run.store.records("lead_failure")
         if arm == "bound-note":
             (original, _, _), (_, _, revised) = run.store.records("milestone_plan")
             assert revised["parent"] == original
             assert len(reviewed) == 1
-        if arm in ("weak-check", "guide-replay"):
-            (_, _, failure), = run.store.records("lead_failure")
-            assert failure["owner"] == "Builder"
+        if arm in ("weak-check", "guide-replay", "bound-note"):
+            assert not run.store.records("lead_failure")
+            assert len([q for _, _, q in run.store.records("question") if q["kind"] == "RECEIPT"]) == (
+                arm == "guide-replay")
+            if arm != "guide-replay":
+                assert run.store.records("outcome")[-1][2]["verification_complete"] is False
         assert displayed == ["A", "B", *(["B"] if arm == "plan-owner" else []),
                              *(["CHECK-IN"] * milestone_count), "C"]
         assert run.store.read(cursor.kickoff)["mode"] == "lead"
@@ -1979,22 +1993,27 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         if arm == "plan-owner":
             assert assignments[0][2]["B"] != cursor.B
         proofs = [row for _, _, row in run.store.records("milestone_proof")]
+        if arm == "guide-replay":
+            (receipt,) = [row for _, _, row in run.store.records("answer") if row["kind"] == "RECEIPT"]
+            assert receipt["binding"] == proofs[0]["commit"]
         kept = [row for row in questions.observed(run.store, cursor.finalObservations)
-                if row["requirements"] == ["scopeIn:hello"]]
+                if "scopeIn:hello" in row["requirements"]]
+        if milestone_count == 1 and arm != "guide-replay":
+            green = [run.store.read(ref) for ref in cursor.finalObservations]
+            usage = [r for r in green if "quality:exact" in r["requirements"]]
+            assert len(usage) == 1 and "tryItGuide" in usage[0]["requirements"]
         assert len(kept) == 1 and kept[0]["commit"] == cursor.candidate
         assert kept[0]["stdout"].strip() == "Hello, Ada!"
         assert gitwork.git(project, "rev-list", "--count", "HEAD") == str(1 + milestone_count)
         sessions = [row["session"] for _, _, row in run.store.records("call_session")]
         if milestone_count == 1:
-            assert len(sessions) == (2 if arm in ("plan-owner", "weak-check", "guide-replay") else 1)
-            if arm in ("weak-check", "guide-replay"):
-                assert sessions[0] == sessions[1]
+            assert len(sessions) == (2 if arm == "plan-owner" else 1)
         else:
             assert len(sessions) == 3 and sessions[0] != sessions[1] == sessions[2]
             assert proofs[0]["commit"] != proofs[1]["commit"]
             _, _, failure = run.store.records("lead_failure")[0]
             assert failure["assignment"] == assignments[-1][0]
-            assert "Expected Hello, Ada!, got Broken, Ada!" in failure["failure"]
+            assert "Observed: Broken, Ada!" in failure["failure"]
     finally:
         run.close()
 

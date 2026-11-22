@@ -112,18 +112,14 @@ def lead_plan_schema(bound, promises):
     return obj(answer=obj(milestones=array(milestone, 1)))
 
 
-def folded_judge_schema(subjects, owner, *, bound=False):
+def folded_judge_schema(subjects, owner):
     def finding(subject):
         gap = obj(target=choice(subject), correction=TEXT, owners=array(choice(owner), 1), severity=SEVERITY)
         uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1), why=TEXT)
-        if bound:
-            gap = {"anyOf": [obj(**gap["properties"], quote=TEXT, evidence=TEXT), gap]}
-            uncertain = {"anyOf": [obj(**uncertain["properties"], quote=TEXT, evidence=TEXT), uncertain]}
         return {"anyOf": [
             obj(verdict=choice("satisfied"), gaps=array(gap), why=TEXT),
             obj(verdict=choice("gap"), gaps=array(gap, 1), why=TEXT),
             uncertain,
-            *([obj(verdict=choice("amend"), why=TEXT)] if bound and isinstance(subjects[subject], dict) else []),
         ]}
     return obj(answer=obj(findings=obj(**{s: finding(s) for s in subjects}), why=TEXT))
 

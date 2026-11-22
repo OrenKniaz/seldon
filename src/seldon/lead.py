@@ -11,22 +11,18 @@ from .schema import REFS, TEXT, array, choice, lead_plan_schema, obj, validate
 from .states import advance
 from .store import encode
 
-CHECK = obj(purpose=TEXT, command=array(TEXT, 1),
-            expectedEvidence={**TEXT, "description": "What the command asserts about the product."},
-            expectedExit={"type": "integer", "enum": [0]})
 RECEIPT = obj(answer=obj(
     outcome=choice("done", "question", "plan correction", "proof fault"),
-    summary=TEXT, checks=array(obj(vision=TEXT, **CHECK["properties"])),
-    checkPaths=REFS, walkthrough={"anyOf": [CHECK, obj()]}, question={"type": "string"}))
+    summary=TEXT, checks=array(obj(promises=array(TEXT, 1), command=array(TEXT, 1))),
+    checkPaths=REFS, question={"type": "string"}))
 WRITE_RULES = (
     "Write the product, semantic checks and try-it guide in the assigned workspace. Preserve accepted "
     "behavior and earlier witnesses. You may use provider-native sub-agents and skills within this "
     "assignment; wait for them to finish. Keep Seldon's store, decisions and proof untouched. Do not "
-    "commit or change global settings. For each promise, return one unattended check with its command, "
-    "what it asserts and expectedExit 0. Reuse witnesses that cover multiple promises. Return the "
-    "walkthrough in the same format. Use headless browsers. List all witness files in checkPaths. "
-    "Return done when written. Seldon runs every check. Put doubts in summary and leave question "
-    "empty unless you need an answer. " + plan.GUIDE_WALKTHROUGH
+    "commit or change global settings. Return unattended commands with handles for every promise "
+    "they cover, including tryItGuide for the walkthrough. Use headless browsers. List all witness files "
+    "in checkPaths. Return done when written. Put doubts in summary and leave question empty unless "
+    "you need an answer. " + plan.GUIDE_WALKTHROUGH
 )
 BOUND_RULES = ("Write checks against exactly the approved action, result and notMetIf. "
                "Put walkthrough scratch, fresh copies, dependencies and generated build outputs "
@@ -239,8 +235,10 @@ def recover_return(store, attempt, question):
     try:
         raw = json.loads(native.answer(output))
         validate(raw, store.read(question)["schema"])
-    except (RuntimeError, ValueError):
+    except RuntimeError:
         return None
+    except ValueError as error:
+        return store.record("invalid_lead_receipt", {"answer": {}, "error": str(error)})
     return store.record("answer", {"attempt": attempt, "kind": "WORK", "answer": raw["answer"],
                                    "recovered": True})
 
@@ -280,38 +278,43 @@ def build(store, provider, cursor):
                  "Owner words": user_words(store, cursor), "Write scope": assignment["workspace"],
                  "Guide path": plan.GUIDE_PATH}
         if cursor.productVerdict:
-            facts["Previous checkpoint"] = store.read(cursor.productVerdict)
+            previous = store.read(cursor.productVerdict)
+            facts["Previous checkpoint"] = previous
+            facts["How the previous milestone felt"] = store.read(previous["judge"]).get("feedback", [])
         if cursor.failure:
             facts["Exact failure"] = cursor.failure
         if cursor.requestedChange:
             facts["Owner direction"] = store.read(cursor.requestedChange)["words"]
-        walk = {"purpose": "Replay the greeting", "command": ["python", "docs/try-it/walkthrough.py"],
-                "expectedEvidence": "The reader sees Hello, Ada!", "expectedExit": 0}
-        example = {"outcome": "done", "summary": "A visitor can greet Ada.", "question": "", "walkthrough": walk,
-                   "checks": [{**walk, "vision": next(iter(facts["Promises"]))}], "checkPaths": [walk["command"][-1]]}
+        path = "docs/try-it/walkthrough.py"
+        example = {"outcome": "done", "summary": "A visitor can greet Ada.", "question": "", "checkPaths": [path],
+                   "checks": [{"command": ["python", path], "promises": [next(iter(facts["Promises"])), "tryItGuide"]}]}
         question = questions.question("WORK", (BOUND_RULES if features.enabled("leadBoundProof") else
             "Check the full approved result and diagnostic meaning. A missing product must fail its check. ")
             + WRITE_RULES, facts, RECEIPT, [example],
             execution={"cwd": assignment["workspace"], "session": session, "lead": cursor.leadBuild,
                        "turn": cursor.repairs})
 
-        def consume(source, _):
-            store.cursor(replace(store.cursor(), leadReturn=source))
-
         try:
-            inference.call(store, provider, question, consume=consume, binding=cursor.leadBuild)
-        except (questions.AnswerRejected, ProviderFailure) as error:
-            if isinstance(error, ProviderFailure) and not error.cleanup_verified:
+            inference.call(store, provider, question, binding=cursor.leadBuild, retries=0,
+                           consume=lambda ref, _: store.cursor(replace(store.cursor(), leadReturn=ref)))
+        except questions.AnswerRejected as error:
+            ref = store.record("invalid_lead_receipt", {"answer": error.answer or {}, "error": str(error)})
+            store.cursor(replace(store.cursor(), leadReturn=ref))
+        except ProviderFailure as error:
+            if not error.cleanup_verified:
                 raise
-            if isinstance(error, ProviderFailure) and not error.transient:
+            if not error.transient:
                 raise proof.UncertainCleanup(str(error)) from error
-            fail(store, store.cursor(), str(error), "Seldon" if isinstance(error, ProviderFailure) else "Builder",
-                 retry="Retry builder" if isinstance(error, ProviderFailure) else None)
+            fail(store, store.cursor(), str(error), "Seldon", retry="Retry builder")
             return
         cursor = store.cursor()
-    answer = store.read(cursor.leadReturn)["answer"]
+    returned = store.read(cursor.leadReturn)
+    answer = returned["answer"]
+    if "error" in returned:
+        advance(store, "returned", cursor.leadReturn, requestedChange=None)
+        return
     question = answer.get("question", "").strip()
-    if question or not answer.get("checks"):
+    if question or not answer.get("checks") and answer.get("outcome") in ("question", "plan correction", "proof fault"):
         owner = "Planner" if question else {
             "question": "Planner", "plan correction": "Planner", "proof fault": "Seldon",
         }.get(answer["outcome"], "Builder")
@@ -324,7 +327,6 @@ def build(store, provider, cursor):
 
 def fail(store, cursor, failure, owner="Builder", *, candidate=None, evidence=(),
          replan=False, retry=None):
-    # A candidate's tree is stable across snapshots, sessions and reworded receipts.
     root = store.root.parent
     tree = gitwork.git(root, "rev-parse", f"{candidate}^{{tree}}") if candidate else None
     with store.transaction():
@@ -353,45 +355,58 @@ def fail(store, cursor, failure, owner="Builder", *, candidate=None, evidence=()
 def prove(store, provider, cursor):
     project = store.root.parent
     assignment = store.read(cursor.leadBuild)
-    receipt = store.read(cursor.leadReturn)["answer"]
-    worktree, base = assignment["workspace"], assignment["base"]
-    items = milestones(store, cursor)
-    vision = commitments(store, cursor)
-    subjects = {key: value for item in items[:cursor.wave] for key, value in obligations(item, vision).items()}
+    base = assignment["base"]
+    items, vision = milestones(store, cursor), commitments(store, cursor)
     current = obligations(items[cursor.wave - 1], vision)
+    subjects = {key: p for item in items[:cursor.wave] for key, p in obligations(item, vision).items()}
     previous = store.read(cursor.productVerdict) if cursor.productVerdict else {}
-    candidate = None
+    _, candidate, changed = gitwork.snapshots(assignment["workspace"], base, ["**"], [], cursor.scratch)
+    tree = gitwork.git(project, "rev-parse", f"{candidate}^{{tree}}")
+    snap = next((row for _, _, row in reversed(store.records("lead_candidate"))
+                 if (row["assignment"], row["tree"]) == (cursor.leadBuild, tree)), None)
+    if snap:
+        candidate = snap["commit"]
+    else:
+        store.record("lead_candidate", {"assignment": cursor.leadBuild, "tree": tree, "commit": candidate})
+    returned = store.read(cursor.leadReturn)
+    receipt = returned["answer"]
     try:
-        _, candidate, changed = gitwork.snapshots(worktree, base, ["**"], [], cursor.scratch)
-        checks, new, walks = proof.milestone_checks(store, previous, cursor.wave, current, subjects, receipt, candidate)
+        if "error" in returned:
+            raise ValueError(returned["error"])
+        checks, new = proof.milestone_checks(store, previous, cursor.wave, current, subjects, receipt, candidate)
     except ValueError as error:
-        fail(store, cursor, str(error), candidate=candidate)
+        if returned.get("kind") == "RECEIPT":
+            fail(store, cursor, str(error), "Seldon", candidate=candidate)
+            return
+        work_question = store.read(attempts(store, cursor.leadBuild)[-1][1]["question"])
+        question = questions.question("RECEIPT",
+            "Correct the receipt for this frozen candidate. Reference existing witness files and commands.",
+            {"Error": str(error), "Return": receipt, "New promises": current, "Candidate": candidate,
+             "Candidate files": gitwork.paths(project, candidate)}, RECEIPT,
+            [work_question["examples"][0]["answer"]])
+
+        inference.call(store, provider, question, binding=candidate,
+                       consume=lambda ref, _: store.cursor(replace(store.cursor(), leadReturn=ref)))
         return
+
     declarations = checks | new
-    red_refs = proof.observe(store, project, base, declarations, "milestone-base", walkthroughs=walks)
-    green = proof.observe(store, project, candidate, declarations, "milestone", walkthroughs=walks)
-    observations = red_refs + green
+    green = proof.observe(store, project, candidate, declarations, "milestone", candidate=candidate)
+    judge, verdict = judgment.milestone(store, provider, base, candidate, subjects, current, green)
+    amendments, fixes = verdict["amendments"], verdict["fixes"]
+    if amendments or fixes:
+        fail(store, cursor, ("Amend B proof: " if amendments else "") + "\n".join(amendments or fixes),
+             "Planner" if amendments else "Builder", candidate=candidate, evidence=[judge, *green],
+             replan=bool(amendments))
+        return
     if failed := proof.failures(store, green):
-        runner_fault = any(not o["executionStarted"] or o["timedOut"] for o in failed)
-        fail(store, cursor, proof.explain(failed), "Seldon" if runner_fault else "Builder",
-             candidate=candidate, evidence=observations, retry="Retry proof" if runner_fault else None)
+        fail(store, cursor, proof.explain(failed), "Seldon", candidate=candidate, evidence=[judge, *red, *green])
         return
-    new_promises = [key for key, check in new.items() if key not in walks and not check.get("replacement")]
-    judge, fixes, missing, amendments = judgment.milestone(store, provider, base, candidate, subjects, declarations,
-                                                          observations, walks, new_promises, receipt["summary"])
-    if amendments or fixes or missing:
-        fail(store, cursor, "Amend B proof: " + "\n".join(amendments) if amendments else "\n".join(fixes or missing),
-             "Planner" if amendments else "Builder" if fixes else "Seldon",
-             candidate=candidate, evidence=[judge, *observations], replan=bool(amendments),
-             retry="Run proof after the evidence is fixed" if missing and not fixes else None)
-        return
-    checks.update({k: v for k, v in new.items() if "replacement" not in v})
     gitwork.unchanged(project, base)
     with store.transaction():
         verdict = store.record("milestone_proof", {"milestone": cursor.wave, "plan": cursor.leadPlan,
             "commit": candidate, "assignment": cursor.leadBuild, "return": cursor.leadReturn,
-            "changed": changed, "checks": checks, "walkthroughs": walks, "red": red_refs,
-            "observations": green, "executedChecks": list(declarations), "judge": judge,
+            "changed": changed, "checks": declarations,
+            "observations": green, "judge": judge,
             "previous": cursor.productVerdict})
         intent = store.record("publication", {"milestone": cursor.wave, "before": base,
             "commit": candidate, "verdict": verdict, "observations": green})
@@ -403,8 +418,8 @@ def eligible(store):
     cursor = store.cursor()
     checkin = store.read(cursor.checkin)["subject"] if cursor.checkin else {}
     current = store.read(cursor.productVerdict) if cursor.productVerdict else {}
-    observed = {row["check"] for row in (store.read(ref) for ref in cursor.finalObservations)
-                if row["commit"] == cursor.candidate}
+    observed = {check for row in map(store.read, cursor.finalObservations)
+                if row["commit"] == cursor.candidate for check in row.get("checks", [row["check"]])}
     if (not cursor.B or cursor.wave != len(milestones(store, cursor))
             or current.get("plan") != cursor.leadPlan or current.get("commit") != cursor.candidate
             or checkin.get("proof") != cursor.productVerdict
@@ -437,8 +452,7 @@ def step(store, provider, user):
         with store.transaction():
             decisions.request(store, state, {"commit": cursor.candidate, "milestone": cursor.wave,
                 "proof": cursor.productVerdict, "built": receipt["summary"],
-                "walkthrough": receipt["walkthrough"],
-                "judgeNotes": store.read(store.read(cursor.productVerdict)["judge"]).get("notes", []),
+                "guard": judgment.walk_feedback(store, cursor.productVerdict),
                 "next milestone": item[cursor.wave]["outcome"] if cursor.wave < len(item) else None})
             if cursor.waived:
                 advance(store, "approve", store.cursor().checkin)
@@ -451,5 +465,7 @@ def step(store, provider, user):
     elif state == "C":
         eligible(store)
         decisions.request(store, "C", {"commit": cursor.candidate, "proof": cursor.productVerdict,
-            "guide": plan.GUIDE_PATH, "observations": questions.observed(store, cursor.finalObservations)})
+            "guide": plan.GUIDE_PATH, "observations": questions.observed(store, cursor.finalObservations),
+            "guard": judgment.walk_feedback(store, cursor.productVerdict),
+            "unverified": judgment.not_judged(store)})
     return store.cursor().state

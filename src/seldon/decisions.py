@@ -258,11 +258,11 @@ def owner_question(store, owner, failure, *, retry=None, subject=None):
 
 def route_repair(store, cause, owner, tree, failure, retry):
     cursor = store.cursor()
-    repeated = recovery.failed(store, cause, key=f"lead-build:{cursor.leadBuild}", shape=[owner, tree])
+    repeated = recovery.failed(store, cause, key=f"lead-build:{cursor.leadBuild}", shape=[owner, tree, failure])
     if owner == "Builder" and tree and not repeated:
         return
-    if owner == "Planner" and not repeated:
-        request(store, cursor.state, {"step": cursor.state, "inputOwner": owner, "failure": failure,
+    if owner == "Planner" and not repeated or owner == "Builder" and repeated:
+        request(store, cursor.state, {"step": cursor.state, "inputOwner": "Planner", "failure": failure,
                                       "question": failure, "tried": [failure]})
     else:
         owner_question(store, owner, failure, retry=retry)

@@ -1,10 +1,13 @@
 """C3/C15/I2/I10; R2/R9/R11: one area question, criterion verdicts, local fixup, code ANDs."""
 
 from dataclasses import replace
+from pathlib import Path
+from shutil import rmtree
+from tempfile import mkdtemp
 
 from . import architecture, features, fixups, gitwork, inference, plan, proof, questions
 from .observations import code_shape
-from .schema import answer_schema, folded_judge_schema
+from .schema import REFS, TEXT, answer_schema, array, choice, folded_judge_schema, obj
 from .states import advance
 LEAD_BINDINGS = {"tryItGuide": {"result": "The documented steps work from a fresh checkout."},
                  "sourceAcceptance": {"result": "Real implementation with no stubs, mocks or missing behavior."}}
@@ -34,54 +37,91 @@ def folded_subjects(document):
     }
 
 
-def milestone(store, provider, base, commit, subjects, checks, refs, walks, new_promises, notes):
-    root = store.root.parent
-    bound = features.enabled("leadBoundProof")
-    source_facts, images = proof.milestone_source(store, root, commit, checks, refs, bound)
-    subjects = {**subjects, **{k: v if bound else v["result"] for k, v in LEAD_BINDINGS.items()},
-                "codeQuality": "Main implementation is readable and safe to change."}
-    facts = {**source_facts, "Milestone base": base, "Candidate": commit, "Subjects": subjects,
-             "Walkthrough checks": walks, "New promise checks": new_promises, "Builder notes": notes}
-    example = {key: {"verdict": "satisfied", "gaps": [], "why": "Observed the approved action and result."}
-               for key in subjects}
+def milestone(store, provider, base, commit, subjects, current, refs):
+    cursor = store.cursor()
+    for ref, _, row in reversed(store.records("lead_verdict")):
+        if (row["commit"], row["milestone"], row["B"]) == (commit, cursor.wave, cursor.B):
+            return ref, row
+    subjects = {**subjects, **LEAD_BINDINGS}
+    schema = obj(answer=obj(why=TEXT, actions=array(obj(
+        action=TEXT, actual=TEXT, promises=array(choice(*subjects)), baseline={"type": "string"}, screenshots=REFS)),
+        feedback=array(obj(step=TEXT, note=TEXT)), findings=array(obj(
+            promise=choice(*subjects), kind=choice("defect", "uncertain", "amend", "note"),
+            quote={"type": "string"}, evidence=TEXT, reason=TEXT))))
+    fields = ("checks", "requirements", "purpose", "witness", "executedCommit", "commit", "command",
+              "exitCode", "executionStarted", "timedOut", "cleanCheckout", "cleanupVerified", "stdout",
+              "stderr", "operationLifecycle", "evidenceFiles")
+    observations = [{key: row[key] for key in fields if key in row} for row in map(store.read, refs)]
+    runtime = Path(mkdtemp(prefix="guard-", dir=cursor.scratch))
+    work, before, evidence_dir = (runtime / name for name in ("product", "base", "evidence"))
     question = questions.question("JUDGE",
-        ("Judge against B. A must-fix needs the entire verbatim result or notMetIf in quote and an observed "
-         "product or check violation in evidence. Unavailable runner evidence (uncertain) needs the same binding. "
-         "A check omitting a B result is a check gap. Attached execution images are marked image in Observations. "
-         "Use amend for missing or ambiguous B semantics and sourceAcceptance for stubs and mocks."
-         if bound else "Judge approved results using base RED, candidate GREEN and source. Report must-fix "
-         "for weak checks, lost behavior or skipped guide steps. Use uncertain for unavailable runner evidence."),
-        facts, folded_judge_schema(subjects, "builder", bound=bound), [{"findings": example, "why": "Reviewed the evidence."}],
-        subjects, images=list(dict.fromkeys([*images.values(), *questions.images(store, refs)])))
-    key = proof.milestone_evidence_key(root, facts, question["schema"]) if bound else None
-    if bound and (prior := next((row for _, _, row in store.records("bound_judgment") if row["key"] == key), None)):
-        source, answer = prior["source"], store.read(prior["source"])["answer"]
-    else:
-        source, answer = inference.call(store, provider, question, binding=commit)
-    fixes, advisory, amendments, missing = [], [], [], []
-    for target, finding in answer["findings"].items():
-        if finding["verdict"] == "amend":
-            amendments.append(f"{target}: {finding['why']}")
-        gaps = finding.get("gaps", [])
-        if uncertain := finding["verdict"] == "uncertain":
-            gaps = [{**finding, "target": target, "severity": "must-fix",
-                     "correction": finding["why"] + " " + "; ".join(finding["neededFacts"])}]
-        for gap in gaps:
-            quote, evidence = gap.get("quote"), gap.get("evidence", "").strip()
-            subject = subjects[target] if isinstance(subjects[target], dict) else {}
-            if bound and (not quote or quote not in (subject.get("result"), subject.get("notMetIf")) or not evidence
-                          or gap["severity"] != "must-fix"):
-                advisory.append({**gap, "severity": "note"})
-            elif bound or features.blocking(gap):
-                (missing if uncertain else fixes).append(
-                    f"B: {quote}\nEvidence: {evidence}\n{gap['correction']}" if bound else gap["correction"])
-    if not source_facts["Product files"].get(plan.GUIDE_PATH, "").strip():
-        fixes.append((f"B: {LEAD_BINDINGS['tryItGuide']['result']}\nEvidence: {plan.GUIDE_PATH} is missing or empty.\n"
-                      if bound else "") + f"Deliver the runnable try-it guide at {plan.GUIDE_PATH}.")
-    if bound:
-        source = store.record("bound_judgment", {"source": source, "key": key, "commit": commit,
-                                                 "notes": advisory, "fixes": fixes, "amendments": amendments})
-    return source, fixes, missing, amendments
+        "Walk the guide and every approved subject's action, result and notMetIf yourself on Candidate. "
+        "Use the real CLI, API or headless browser, including restart and failure. Inspect implementation "
+        "against the full approved scope for stubs, mocks and missing work, and record what you inspected. "
+        "Run the same user path for each new promise in Base without copying candidate files. "
+        "In baseline record the command and unmet result, or leave it empty. A missing shared entry point "
+        "need only be exercised once. Link each action you performed to all subjects it establishes. "
+        "Gather missing observations now. Use uncertain with a reason only if you cannot establish a subject. "
+        "Save browser PNGs and relevant output files directly in SELDON_EVIDENCE_DIR. Link screenshots by filename. "
+        "Report how screens and steps felt. A defect quotes B's result or notMetIf verbatim and cites an exact "
+        "action or failed check ID. Use amend for ambiguous B and note for advice. "
+        "Operate only in these copies and their runtime directories. Stop your processes.",
+        {"Candidate": str(work), "Candidate commit": commit, "Base": str(before), "Base commit": base,
+         "Guide path": plan.GUIDE_PATH, "Subjects": subjects, "New promises": list(current),
+         "Observations": observations}, schema,
+        [{"why": "The greeting is exact.", "actions": [{"action": "Run hello Ada", "actual": "Hello, Ada!",
+           "promises": [next(iter(subjects))], "baseline": "Run hello Ada: entry point absent.", "screenshots": []}],
+          "findings": [], "feedback": [{"step": "Greeting", "note": "The output is easy to scan."}]}],
+        execution={"walk": str(work)})
+
+    def consume(ref, answer):
+        actions = answer["actions"]
+        files = {path.name: store.artifact(path.read_bytes(), ref) for path in sorted(evidence_dir.iterdir())
+                 if path.is_file() and path.resolve().parent == evidence_dir}
+        for action in actions:
+            action["screenshots"] = [files[name] for name in action["screenshots"]
+                                     if name in files and proof.image(Path(files[name]).read_bytes())]
+        walked = {row["action"]: row for row in actions}
+        broken = {key: row for row in proof.failures(store, refs) if proof.executed(row) for key in row["checks"]}
+        result = {**answer, "source": ref, "commit": commit, "milestone": cursor.wave, "B": cursor.B,
+                  "fixes": [], "limitations": [], "amendments": [], "evidenceFiles": files}
+        for item in answer["findings"]:
+            promise, kind, quote, evidence, reason = (item[k] for k in ("promise", "kind", "quote", "evidence", "reason"))
+            bound = subjects[promise] if isinstance(subjects[promise], dict) else {}
+            matches = quote and quote in (bound.get("result"), bound.get("notMetIf"))
+            action, check = walked.get(evidence, {}), broken.get(evidence, {})
+            if kind == "defect" and matches and (promise in action.get("promises", ())
+                                                 or promise in check.get("requirements", ())):
+                actual = action["actual"] if action else proof.explain([check])
+                result["fixes"].append(f"B: {quote}\nReproduce: {evidence}\nObserved: {actual}\n{reason}")
+            elif kind == "amend":
+                result["amendments"].append(f"{promise}: {reason}")
+            elif kind != "note":
+                result["limitations"].append(item)
+        limited = {item["promise"] for item in result["limitations"]}
+        for promise in (p for p in subjects if p not in limited):
+            linked = [a for a in actions if promise in a["promises"]]
+            if not linked or (promise in current and not any(a["baseline"].strip() for a in linked)):
+                reason = "No independent action recorded." if not linked else "Failure on the base was not observed."
+                result["limitations"].append({"promise": promise, "reason": reason})
+        store.record("lead_verdict", result)
+
+    evidence_dir.mkdir()
+    (runtime / "temp").mkdir()
+    index = {"GIT_INDEX_FILE": str(runtime / "index")}
+    for revision, copy in ((base, before), (commit, work)):
+        copy.mkdir()
+        gitwork.git(store.root.parent, "read-tree", revision, env=index)
+        gitwork.git(store.root.parent, "checkout-index", "--all", "--prefix=" + copy.as_posix() + "/", env=index)
+    inference.call(store, provider, question, binding=commit, consume=consume)
+    rmtree(runtime)
+    ref, _, result = store.records("lead_verdict")[-1]
+    return ref, result
+
+
+def walk_feedback(store, proof_ref):
+    verdict = store.read(store.read(proof_ref)["judge"])
+    return {key: verdict.get(key) for key in ("why", "actions", "feedback", "findings", "evidenceFiles")}
 
 
 def folded_brief(store, document, owner, observations):
@@ -343,13 +383,16 @@ def not_judged(store):
     limits = []
     for ref in cursor.finalObservations:
         observation = store.read(ref)
-        if observation["commit"] != cursor.candidate or observation["purpose"] != "final":
+        if observation["commit"] != cursor.candidate or observation["purpose"] not in ("final", "milestone"):
             continue
         for row in observation.get("operationLifecycle", ()):
             step = row.get("step") or row.get("operation") or row.get("command_or_interaction")
             if row.get("observed") is False and isinstance(step, str) and step.strip():
                 reason = row.get("reason")
                 limits.append(f"{step}: {reason}" if isinstance(reason, str) and reason.strip() else step)
+    if cursor.productVerdict and (judge := store.read(cursor.productVerdict).get("judge")):
+        deferred.update({f"guard:{item['promise']}": "not judged: " + item["reason"]
+                         for item in store.read(judge).get("limitations", [])})
     if limits:
         deferred["tryItGuide:walkthrough"] = "not judged: " + "; ".join(dict.fromkeys(limits))
     return deferred

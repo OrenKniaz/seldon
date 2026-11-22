@@ -31,8 +31,8 @@ def command(setup, config, folder, worker, session, images):
         line += ["--strict-mcp-config", "--setting-sources", ""]
     if session:
         line += ["--resume", session]
-    if not worker:  # read-only: no tools, or Read alone to open attached images
-        line += ["--no-session-persistence", "--tools", "Read" if images else ""]
+    if not worker:
+        line += ["--no-session-persistence", "--tools", "Bash,Read" if config.get("walk") else "Read" if images else ""]
     return line
 
 

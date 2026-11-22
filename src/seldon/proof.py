@@ -1,6 +1,5 @@
 """C14/C15/C26/I1; R6/R9: code observes ordinary commands on exact Git commits."""
 
-import hashlib
 import os
 import threading
 import uuid
@@ -9,7 +8,6 @@ from pathlib import Path
 from . import features, gitwork, observations as evidence_facts, plan
 from .processes import execute
 from .providers import ROLES
-from .store import encode
 
 
 _observer = threading.local()
@@ -27,7 +25,7 @@ class Failed(ValueError):
         self.checks = sorted({body["check"] for body in failed})
 
 
-def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None, *, walkthroughs=()):
+def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None, *, candidate=None):
     observations = []
     if not declarations:
         return observations
@@ -41,20 +39,10 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
     else:
         gitwork.checkout(checkout, commit)
     cleanup_verified, dirty = True, False
-    witness_commits = {}
-    if purpose == "final":
-        walkthroughs = plan.guide_checks(plan.execution(store))
+    witness_commits, trees, executions = {}, {}, {}
+    walkthroughs = plan.guide_checks(plan.execution(store)) if purpose == "final" else ()
     try:
         for ref, check in declarations.items():
-            if checkout is None:
-                checkout = Path(gitwork.admit(root, scratch, commit))
-                _observer.checkout = checkout
-            runtime = scratch / ("check-" + uuid.uuid4().hex)
-            evidence, temp = runtime / "evidence", runtime / "temp"
-            evidence.mkdir(parents=True)
-            temp.mkdir()
-            command = list(check["command"])
-            dirty = True
             retained = check.get("witness")
             executed_commit = commit
             if retained and retained["commit"] != commit and retained["paths"]:
@@ -63,8 +51,35 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
                     witness_commits[key] = gitwork.check_commit(
                         root, commit, key[0], key[1], scratch, literal=True)
                 executed_commit = witness_commits[key]
-                if executed_commit != commit:
-                    gitwork.checkout(checkout, executed_commit)
+            if candidate and executed_commit not in trees:
+                trees[executed_commit] = gitwork.git(root, "rev-parse", f"{executed_commit}^{{tree}}")
+            key = (trees[executed_commit], tuple(check["command"])) if candidate else (commit, ref)
+            executions.setdefault(str(key), (executed_commit, {}))[1][ref] = check
+        cached = {row["physicalWitness"]: (ref, row) for ref, _, row in store.records("observation")
+                  if row.get("candidate") == candidate and row["purpose"] == purpose} if candidate else {}
+        for witness, (executed_commit, linked) in executions.items():
+            ref, check = next(iter(linked.items()))
+            command = list(check["command"])
+            retained = check.get("witness")
+            requirements = list(dict.fromkeys(r for row in linked.values() for r in row["requirements"]))
+            walk = "tryItGuide" in requirements if candidate else ref in walkthroughs
+            if witness in cached:
+                original, body = cached[witness]
+                if not body["cleanupVerified"]:
+                    raise UncertainCleanup("Command cleanup unverified: " + str(body))
+                observations.append(original if list(linked) == body["checks"] else store.record(
+                    "observation_projection", {**body, "checks": list(linked), "requirements": requirements}))
+                continue
+            if checkout is None:
+                checkout = Path(gitwork.admit(root, scratch, commit))
+                _observer.checkout = checkout
+            if executed_commit != commit:
+                gitwork.checkout(checkout, executed_commit)
+            runtime = scratch / ("check-" + uuid.uuid4().hex)
+            evidence, temp = runtime / "evidence", runtime / "temp"
+            evidence.mkdir(parents=True)
+            temp.mkdir()
+            dirty = True
             if (checkout / command[0]).is_file():
                 command[0] = str((checkout / command[0]).resolve())
             cleanup_verified = False
@@ -74,13 +89,15 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
             cleanup_verified = result["cleanupVerified"]
             body = {k: v[-4096:].decode("utf-8", errors="replace") if isinstance(v, bytes) else v
                     for k, v in result.items()}
-            body.update(evidence_facts.runtime(result, checkout, temp, evidence,
-                                              walkthrough=ref in walkthroughs, commit=executed_commit))
+            body.update(evidence_facts.runtime(result, checkout, temp, evidence, walkthrough=walk,
+                                              commit=executed_commit))
             files = [store.artifact(p.read_bytes(), ref) for p in evidence.rglob("*")
                      if p.is_file() and not (p.parent == evidence and evidence_facts.runtime_file(p.name))]
             body.update(check=ref, unit=unit, commit=commit, purpose=purpose,
-                        requirements=check["requirements"], command=check["command"], cwd=str(checkout),
+                        requirements=requirements, command=check["command"], cwd=str(checkout),
                         evidenceFiles=files, cleanCheckout=True, actualCommand=command)
+            if candidate:
+                body.update(candidate=candidate, checks=list(linked), physicalWitness=witness)
             if retained:
                 body.update(witness=retained, executedCommit=executed_commit)
             if scope_tree is not None:
@@ -110,13 +127,8 @@ def executed(body):
             and body["exitCode"] is not None)
 
 
-def failures(store, observations, red=False):
-    failed = []
-    for ref in observations:
-        body = store.read(ref)
-        if not executed(body) or (body["exitCode"] == 0 if red else body["exitCode"] != 0):
-            failed.append(body)
-    return failed
+def failures(store, observations):
+    return [body for body in map(store.read, observations) if not executed(body) or body["exitCode"] != 0]
 
 
 def explain(failed):
@@ -129,7 +141,7 @@ def image(content):
     return content.startswith((b"\x89PNG", b"\xff\xd8"))
 
 
-def account(store, refs, delivered=None, *, mark_images=False):
+def account(store, refs, delivered=None):
     """Render the runner's observations for both judgment paths."""
     rows = []
     for ref in refs:
@@ -137,8 +149,6 @@ def account(store, refs, delivered=None, *, mark_images=False):
         fields = ("commit", "check", "requirements", "purpose", "exitCode", "stdout", "stderr",
                   "executionStarted", "cleanupVerified", "timedOut", "cleanCheckout", "witness", "executedCommit")
         row = {key: body[key] for key in fields if key in body}
-        if body["purpose"] in ("milestone-base", "milestone"):
-            row["runnerResult"] = ("GREEN" if body["exitCode"] == 0 else "RED") if executed(body) else "unobserved"
         row.update(evidence_facts.judge_fields(body), command=body.get("actualCommand", body["command"]),
                    workingDirectory=body["cwd"], ranOnDeliveredRevision=body["commit"] == delivered)
         row["artifacts"] = {}
@@ -146,8 +156,6 @@ def account(store, refs, delivered=None, *, mark_images=False):
             content = Path(path).read_bytes()
             artifact = row["artifacts"][path] = {"bytes": len(content)}
             if image(content):
-                if mark_images:
-                    artifact["image"] = True
                 continue
             try:
                 text = content.decode("utf-8")
@@ -159,100 +167,27 @@ def account(store, refs, delivered=None, *, mark_images=False):
     return rows
 
 
-def candidate_files(store, root, commit, *, named=None):
-    files, images = {}, {}
-    for name, content in gitwork.blobs(root, commit, ["**"], named=named).items():
-        if image(content):
-            images[name] = store.artifact(content, "candidate-image")
-        elif b"\0" not in content:
-            try:
-                files[name] = content.decode("utf-8")
-            except UnicodeDecodeError:
-                pass
-    return files, images
-
-
-def judge_paths(root, commit, bound):
-    paths = gitwork.paths(root, commit)
-    if not bound:
-        return paths
-    generated = {"node_modules", ".venv", "venv", "virtualenv", "site-packages", ".tox", ".nox",
-                 "__pycache__", "build", "dist", ".next", ".output", "out", "coverage", "target",
-                 "playwright-report", "test-results"}
-    return [path for path in paths if not generated.intersection(path.lower().split("/")[:-1])
-            and not path.lower().startswith(("docs/try-it/work/", "docs/try-it/fresh/",
-                                             "docs/try-it/scratch/", "docs/try-it/tmp/"))]
-
-
-def milestone_source(store, root, commit, checks, refs, bound):
-    inventory = judge_paths(root, commit, bound)
-    files, images = candidate_files(store, root, commit, named=set(inventory) if bound else None)
-    retained = {}
-    for check in checks.values():
-        witness = check["witness"]
-        if witness["commit"] != commit:
-            retained.setdefault(witness["commit"], set()).update(witness["paths"])
-    facts = {"Candidate file inventory": inventory, "Product files": files, "Candidate images": images,
-             "Code shape (measured)": evidence_facts.code_shape(files),
-             "Observations": account(store, refs, commit, mark_images=bound),
-             "Checks": {key: {k: v for k, v in check.items() if k != "command"}
-                        for key, check in checks.items()},
-             "Retained check sources": {revision: candidate_files(store, root, revision, named=(
-                 paths & set(judge_paths(root, revision, bound))))[0] for revision, paths in retained.items()}}
-    return facts, images
-
-
-def milestone_evidence_key(root, facts, schema):
-    trees = {}
-
-    def tree(commit):
-        if commit not in trees:
-            trees[commit] = gitwork.git(root, "rev-parse", f"{commit}^{{tree}}")
-        return trees[commit]
-
-    def witness_tree(row):
-        witness = row["witness"]
-        return {**row, "witness": {**witness, "commit": tree(witness["commit"])}}
-
-    rows = []
-    for observation in facts["Observations"]:
-        row = witness_tree(observation) if "witness" in observation else dict(observation)
-        cwd = row.pop("workingDirectory")
-        for field in ("commit", "executedCommit"):
-            if field in row:
-                row[field] = tree(row[field])
-        for field in ("stdout", "stderr"):
-            row[field] = row[field].replace(cwd, "<checkout>").replace(cwd.replace("\\", "/"), "<checkout>")
-        row["command"] = [part.replace(cwd, "<checkout>") for part in row["command"]]
-        rows.append(row)
-    subject = {key: facts[key] for key in ("Subjects", "Walkthrough checks", "New promise checks")}
-    subject["Checks"] = {key: witness_tree(check) for key, check in facts["Checks"].items()}
-    payload = [tree(facts["Milestone base"]), tree(facts["Candidate"]), schema, subject, rows]
-    return hashlib.sha256(encode(payload).encode()).hexdigest()
-
-
 def milestone_checks(store, previous, milestone, current, subjects, receipt, candidate):
-    """Retain the original reviewed witness even when a later builder offers a replacement."""
     retained = dict(previous.get("checks", {}))
-    walks = previous.get("walkthroughs", [])
-    declared = [c.get("vision") for c in receipt["checks"]]
-    if (not set(current).issubset(declared) or len(declared) != len(set(declared))
-            or any(key not in subjects for key in declared)):
-        raise ValueError(f"Supply one check per new promise: {', '.join(current)}.")
-    if not receipt["walkthrough"]:
-        raise ValueError("Supply an unattended walkthrough of the try-it guide.")
+    submitted = receipt["checks"] + ([{**receipt["walkthrough"], "promises": ["tryItGuide"]}]
+                                    if receipt.get("walkthrough") else [])
+    by_promise = [(key, check) for check in submitted for key in (check.get("promises") or [check["vision"]])]
+    required = set(current) | {"tryItGuide"}
+    keys = {key for key, _ in by_promise}
+    if not required <= keys or len(keys) != len(by_promise) or not keys <= set(subjects) | required:
+        raise ValueError(f"Supply a check for each new promise and tryItGuide: {', '.join(current)}.")
     root = store.root.parent
-    # Older stores mixed plan commands and builder witnesses. Recover only commands the accepted
-    # builder actually declared, using its receipt and candidate rather than the planner's list.
+    # Backfill pre-witness receipts from the builder's recorded command and candidate.
     ancestor = previous
     while any("witness" not in c for c in retained.values()) and ancestor:
         old = store.read(ancestor["return"])["answer"]
         commit = ancestor["commit"]
         paths = [p for p in gitwork.paths(root, commit) if plan.matches(p, old["checkPaths"])]
+        commands = [c["command"] for c in [*old["checks"], old.get("walkthrough")] if c]
         for key, check in retained.items():
             if ("witness" not in check and key.startswith(f"milestone-{ancestor['milestone']}-")
-                    and any(c["command"] == check["command"] for c in [*old["checks"], old["walkthrough"]])):
-                retained[key] = {**check, "witness": {"commit": commit, "paths": paths}}
+                    and check["command"] in commands):
+                check.update(witness={"commit": commit, "paths": paths})
         ancestor = store.read(ancestor["previous"]) if ancestor.get("previous") else {}
     retained = {key: check for key, check in retained.items() if "witness" in check}
     paths = list(dict.fromkeys(plan.safe_path(path) for path in receipt["checkPaths"]))
@@ -260,12 +195,9 @@ def milestone_checks(store, previous, milestone, current, subjects, receipt, can
     if missing:
         raise ValueError(f"Check files absent from candidate: {', '.join(sorted(missing))}.")
     witness = {"commit": candidate, "paths": paths}
-    submitted = {f"milestone-{milestone}:{c['vision']}": {
-        **c, "requirements": [c["vision"]], "witness": witness,
-        **({"replacement": True} if c["vision"] not in current else {})} for c in receipt["checks"]}
-    walk = f"milestone-{milestone}:walkthrough"
-    submitted[walk] = {**receipt["walkthrough"], "requirements": ["tryItGuide"], "witness": witness}
-    return retained, submitted, [*(key for key in walks if key in retained), walk]
+    return retained, {f"milestone-{milestone}:{key}": {
+        "command": c["command"], "requirements": [key], "witness": witness}
+        for key, c in by_promise if key in required}
 
 
 def gaps(store, candidate, observations):

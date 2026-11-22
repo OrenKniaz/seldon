@@ -43,7 +43,7 @@ class ProviderFailure(RuntimeError):
 
 
 def role_for(kind, context):
-    return {"REVIEW": "reviewer", "WORK": "build", "JUDGE": "judge", "FLOW": "demo", "PRODUCT": "demo",
+    return {"REVIEW": "reviewer", "WORK": "build", "JUDGE": "judge", "RECEIPT": "judge", "FLOW": "demo", "PRODUCT": "demo",
             "DECIDE": "decider"}.get(kind, "planner")
 
 
@@ -157,7 +157,8 @@ def codex_command(setup, config, folder, worker, session, images):
         options = [opt for opt in options if opt.partition("=")[0] not in native]
         options.extend(key + '=true' for key in native)
     if not worker:
-        command += ["--ephemeral"]
+        command.append("--ephemeral")
+    if not (worker or config.get("walk")):
         options += ['features.shell_tool=false', 'features.code_mode_host=false']
     command += [arg for option in options for arg in ("-c", option)]
     return command + [f"--image={path}" for path in images] + ["-"]
@@ -179,7 +180,7 @@ def recorded(folder):
 def render_question(question, provider="codex", images=(), *, prompts2=None, planner_brief=None):
     prompt, instructions = _render_question(question, provider, images, prompts2=prompts2,
                                             planner_brief=planner_brief)
-    if question["kind"] == "WORK":
+    if question["kind"] == "WORK" or question["execution"].get("walk"):
         prompt += "\n\n" + desktop.WRITE_RULE
     return prompt, instructions
 
@@ -191,6 +192,9 @@ def _render_question(question, provider="codex", images=(), *, prompts2=None, pl
     """
     from .questions import labelled, planner_work, reviewed_brief  # imported through recovery
     image_directions = NATIVE[provider].prompt(images)
+    if question["execution"].get("walk"):
+        instructions = question["prompt"]
+        return instructions + "\n\n" + labelled(question["facts"]), instructions
     if question["execution"].get("lead"):
         from .lead import render_builder
         return render_builder(question)
@@ -240,9 +244,12 @@ class Provider:
         if not self.setup.get(name + "Command"):
             raise ProviderFailure(f"{name.title()} executable unavailable; install/authenticate {name} "
                                   "before resuming", False, True)
+        walk = question["execution"].get("walk")
         folder = self.root / ("call-" + uuid.uuid4().hex)
         folder.mkdir()
-        cwd = folder
+        cwd = Path(walk) if walk else folder
+        if walk:
+            config["walk"] = True
         worker = question["kind"] == "WORK"
         if worker:
             cwd = Path(question["execution"]["cwd"])
@@ -279,8 +286,12 @@ class Provider:
         name = invocation["provider"]["provider"]
         native = NATIVE[name]
         started(folder)
+        walk = question["execution"].get("walk")
+        temp = {key: str(Path(walk).parent / "temp") for key in ("TMP", "TEMP", "TMPDIR")} if walk else {}
+        if walk:
+            temp["SELDON_EVIDENCE_DIR"] = str(Path(walk).parent / "evidence")
         result = execute(invocation["command"], invocation["cwd"], invocation["timeout"],
-                         folder / "prompt.txt", env=desktop.environment(), output_dir=folder)
+                         folder / "prompt.txt", env=desktop.environment(temp), output_dir=folder)
         for stream in ("stdout", "stderr"):
             (folder / (stream + ".bin")).write_bytes(result[stream])
         output = result["stdout"].decode("utf-8", errors="replace")
