@@ -173,9 +173,6 @@ def milestone_checks(store, previous, milestone, current, subjects, receipt, can
                                     if receipt.get("walkthrough") else [])
     by_promise = [(key, check) for check in submitted for key in (check.get("promises") or [check["vision"]])]
     required = set(current) | {"tryItGuide"}
-    keys = {key for key, _ in by_promise}
-    if not required <= keys or len(keys) != len(by_promise) or not keys <= set(subjects) | required:
-        raise ValueError(f"Supply a check for each new promise and tryItGuide: {', '.join(current)}.")
     root = store.root.parent
     # Backfill pre-witness receipts from the builder's recorded command and candidate.
     ancestor = previous

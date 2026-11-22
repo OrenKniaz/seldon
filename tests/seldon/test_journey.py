@@ -1535,12 +1535,13 @@ def approve(request):
 @pytest.mark.fast
 @pytest.mark.parametrize("arm", ["hello-reopen", "cumulative-repair", "unchanged", "proof-owner", "plan-owner",
                                  "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay",
-                                 "bound-note", "unresolved-plan"])
+                                 "bound-note", "unresolved-plan", "missing-check"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
     A replacement check can hide a regression, and a receipt can stall proof or lose a genuine question.
     Wave journeys never exercise Lead's B-bound spec, durable witness or owner-specific repair.
+    missing-check catches an omitted builder witness blocking the guard before its real walk.
     guide-replay catches a missing shell observation or a receipt typo unnecessarily reopening the builder.
     proof-owner catches an omitted proof subject disappearing at C or reopening the builder.
     The wave journeys do not exercise those Lead paths.
@@ -1742,6 +1743,9 @@ if arm == "guide-replay":
     checks.append({"command": [sys.executable, "-B", script.as_posix()], "promises": ["tryItGuide"]})
 else:
     checks[-1 if name == "hello" else 0]["promises"].append("tryItGuide")
+if arm == "missing-check":
+    checks = [checks[0]]
+    checks[0]["promises"].append("tryItGuide")
 receipt = {"outcome": "done", "summary": f"A visitor can run {name}. Resumed: {'resume' in args}.",
            "checks": checks, "checkPaths": check_paths, "question": ""}
 # Retained e2dc3f5 lh01 r57 and lh02 r40, with the fixture's runnable witnesses attached.
@@ -1861,7 +1865,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             green = [row for row in facts["Observations"] if row["purpose"] == "milestone"]
             assert all(row["cleanCheckout"] and row["executionStarted"] and row["cleanupVerified"]
                        and row["commit"] == facts["Candidate commit"] for row in green)
-            assert any("usage error asserted" in row["stdout"] for row in green)
+            assert arm == "missing-check" or any("usage error asserted" in row["stdout"] for row in green)
             answer = {"why": "Walked the command and rejection from the guide.", "actions": actions,
                       "findings": [], "feedback": [{"step": "Reject bad input", "note": "Usage is easy to scan."}]}
 
@@ -1983,6 +1987,10 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                 arm == "guide-replay")
             if arm != "guide-replay":
                 assert run.store.records("outcome")[-1][2]["verification_complete"] is False
+        if arm == "missing-check":
+            assert not run.store.records("lead_failure")
+            assert not [q for _, _, q in run.store.records("question") if q["kind"] == "RECEIPT"]
+            assert run.store.records("outcome")[-1][2]["verification_complete"] is True
         assert displayed == ["A", "B", *(["B"] if arm == "plan-owner" else []),
                              *(["CHECK-IN"] * milestone_count), "C"]
         assert run.store.read(cursor.kickoff)["mode"] == "lead"
@@ -1998,7 +2006,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             assert receipt["binding"] == proofs[0]["commit"]
         kept = [row for row in questions.observed(run.store, cursor.finalObservations)
                 if "scopeIn:hello" in row["requirements"]]
-        if milestone_count == 1 and arm != "guide-replay":
+        if milestone_count == 1 and arm not in ("guide-replay", "missing-check"):
             green = [run.store.read(ref) for ref in cursor.finalObservations]
             usage = [r for r in green if "quality:exact" in r["requirements"]]
             assert len(usage) == 1 and "tryItGuide" in usage[0]["requirements"]
