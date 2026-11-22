@@ -1632,7 +1632,7 @@ def test_lead_sizes_by_builder_session(tmp_path, monkeypatch, staging):
                                  "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay",
                                  "bound-note", "unresolved-plan", "missing-check", "guard-repair", "failed-witness",
                                  "guard-feedback", "incomplete-witness", "unrelated-witness", "carry-witness",
-                                 "carry-with-limit", "owner-interruption"])
+                                 "carry-with-limit", "owner-interruption", "keep-building", "builder-stalled", "keep-building-off"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
@@ -1664,6 +1664,10 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     before the repaired rejection could reach C.
     micro-redraft catches an extra call or stale spec after an A edit, and missing coaching in the transmitted
     builder prompt. bound-note checks that coaching can be disabled. The other arms miss these boundaries.
+    keep-building catches an early status receipt becoming a user question or a cold builder start.
+    builder-stalled catches rewritten status prose masking a repeated tree and bypassing planner options.
+    Existing repair arms resume only after proof or an explicit owner decision. keep-building-off
+    confirms the same early receipt follows the original routing in the control arm.
     """
     from types import SimpleNamespace
 
@@ -1678,6 +1682,8 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
         monkeypatch.delenv("SELDON_OFF", raising=False)
     if arm == "proof-owner":
         monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadGuardOwner")
+    if arm == "keep-building-off":
+        monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadKeepBuilding")
     edit = "Require the exact stderr text Usage: pass a name when rejecting --help."
     flow = []
     dream = "Run `python hello.py Ada` and say ‘Hello, Ada!’ exactly. Reject `python hello.py --help`. " + (
@@ -1785,10 +1791,11 @@ assert prompt.startswith(facts["Milestone brief"] + "\n\n")
 assert "provider-native sub-agents and skills" in prompt and "Return schema" in prompt
 assert "features.multi_agent=true" in args and "skills.bundled.enabled=true" in args
 assert "--ephemeral" not in args and 'sandbox_mode="danger-full-access"' in args
-thread = args[args.index("resume") + 1] if "resume" in args else str(uuid.uuid4())
+arm = facts["Owner words"]["Dream"].rsplit(" Fixture: ", 1)[1].splitlines()[0]
+thread = args[args.index("resume") + 1] if "resume" in args else (
+    "milestone-builder" if arm in ("keep-building", "builder-stalled", "keep-building-off") else str(uuid.uuid4()))
 print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
 assert Path.cwd().resolve() == Path(facts["Write scope"]).resolve()
-arm = facts["Owner words"]["Dream"].rsplit(" Fixture: ", 1)[1].splitlines()[0]
 if arm == "micro-redraft":
     assert (
         "Coaching\nFor each result you describe, follow the actual interaction through to the specific "
@@ -1799,6 +1806,31 @@ if arm == "micro-redraft":
 if arm == "bound-note":
     assert "\nCoaching\n" not in prompt and "Use one runnable path" in prompt
 assert "`python hello.py --help`" in facts["Owner words"]["Dream"]
+if arm in ("keep-building", "builder-stalled", "keep-building-off"):
+    assert ("only when done or truly blocked" in prompt) is (arm != "keep-building-off")
+    partial = Path("hello.py")
+    if "resume" in args:
+        assert args[args.index("resume") + 1] == "milestone-builder"
+        assert "Hello, Ada!" in prompt
+    if direction := facts.get("Owner direction"):
+        assert arm == "builder-stalled" and direction == "Use the existing Python: Build the CLI with Python"
+    elif "resume" not in args or not partial.exists():
+        if "resume" in args:
+            assert "The next step is to implement the greeting." in prompt
+            if arm == "keep-building":
+                partial.write_text("print('Hello, Ada!')\n", encoding="utf-8")
+        next_step = ("add the usage rejection and checks" if partial.exists()
+                     else "build the CLI" if "resume" in args else "implement the greeting")
+        summary = f"The milestone is incomplete. The next step is to {next_step}."
+        checks = [{"command": [sys.executable, "-B", "hello.py", "Ada"], "promises": ["scopeIn:hello"]}]
+        receipt = {"outcome": "proof fault", "summary": summary, "question": "", "checkPaths": [],
+                   "checks": checks if partial.exists() else []}
+        print(json.dumps({"type": "item.completed", "item": {"type": "agent_message",
+                          "text": json.dumps({"answer": receipt})}}))
+        print(json.dumps({"type": "turn.completed", "usage": {}}))
+        raise SystemExit
+    else:
+        assert "The next step is to add the usage rejection and checks." in prompt
 if arm == "plan-owner" and "positional" in facts["Approved spec"]["how"]:
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(
         {"answer": {"outcome": "plan correction", "summary": "The approved design has an ambiguous parser.",
@@ -1903,7 +1935,7 @@ if arm == "bound-note":
         generated = Path(legacy, "generated.txt")
         generated.parent.mkdir(parents=True, exist_ok=True)
         generated.write_text("legacy generated file")
-if "resume" not in args:
+if "resume" not in args or arm in ("keep-building", "builder-stalled"):
     with guide.open("a", encoding="utf-8") as output:
         output.write(f"\nRun `python {name}.py Ada`. Expect {expected}\n")
         if name == "hello":
@@ -2066,7 +2098,13 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             answer = deepcopy(facts["Return"])
             answer["checkPaths"].remove("mistyped-guide-name.py")
         elif kind == "COACH":
-            raise Waiting()
+            if arm != "builder-stalled":
+                raise Waiting()
+            assert facts["Unresolved work"]["question"].endswith("The next step is to build the CLI.")
+            answer = {"ask": {"question": "How should the builder proceed?",
+                              "options": [{"label": "Use the existing Python", "means": "Build the CLI with Python"},
+                                          {"label": "Provide the deployment runtime", "means": "Supply its path"}]},
+                      "why": "The builder reported a different next step but still produced no candidate."}
         else:
             import shutil
             import subprocess
@@ -2209,11 +2247,18 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
 
     monkeypatch.setattr(provider, "invoke", scripted)
     displayed = []
+    build_options = []
 
     def user(request):
         nonlocal approved_milestone
         gate = request["gate"]
         displayed.append(gate)
+        if gate == "BUILD" and arm in ("builder-stalled", "keep-building-off"):
+            ask = frontdoor.state(str(project))["waitingFor"]["ask"]
+            build_options.extend(o["label"] for o in ask["options"])
+            if arm == "builder-stalled":
+                return "Use the existing Python"
+            raise Waiting()
         if micro and gate == "B":
             flow.append(gate)
             milestone, = request["subject"]["milestones"]
@@ -2306,6 +2351,11 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         cursor = run.run()
         if micro:
             assert flow == ["ALIGN", "ALIGN", "REVIEW", "B", "WORK"]
+        if arm == "keep-building-off":
+            assert displayed == ["A", "B", "BUILD"] and cursor.state == "BUILD"
+            assert len(run.store.records("call_session")) == 1
+            assert build_options == ["Pause", "Provide a fix", "Other"]
+            return
         if arm == "explicit-question":
             assert cursor.state == "BUILD" and cursor.decision
             ask = run.store.read(cursor.decision)["subject"]
@@ -2362,6 +2412,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             assert not [q for _, _, q in run.store.records("question") if q["kind"] == "RECEIPT"]
             assert run.store.records("outcome")[-1][2]["verification_complete"] is True
         assert displayed == [*(["A"] * (2 if micro else 1)), "B", *(["B"] if arm == "plan-owner" else []),
+                             *(["BUILD"] if arm == "builder-stalled" else []),
                              *(["CHECK-IN"] * milestone_count), "C"]
         assert run.store.read(cursor.kickoff)["mode"] == "lead"
         assignments = run.store.records("lead_assignment")
@@ -2399,6 +2450,11 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             stderr = (folder / "stderr.bin").read_bytes()
             assert len(stderr) > 4 * 1024**2 and stderr.rstrip().endswith(b"guard stderr end")
             assert run.store.records("outcome")[-1][2]["verification_complete"] is True
+        elif arm in ("keep-building", "builder-stalled"):
+            assert sessions == ["milestone-builder"] * 3
+            assert run.store.records("outcome")[-1][2]["verification_complete"] is True
+            if arm == "builder-stalled":
+                assert build_options == ["Use the existing Python", "Provide the deployment runtime", "Other"]
         elif arm in ("guard-repair", "incomplete-witness", "owner-interruption"):
             assert len(sessions) == 2 and sessions[0] == sessions[1]
             assert run.store.records("outcome")[-1][2]["verification_complete"] is True

@@ -172,12 +172,15 @@ def owner_question(store, owner, failure, *, retry=None):
 
 def route_repair(store, cause, owner, tree, failure, retry):
     cursor = store.cursor()
-    repeated = recovery.failed(store, cause, key=f"lead-build:{cursor.leadBuild}", shape=[owner, tree, failure])
+    unfinished = cursor.state == "BUILD" and owner == "Builder"
+    repeated = recovery.failed(store, cause, key=f"lead-build:{cursor.leadBuild}",
+                               shape=[owner, tree] if unfinished else [owner, tree, failure])
     if owner == "Builder" and tree and not repeated:
         return
     if owner == "Planner" and not repeated or owner == "Builder" and repeated:
         request(store, cursor.state, {"step": cursor.state, "inputOwner": "Planner", "failure": failure,
-                                      "question": failure, "tried": [failure]})
+            "question": ("The builder returned to the same candidate tree.\n" + failure if unfinished else failure),
+            "tried": [failure], **({"builderStalled": True} if unfinished else {})})
     else:
         owner_question(store, owner, failure, retry=retry)
 
@@ -471,7 +474,7 @@ def decide(store, provider, user):
         if picked:
             direction = picked["label"] + ": " + picked["means"]
     if effect in ("pause", "direction") or (input_owner and effect == "direct" and
-            (choice != "Other" or words in prior_words)):
+            (words in prior_words or choice != "Other" and not item["subject"].get("builderStalled"))):
         raise Waiting()  # Keep the displayed request and step intact for a later answer.
     with store.transaction():
         cursor = store.cursor()

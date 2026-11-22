@@ -224,16 +224,9 @@ def render_builder(question):
                         "Example receipt\n" + encode(question["examples"][0]))), rules
 
 
-def attempts(store, assignment, turn=None):
+def attempts(store, assignment):
     return [(ref, body) for ref, _, body in store.records("attempt")
-            for execution in [store.read(body["question"]).get("execution", {})]
-            if execution.get("lead") == assignment and (turn is None or execution["turn"] == turn)]
-
-
-def builder_session(store, calls):
-    ids = {ref for ref, _ in calls}
-    return next((b["session"] for _, _, b in reversed(store.records("call_session"))
-                 if b["attempt"] in ids), None)
+            if store.read(body["question"]).get("execution", {}).get("lead") == assignment]
 
 
 def recover_return(store, attempt, question):
@@ -289,16 +282,18 @@ def build(store, provider, cursor):
                 "B": cursor.B, "base": cursor.candidate, "workspace": workspace, "brief": brief})
             cursor = store.cursor(replace(cursor, leadBuild=ref))
     assignment = store.read(cursor.leadBuild)
-    calls = attempts(store, cursor.leadBuild)
-    current = attempts(store, cursor.leadBuild, cursor.repairs)
-    if current and not cursor.leadReturn:
-        ref, last = current[-1]
-        if returned := recover_return(store, ref, last["question"]):
-            cursor = store.cursor(replace(cursor, leadReturn=returned))
+    calls = dict(attempts(store, cursor.leadBuild))
+    last = next(reversed(calls), None)
+    recorded_question = calls[last]["question"] if last else None
+    current = recorded_question and store.read(recorded_question)["execution"]["turn"] == cursor.repairs
+    keep_building = features.enabled("leadKeepBuilding")
+    if current and not cursor.leadReturn and (returned := recover_return(store, last, recorded_question)):
+        cursor = store.cursor(replace(cursor, leadReturn=returned))
     if not cursor.leadReturn:
-        session = builder_session(store, calls)
-        if current and not session and any(b["attempt"] == current[-1][0]
-                                          for _, _, b in store.records("call_started")):
+        session = next((b["session"] for _, _, b in reversed(store.records("call_session"))
+                        if b["attempt"] in calls), None)
+        resumable = calls.keys() if keep_building else {last} if current else ()
+        if not session and any(b["attempt"] in resumable for _, _, b in store.records("call_started")):
             raise proof.UncertainCleanup("The builder has no resumable session in its recording.")
         spec = item["spec"]
         facts = {"Milestone brief": assignment["brief"],
@@ -317,7 +312,10 @@ def build(store, provider, cursor):
         path = "docs/try-it/walkthrough.py"
         example = {"outcome": "done", "summary": "A visitor can greet Ada.", "question": "", "checkPaths": [path],
                    "checks": [{"command": ["python", path], "promises": [next(iter(facts["Promises"])), "tryItGuide"]}]}
-        question = questions.question("WORK", (BOUND_RULES if features.enabled("leadBoundProof") else
+        mission = ("Keep all tooling headless. Implement now and continue until every B promise is built and "
+                   "checked. Return only when done or truly blocked. Put any required outside input in question. "
+                   if keep_building else "")
+        question = questions.question("WORK", mission + (BOUND_RULES if features.enabled("leadBoundProof") else
             "Check the full approved result and diagnostic meaning. A missing product must fail its check. ")
             + WRITE_RULES, facts, RECEIPT, [example],
             execution={"cwd": assignment["workspace"], "session": session, "lead": cursor.leadBuild,
@@ -339,25 +337,21 @@ def build(store, provider, cursor):
         cursor = store.cursor()
     returned = store.read(cursor.leadReturn)
     answer = returned["answer"]
-    if "error" in returned:
-        advance(store, "returned", cursor.leadReturn, requestedChange=None)
-        return
-    question = answer.get("question", "").strip()
-    if question or not answer.get("checks") and answer.get("outcome") in ("question", "plan correction", "proof fault"):
-        owner = "Planner" if question else {
-            "question": "Planner", "plan correction": "Planner", "proof fault": "Seldon",
-        }.get(answer["outcome"], "Builder")
+    question, outcome = answer.get("question", "").strip(), answer.get("outcome")
+    covered = {promise for check in answer.get("checks", ()) for promise in check["promises"]}
+    unfinished = (keep_building and not question and outcome in ("question", "proof fault")
+                  and bool(obligations(item, commitments(store, cursor)).keys() - covered))
+    if "error" not in returned and (unfinished or question or not covered and outcome != "done"):
         _, candidate, _ = gitwork.snapshots(assignment["workspace"], assignment["base"], ["**"], [], cursor.scratch)
-        fail(store, cursor, question or answer["summary"], owner, candidate=candidate,
-             replan=not question and answer["outcome"] == "plan correction")
-        return
+        owner = "Builder" if unfinished else "Planner" if question or outcome != "proof fault" else "Seldon"
+        return fail(store, cursor, question or answer["summary"], owner, candidate=candidate,
+                    replan=not question and outcome == "plan correction")
     advance(store, "returned", cursor.leadReturn, requestedChange=None)
 
 
 def fail(store, cursor, failure, owner="Builder", *, candidate=None, evidence=(),
          replan=False, retry=None):
-    root = store.root.parent
-    tree = gitwork.git(root, "rev-parse", f"{candidate}^{{tree}}") if candidate else None
+    tree = gitwork.git(store.root.parent, "rev-parse", f"{candidate}^{{tree}}") if candidate else None
     with store.transaction():
         cause = store.record("lead_failure", {"milestone": cursor.wave, "assignment": cursor.leadBuild,
             "return": cursor.leadReturn, "failure": failure, "candidate": candidate, "tree": tree,
@@ -376,9 +370,8 @@ def fail(store, cursor, failure, owner="Builder", *, candidate=None, evidence=()
         else:
             store.cursor(replace(cursor, **updates))
         if replan:
-            decisions.owner_question(store, owner, failure)
-        else:
-            decisions.route_repair(store, cause, owner, tree, failure, retry)
+            return decisions.owner_question(store, owner, failure)
+        return decisions.route_repair(store, cause, owner, tree, failure, retry)
 
 
 def prove(store, provider, cursor):
