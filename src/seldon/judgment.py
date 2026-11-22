@@ -40,6 +40,24 @@ def folded_subjects(document):
     }
 
 
+def _repair_diff(root, before, after):
+    data = gitwork.git(root, "diff", "--no-ext-diff", "-U1", before, after, binary=True)
+    # Git emits file bytes unchanged. A single patch can contain UTF-8 and Windows text.
+    lines = []
+    for line in data.splitlines(keepends=True):
+        try:
+            lines.append(line.decode("utf-8"))
+        except UnicodeDecodeError:
+            lines.append(line.decode("cp1252", errors="replace"))
+    return "".join(lines)
+
+
+def _check_result(row):
+    return {key: row[key] for key in ("command", "requirements", "exitCode", "stdout", "stderr",
+            "executionStarted", "timedOut", "cleanupVerified", "operationLifecycle", "browserVisits",
+            "fileCleanup", "evidenceFiles") if key in row}
+
+
 def milestone(store, provider, base, commit, subjects, current, refs, *, owner=None):
     cursor = store.cursor()
     source, prior = next(((ref, row) for ref, _, row in reversed(store.records("lead_verdict"))
@@ -48,9 +66,26 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
             list(map(store.read, prior.get("observations", []))) == list(map(store.read, refs))):
         return source, prior
     prior = prior if prior.get("fixes") and prior["commit"] != commit else {}
+    once = features.enabled("leadGuardOnce")
+    scoped = once and bool(prior)
     subjects = {**subjects, **LEAD_BINDINGS}
     observations = {ref: store.read(ref) for ref in refs}
-    executed = {ref: row for ref, row in observations.items() if row["commit"] == commit and proof.executed(row)}
+    packet = observations
+    refresh = ({"sourceAcceptance"} | {f["promise"] for f in prior["findings"] if f["kind"] == "defect"}
+               if scoped else set())
+    matched = {}
+    if scoped:
+        old = {tuple(row["checks"]): (ref, _check_result(row)) for ref in prior["observations"]
+               if (row := store.read(ref)).get("checks")}
+        packet = {}
+        for ref, row in observations.items():
+            previous_ref, result = old.get(tuple(row["checks"]), (None, None))
+            if result == _check_result(row) and row["exitCode"] == 0:
+                matched[previous_ref] = ref
+                if refresh.isdisjoint(row["requirements"]):
+                    continue
+            packet[ref] = row
+    executed = {ref: row for ref, row in packet.items() if row["commit"] == commit and proof.executed(row)}
     links = [obj(action=POSITION)] + ([obj(observation=choice(*executed))] if executed else [])
     handles = choice(*subjects)
     finding = dict(promise=handles, reason=TEXT)
@@ -71,22 +106,52 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
         findings=array({"anyOf": [defect, other, *witness]}), **extras))
     runtime = Path(mkdtemp(prefix="guard-", dir=cursor.scratch))
     work, before, evidence_dir = (runtime / name for name in ("product", "base", "evidence"))
+    walk = (questions.LEAD_GUARD if owner else "Walk each B promise on Candidate. Observe new failures on Base. "
+            "Try the real product and guide, inspect source for stubs and give UX feedback.")
+    context = {**(owner or {}), "Subjects": subjects, "New promises": list(current)}
+    if scoped:
+        revisit = refresh | {p for row in packet.values() for p in row["requirements"]}
+        walk = ("Read the repair diff, then independently re-walk every reproduced defect and any other "
+                "promise the changed code or guide can affect, including shared state and callers. "
+                "Reinspect changed source for completeness. Use current actions with actual results for the "
+                "old reproductions, even if a regression check passes. Reuse prior observations for unaffected "
+                "behavior. Use Base only for new promises still missing baseline evidence. "
+                "Restate any earlier limit on the promises you recheck unless the specific gap was resolved. "
+                "Report uncertainty if you cannot recheck affected behavior. Give UX and maintenance feedback "
+                "on the part you walked.")
+        context = {
+            "Repair": {"Previous candidate": prior["commit"], "Defects": prior["fixes"],
+                       "Diff": _repair_diff(store.root.parent, prior["commit"], commit)},
+            "Subjects": {p: (standard if p in revisit else {"result": standard["result"]}
+                             if isinstance(standard, dict) and "result" in standard else standard)
+                         for p, standard in subjects.items()},
+            "New promises": [p for p in current if p not in prior.get("baselines", [])],
+        }
+        if limits := [{k: f[k] for k in ("promise", "reason")} for f in prior.get("limitations", [])
+                      if f.get("kind") == "uncertain"]:
+            context["Unresolved limits"] = limits
+        carried = [gap for gap in carried if gap["promise"] in revisit]
+    elif prior:
+        context.update({"Previous walk": {k: prior[k] for k in ("commit", "actions", "fixes", "limitations")},
+                        "Changed paths": gitwork.git(store.root.parent, "diff", "--name-only", prior["commit"], commit)})
+    if once:
+        walk += (" Finish every journey in scope even when an early step fails. Use independent steps or "
+                 "fresh state to continue. Walk normal, interrupted and boundary cases, including invalid input "
+                 "at operation and storage boundaries and retries across lifecycle changes. "
+                 "Report all reproduced defects together. A complete report saves a repair round.")
+    else:
+        walk += " On repair revisit affected and outstanding behavior."
     question = questions.question("JUDGE",
-        (questions.LEAD_GUARD if owner else "Walk each B promise on Candidate. Observe new failures on Base. "
-         "Try the real product and guide, inspect source for stubs and give UX feedback.")
-        + " On repair revisit affected and outstanding behavior. A defect selects the violated B field "
+        walk + " A defect selects the violated B field "
         "and links a one-based action or an executed observation for that promise. "
         + ("For a broken retained witness, give witnessPath and provedAction if a separate successful action "
            "demonstrates the same promise. Recheck carried gaps. " if carry else "")
         + "Use plain commands in the supplied copies. Record denials without retrying. "
         "On resume continue. Save evidence in SELDON_EVIDENCE_DIR, name PNGs and stop your processes.",
-        {**(owner or {}), "Candidate": str(work), "Candidate commit": commit, "Base": str(before),
-         "Guide path": questions.GUIDE_PATH, "Subjects": subjects, "New promises": list(current),
-         "Observations": {ref: {**row, **judge_fields(row)} for ref, row in observations.items()},
-         **({"Carried witness tasks": carried} if carried and carry else {}),
-         **({"Previous walk": {k: prior[k] for k in ("commit", "actions", "fixes", "limitations")},
-             "Changed paths": gitwork.git(store.root.parent, "diff", "--name-only", prior["commit"], commit)}
-            if prior else {})}, schema,
+        {**context, "Candidate": str(work), "Candidate commit": commit, "Base": str(before),
+         "Guide path": questions.GUIDE_PATH,
+         "Observations": {ref: {**row, **judge_fields(row)} for ref, row in packet.items()},
+         **({"Carried witness tasks": carried} if carried and carry else {})}, schema,
         [{"actions": [{"action": "Run hello Ada", "actual": "Hello, Ada!", "promises": [next(iter(subjects))],
                       "baseline": "Run hello Ada: entry point absent.", "screenshots": []}],
           "findings": [], "feedback": [{"step": "Greeting", "note": "Easy to scan."}], "why": "Exact output.",
@@ -132,9 +197,9 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
             if position:
                 walk = answer["actions"][position - 1:position]
                 rows = [executed[link["observation"]]] if "observation" in link else executed.values()
-                scoped = path == questions.GUIDE_PATH or (path.startswith(("checks/", "docs/try-it/")) and any(
+                witness_scoped = path == questions.GUIDE_PATH or (path.startswith(("checks/", "docs/try-it/")) and any(
                     promise in row["requirements"] and path in row.get("witness", {}).get("paths", ()) for row in rows))
-                if (scoped and position != link.get("action") and walk and promise in walk[0]["promises"]
+                if (witness_scoped and position != link.get("action") and walk and promise in walk[0]["promises"]
                         and walk[0]["action"].strip() and walk[0]["actual"].strip()):
                     item = {**item, "carry": True}
             findings.append({**item, "quote": quote, "evidence": evidence})
@@ -145,7 +210,8 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
         actions = [{**a, "commit": commit, "screenshots": [
             files[n] for n in a["screenshots"] if n in files and proof.image(Path(files[n]).read_bytes())
         ]} for a in answer["actions"]]
-        affected = (reused | {p for a in actions for p in a["promises"]}
+        walked = {p for a in actions for p in a["promises"]}
+        affected = (reused | walked | refresh
                     | {f["promise"] for f in findings if f["kind"] != "note"}
                     | {f["promise"] for f in prior.get("findings", []) if f["kind"] == "defect"})
         baselines = set(prior.get("baselines", [])) | {
@@ -159,9 +225,16 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
         result["actions"] = actions + [
             {**a, "promises": kept} for a in prior.get("actions", [])
             if (kept := [p for p in a["promises"] if p not in affected])]
+        if scoped:
+            kept_credits = [{**credit, "observation": matched[credit["observation"]], "promises": kept}
+                            for credit in prior.get("reuse", []) if credit["observation"] in matched
+                            if (kept := [p for p in credit["promises"] if p not in affected])]
+            result["reuse"] = answer.get("reuse", []) + kept_credits
+            reused.update(p for credit in kept_credits for p in credit["promises"])
         linked = reused | {p for a in result["actions"] for p in a["promises"]}
         missing = (dict.fromkeys(current.keys() - baselines, "Failure on the base was not observed.")
                    | dict.fromkeys(subjects.keys() - linked, "No independent action recorded."))
+        missing.update(dict.fromkeys(refresh - walked, "No current action recorded for the repair scope."))
         limits = {f["promise"] for f in result["limitations"]}
         result["limitations"] += [{"promise": p, "reason": missing[p]} for p in sorted(set(missing) - limits)]
         store.record("lead_verdict", result)

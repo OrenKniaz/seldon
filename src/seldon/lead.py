@@ -317,6 +317,9 @@ def build(store, provider, cursor):
                    if keep_building else "")
         question = questions.question("WORK", mission + (BOUND_RULES if features.enabled("leadBoundProof") else
             "Check the full approved result and diagnostic meaning. A missing product must fail its check. ")
+            + ("Repair every reproduced defect in Exact failure in this turn. Run your regression checks "
+               "for the fixes and affected behavior before returning, and report what ran and the results. "
+               if cursor.failure and features.enabled("leadGuardOnce") else "")
             + WRITE_RULES, facts, RECEIPT, [example],
             execution={"cwd": assignment["workspace"], "session": session, "lead": cursor.leadBuild,
                        "turn": cursor.repairs})
