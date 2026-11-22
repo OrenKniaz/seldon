@@ -308,7 +308,7 @@ def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
         "quiescenceVerified": False,
         "activeProcessesAfterTeardown": None,
     }
-    channels, buffers = {}, {"stdout": bytearray(), "stderr": bytearray(), "status": bytearray()}
+    status = bytearray()
     records = []
     native_failed = False
     bootstrap_exited = False
@@ -316,9 +316,10 @@ def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
     gate_transfer_started = False
     ready_started = None
     bootstrap_status = bytearray()
-    live = {name: open(output_dir / (name + ".bin"), "wb", buffering=0)
-            for name in ("stdout", "stderr")} if output_dir else {}
+    files = ExitStack()
     try:
+        stdout, stderr = (files.enter_context(open(output_dir / (name + ".bin"), "w+b")
+                          if output_dir else TemporaryFile()) for name in ("stdout", "stderr"))
         image = job.image()
         control["bootstrapImage"] = image
         gate_read, gate_write = os.pipe()
@@ -343,8 +344,8 @@ def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
                 ],
                 cwd=os.path.dirname(image),
                 stdin=stdin,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=stdout,
+                stderr=stderr,
                 startupinfo=startup,
                 close_fds=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
@@ -356,38 +357,30 @@ def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
             os.close(fd)
             fds.remove(fd)
         control["bootstrapPid"] = process.pid
-        channels["status"] = status_read
-        for name in ("stdout", "stderr"):
-            if stream := getattr(process, name):
-                channels[name] = stream.fileno()
         job.assign(process)
         control["membershipVerifiedBeforePayload"] = True
 
         def pump():
-            for name, fd in list(channels.items()):
-                before = len(buffers[name])
-                if job.read(fd, buffers[name]):
-                    del channels[name]
-                if name in live:
-                    live[name].write(buffers[name][before:])
-                if name == "status" and not gate_transfer_started:
-                    bootstrap_status.extend(buffers[name][before:])
-                    del bootstrap_status[:-4096]
-            while b"\n" in buffers["status"]:
-                line, _, remainder = buffers["status"].partition(b"\n")
-                buffers["status"][:] = remainder
+            before = len(status)
+            closed = job.read(status_read, status)
+            if not gate_transfer_started:
+                bootstrap_status.extend(status[before:])
+                del bootstrap_status[:-4096]
+            while b"\n" in status:
+                line, _, remainder = status.partition(b"\n")
+                status[:] = remainder
                 record = json.loads(line)
                 if record["kind"] == "launched":
                     control["payloadPid"] = record["pid"]
                 else:
                     records.append(record)
+            return closed
 
         ready_started = time.monotonic()
         # Native captured-input witness: 15.172s to READY; three times, rounded up.
         deadline = ready_started + timeout
         ready_deadline = min(deadline, ready_started + 46)
-        while not records and "status" in channels and time.monotonic() < ready_deadline:
-            pump()
+        while not records and time.monotonic() < ready_deadline and not pump():
             time.sleep(0.005)
         if not records or records.pop(0) != {"kind": "ready"}:
             raise OSError("Process trusted bootstrap did not reach its private gate")
@@ -403,25 +396,20 @@ def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
             gate_transfer_started = True
             gate.write(config)
         control["payloadReleased"] = True
-        while not records and "status" in channels and time.monotonic() < deadline:
-            pump()
+        while not records and time.monotonic() < deadline and not pump():
             time.sleep(0.005)
         timed_out = not records and time.monotonic() >= deadline
         record = records[0] if records else None
         job.finish(process, control)
-        drain_deadline = time.monotonic() + 5
-        while channels and time.monotonic() < drain_deadline:
-            pump()
-            time.sleep(0.005)
-        if channels:
-            raise OSError("Process output pipes did not drain after Job quiescence")
-        stdout, stderr = bytes(buffers["stdout"]), bytes(buffers["stderr"])
+        stdout.seek(0)
+        stderr.seek(0)
+        out, err = stdout.read(), stderr.read()
         if timed_out:
             raise subprocess.TimeoutExpired(
                 args,
                 timeout,
-                output=stdout,
-                stderr=stderr,
+                output=out,
+                stderr=err,
             )
         if record is None or record.get("kind") != "complete":
             raise OSError(f"Process bootstrap refused payload: {record}")
@@ -429,8 +417,8 @@ def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
         result = subprocess.CompletedProcess(
             args,
             record["returncode"],
-            stdout,
-            stderr,
+            out,
+            err,
         )
         result.process_control = control
         return result
@@ -438,9 +426,8 @@ def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
         if ready_started is not None and not gate_transfer_started:
             # These channels precede config delivery: trusted bootstrap diagnostics only.
             control["bootstrapReadyWaitSeconds"] = round(time.monotonic() - ready_started, 6)
-            control["bootstrapStderrTail"] = bytes(buffers["stderr"][-4096:]).decode(
-                "utf-8", errors="replace"
-            )
+            stderr.seek(max(0, os.fstat(stderr.fileno()).st_size - 4096))
+            control["bootstrapStderrTail"] = stderr.read(4096).decode("utf-8", errors="replace")
             control["bootstrapStatusTail"] = bytes(bootstrap_status).decode(
                 "utf-8", errors="replace"
             )
@@ -485,14 +472,9 @@ def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
         error.process_control = control
         raise
     finally:
-        for stream in live.values():
-            stream.close()
+        files.close()
         for fd in fds:
             os.close(fd)
-        if process is not None:
-            for stream in (process.stdout, process.stderr):
-                if stream is not None:
-                    stream.close()
         if (
             process is None
             or (

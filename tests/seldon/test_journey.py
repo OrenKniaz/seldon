@@ -1535,7 +1535,7 @@ def approve(request):
 @pytest.mark.fast
 @pytest.mark.parametrize("arm", ["hello-reopen", "cumulative-repair", "unchanged", "proof-owner", "plan-owner",
                                  "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay",
-                                 "bound-note", "unresolved-plan", "missing-check", "guard-repair"])
+                                 "bound-note", "unresolved-plan", "missing-check", "guard-repair", "failed-witness"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
@@ -1550,6 +1550,8 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     unresolved-plan catches a missing accepted promise disappearing at B or triggering a whole-plan retry.
     hello-reopen launches the native guard adapter to catch disabled tools, a missing candidate copy,
     a product file leaking onto the base through checkPaths, and evidence lost during cleanup.
+    Its timeout catches a fresh guard losing completed actions and large streams losing output.
+    failed-witness catches PROVE masking an observed check failure when the guard has no separate defect.
     """
     from types import SimpleNamespace
 
@@ -1596,26 +1598,40 @@ q = json.loads(schema.with_name("question.json").read_text(encoding="utf-8"))
 prompt = schema.with_name("prompt.txt").read_text(encoding="utf-8")
 facts = q["facts"]
 if q["kind"] == "JUDGE":
-    import base64, os, subprocess, tempfile
+    import base64, os, subprocess, tempfile, time
 
     assert 'sandbox_mode="danger-full-access"' in args and 'features.shell_tool=false' not in args
     assert "never open files or pages in desktop apps" in prompt and os.environ["GIT_EDITOR"] == "true"
-    assert Path.cwd().resolve() == Path(args[args.index("--cd") + 1]).resolve()
+    assert "--ephemeral" not in args and Path.cwd().resolve() == Path(facts["Candidate"]).resolve()
     assert not Path(".git").exists() and Path(facts["Guide path"]).is_file()
     assert Path(tempfile.gettempdir()).parent == Path.cwd().parent
     evidence = Path(os.environ["SELDON_EVIDENCE_DIR"])
     assert evidence.parent == Path.cwd().parent
     base = Path(facts["Base"])
     assert not (base / "hello.py").exists()
-    actions = []
-    for step, arg, code in (("Greet", "Ada", 0), ("Restart", "Ada", 0), ("Reject bad input", "--help", 2)):
-        result = subprocess.run([sys.executable, "-B", "hello.py", arg], capture_output=True, text=True)
-        assert result.returncode == code
-        red = subprocess.run([sys.executable, "-B", "hello.py", arg], cwd=base, capture_output=True, text=True)
-        assert "can't open file" in red.stderr
-        actions.append({"action": step, "actual": (result.stdout or result.stderr).strip(),
-                        "baseline": red.stderr.strip(), "screenshots": ["view.png"] if code == 0 else [],
-                        "promises": ["tryItGuide", "quality:exact" if code else "scopeIn:hello"]})
+    saved = Path(tempfile.gettempdir()) / "guard-session.json"
+    if "resume" not in args:
+        assert not saved.exists()
+        actions = []
+        for step, arg, code in (("Greet", "Ada", 0), ("Restart", "Ada", 0), ("Reject bad input", "--help", 2)):
+            result = subprocess.run([sys.executable, "-B", "hello.py", arg], capture_output=True, text=True)
+            assert result.returncode == code
+            red = subprocess.run([sys.executable, "-B", "hello.py", arg], cwd=base, capture_output=True, text=True)
+            assert "can't open file" in red.stderr
+            actions.append({"action": step, "actual": (result.stdout or result.stderr).strip(),
+                            "baseline": red.stderr.strip(), "screenshots": ["view.png"] if code == 0 else [],
+                            "promises": ["tryItGuide", "quality:exact" if code else "scopeIn:hello"]})
+        saved.write_text(json.dumps(actions), encoding="utf-8")
+        print(json.dumps({"type": "thread.started", "thread_id": "guard-session"}), flush=True)
+        time.sleep(60)
+        raise AssertionError("guard was not interrupted")
+    assert args[args.index("resume") + 1] == "guard-session"
+    actions = json.loads(saved.read_text(encoding="utf-8"))
+    print(json.dumps({"type": "thread.started", "thread_id": "guard-session"}), flush=True)
+    for _ in range(520):
+        print(json.dumps({"type": "fixture.tool.output", "text": "x" * 8192}))
+        print("y" * 8192, file=sys.stderr)
+    print("guard stderr end", file=sys.stderr)
     actions.append({"action": "Inspect hello.py", "actual": Path("hello.py").read_text(),
                     "baseline": "", "screenshots": [], "promises": ["sourceAcceptance"]})
     (evidence / "command.txt").write_text(actions[2]["actual"], encoding="utf-8")
@@ -1684,6 +1700,9 @@ if name == "hello":
     err.write_text(usage +
         "assert (r.returncode, r.stdout, r.stderr) == (2, '', 'Usage: pass a name\\n')\n"
         "print('usage error asserted')\n", encoding="utf-8")
+    if arm == "failed-witness":
+        with err.open("a", encoding="utf-8") as output:
+            output.write("raise SystemExit(7)\n")
     if arm == "weak-check":
         if "resume" in args:
             assert facts["Exact failure"].endswith(
@@ -1787,6 +1806,19 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
              "codexCommand": [sys.executable, "-B", str(native)], "python": {"path": sys.executable}}
     provider = Codex(tmp_path / "calls", setup)
     invoke = provider.invoke
+    if arm == "hello-reopen":
+        from seldon import providers
+
+        execute = providers.execute
+
+        def guard_deadline(command, cwd, timeout, *args, **kwargs):
+            if Path(cwd).parent.name.startswith("guard-"):
+                assert timeout == setup["providers"]["build"]["timeout"]
+                if "resume" not in command:
+                    timeout = 20
+            return execute(command, cwd, timeout, *args, **kwargs)
+
+        monkeypatch.setattr(providers, "execute", guard_deadline)
     reviewed = []
     amendments = "Parse one name and reject extra flags."
 
@@ -1976,6 +2008,15 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             assert ask["question"] == "Which of the two Windows Python runtimes should the guide target?"
             assert not run.store.records("observation")
             return
+        if arm == "failed-witness":
+            assert cursor.state == "PROVE" and displayed == ["A", "B", "PROVE"]
+            (_, _, failure), = run.store.records("lead_failure")
+            assert failure["owner"] == "Seldon"
+            evidence = [run.store.read(ref) for ref in failure["evidence"]]
+            assert any(row.get("exitCode") == 7 and row["commit"] == failure["candidate"] for row in evidence)
+            assert any(row.get("actions") and row["commit"] == failure["candidate"] for row in evidence)
+            assert gitwork.git(project, "rev-parse", "HEAD") == base_commit
+            return
         if arm == "unchanged":
             request = cursor.decision
             assert request and cursor.state == ("BUILD" if arm == "unchanged" else "PROVE")
@@ -2038,7 +2079,22 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         assert kept[0]["stdout"].strip() == "Hello, Ada!"
         assert gitwork.git(project, "rev-list", "--count", "HEAD") == str(1 + milestone_count)
         sessions = [row["session"] for _, _, row in run.store.records("call_session")]
-        if arm == "guard-repair":
+        if arm == "hello-reopen":
+            assert len(sessions) == 2 and sessions[-1] == "guard-session"
+            (_, _, failure), = run.store.records("provider_failure")
+            assert failure["session"] == "guard-session" and failure["cleanupVerified"]
+            receipt = json.loads(Path(failure["receipt"]).read_text("utf-8"))
+            assert receipt["timedOut"] and receipt["executionStarted"]
+            guard_attempts = [(ref, row) for ref, _, row in run.store.records("attempt")
+                              if row["operation"] == "JUDGE"]
+            assert len(guard_attempts) == 2 and guard_attempts[1][1]["retryOf"] == guard_attempts[0][0]
+            (folder,) = [Path(row["folder"]) for _, _, row in run.store.records("call_started")
+                         if row["attempt"] == guard_attempts[1][0]]
+            assert (folder / "stdout.bin").stat().st_size > 4 * 1024**2
+            stderr = (folder / "stderr.bin").read_bytes()
+            assert len(stderr) > 4 * 1024**2 and stderr.rstrip().endswith(b"guard stderr end")
+            assert run.store.records("outcome")[-1][2]["verification_complete"] is True
+        elif arm == "guard-repair":
             assert len(sessions) == 2 and sessions[0] == sessions[1]
             assert run.store.records("outcome")[-1][2]["verification_complete"] is True
         elif milestone_count == 1:

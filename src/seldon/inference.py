@@ -14,18 +14,19 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
     setup = store.read(store.cursor().kickoff)["setup"]
     kind = question["kind"]
     attempt = None
-    lead = question.get("execution", {}).get("lead")
-    session = question.get("execution", {}).get("session") if lead else None
+    execution = question.get("execution", {})
+    lead, walk = execution.get("lead"), execution.get("walk")
+    session = execution.get("session")
 
     def invoke(current):
         nonlocal attempt, session
         if unit:
             current = {**current, "execution": {**current["execution"], "session": store.unit(unit).thread}}
-        elif lead:
-            current = {**current, "execution": {**current["execution"], "session": session}}
         previous = None
         for recovery in range(3):
-            timeout = provider.timeout_for(kind, {}) if hasattr(provider, "timeout_for") else 30
+            if lead or walk:
+                current = {**current, "execution": {**current["execution"], "session": session}}
+            timeout = provider.timeout_for(kind, execution) if hasattr(provider, "timeout_for") else 30
             with store.transaction():
                 qref = store.record("question", current)
                 attempt = store.record("attempt", {"operation": kind, "question": qref,
@@ -46,7 +47,7 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                     if unit and thread:
                         with store.transaction():
                             store.unit(unit, replace(store.unit(unit), thread=thread))
-                    elif lead and thread:
+                    elif (lead or walk) and thread:
                         session = thread
                         store.record("call_session", {"attempt": attempt, "session": thread})
                     return raw
@@ -54,11 +55,16 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
             except ProviderFailure as error:
                 store.record("provider_failure", {"attempt": attempt, "reason": str(error),
                     "transient": error.transient, "cleanupVerified": error.cleanup_verified,
-                    "receipt": error.receipt})
+                    "receipt": error.receipt, **({"session": error.session} if walk else {})})
+                if walk:
+                    session = session or error.session
+                    if not (session and recovery < 2 and isinstance(error, Deadline) and error.cleanup_verified):
+                        raise
+                    previous = attempt
+                    continue
                 if (lead and session and features.enabled("leadBoundProof")
                         and isinstance(error, ResumeUnavailable) and error.cleanup_verified):
                     session, previous = None, attempt
-                    current = {**current, "execution": {**current["execution"], "session": None}}
                     continue
                 if (isinstance(error, ResumeUnavailable) or not error.transient
                         or not error.cleanup_verified or unit and isinstance(error, Deadline)

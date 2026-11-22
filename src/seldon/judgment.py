@@ -63,7 +63,9 @@ def milestone(store, provider, base, commit, subjects, current, refs):
         "Use uncertain for machine limits only; say what was partly seen and why. Describe how the UI felt. "
         "For a defect, quote B's result or notMetIf verbatim and record the reproducing action, expected and "
         "actual in evidence, or cite the failed check ID. Use amend for ambiguous B and note for advice. "
-        "Save evidence in SELDON_EVIDENCE_DIR, cite PNG names, stay in the copies and stop your processes.",
+        "Use one plain command per action inside the copies and their runtime. Record denials without retrying. "
+        "Use supplied clean-checkout observations for guide commands already run. On resume finish missing actions. "
+        "Save evidence in SELDON_EVIDENCE_DIR, cite PNG names and stop your processes.",
         {"Candidate": str(work), "Candidate commit": commit, "Base": str(before), "Base commit": base,
          "Guide path": plan.GUIDE_PATH, "Subjects": subjects, "New promises": list(current),
          "Observations": [store.read(ref) for ref in refs],

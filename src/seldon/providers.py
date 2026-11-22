@@ -37,9 +37,10 @@ PAUSE_WORDS = ("unauthorized", "unauthenticated", "authentication", "not authent
 
 class ProviderFailure(RuntimeError):
     """C18/C20: native failure and observed cleanup govern fresh-call recovery."""
-    def __init__(self, reason, transient, cleanup_verified, receipt=None):
+    def __init__(self, reason, transient, cleanup_verified, receipt=None, session=None):
         super().__init__(reason)
         self.transient, self.cleanup_verified, self.receipt = transient, cleanup_verified, receipt
+        self.session = session
 
 
 def role_for(kind, context):
@@ -56,7 +57,7 @@ class InputRejected(ProviderFailure):
 
 
 class Deadline(ProviderFailure):
-    """Seldon's WORK deadline, the only provider failure charged to the unit."""
+    """A verified WORK or guard deadline. Only WORK is charged to the unit."""
 
 
 def session_id(output):
@@ -156,7 +157,7 @@ def codex_command(setup, config, folder, worker, session, images):
         native = ('features.multi_agent', 'skills.include_instructions', 'skills.bundled.enabled')
         options = [opt for opt in options if opt.partition("=")[0] not in native]
         options.extend(key + '=true' for key in native)
-    if not worker:
+    if not (worker or config.get("walk")):
         command.append("--ephemeral")
     if not (worker or config.get("walk")):
         options += ['features.shell_tool=false', 'features.code_mode_host=false']
@@ -234,8 +235,8 @@ class Provider:
         self.root.mkdir(exist_ok=True)
 
     def timeout_for(self, kind, context):
-        return (self.timeout if self.timeout is not None
-                else self.setup["providers"][role_for(kind, context)]["timeout"])
+        role = "build" if context.get("walk") else role_for(kind, context)
+        return self.timeout if self.timeout is not None else self.setup["providers"][role]["timeout"]
 
     def prepare(self, question):
         role = role_for(question["kind"], {})
@@ -273,7 +274,7 @@ class Provider:
         session = question.get("execution", {}).get("session")
         command = native.command(self.setup, {**config, "cwd": cwd}, folder, worker, session, images)
         metadata = {"command": command, "commandLine": subprocess.list2cmdline(command),
-                    "cwd": str(cwd), "timeout": self.timeout_for(question["kind"], {}),
+                    "cwd": str(cwd), "timeout": self.timeout_for(question["kind"], question["execution"]),
                     "role": role, "provider": config}
         (folder / "invocation.json").write_text(encode(metadata), encoding="utf-8")
         return folder, metadata
@@ -292,8 +293,9 @@ class Provider:
             temp["SELDON_EVIDENCE_DIR"] = str(Path(walk).parent / "evidence")
         result = execute(invocation["command"], invocation["cwd"], invocation["timeout"],
                          folder / "prompt.txt", env=desktop.environment(temp), output_dir=folder)
-        for stream in ("stdout", "stderr"):
-            (folder / (stream + ".bin")).write_bytes(result[stream])
+        if result["exitCode"] is None and not result["timedOut"]:
+            with (folder / "stderr.bin").open("ab") as diagnostics:
+                diagnostics.write(result["stderr"])
         output = result["stdout"].decode("utf-8", errors="replace")
         receipt = {k: v for k, v in result.items() if k not in ("stdout", "stderr")}
         receipt.update(role=invocation["role"], timeout=invocation["timeout"])
@@ -302,6 +304,7 @@ class Provider:
         (folder / "result.json").write_text(encode(receipt), encoding="utf-8")
         stderr = result["stderr"].decode("utf-8", errors="replace")
         diagnostics = output + "\n" + stderr
+        session = native.session(output)
         try:
             if result["timedOut"] or not result["cleanupVerified"]:
                 raise RuntimeError("Provider cleanup unverified" if not result["cleanupVerified"]
@@ -319,12 +322,12 @@ class Provider:
                 term in diagnostics.lower() for term in ("session not found", "no session found",
                     "thread not found", "resume is not supported", "no conversation found"))
             failure_type = ResumeUnavailable if unavailable and not paused else ProviderFailure
-            if result["timedOut"] and result["cleanupVerified"] and question["kind"] == "WORK":
+            if result["timedOut"] and result["cleanupVerified"] and (walk or question["kind"] == "WORK"):
                 failure_type = Deadline
             raise failure_type(f"{name.title()} invocation failed: {error}; {diagnostics[-4096:]}",
-                not paused, result["cleanupVerified"], str(folder / "result.json")) from error
+                not paused, result["cleanupVerified"], str(folder / "result.json"), session) from error
         (folder / "answer.txt").write_text(raw, encoding="utf-8")
-        return raw, native.session(output)
+        return raw, session
 
 
 Codex = Provider  # earlier name, kept for callers that patch or build it

@@ -397,7 +397,7 @@ def prove(store, provider, cursor):
                     "Planner" if amendments else "Builder", candidate=candidate, evidence=[judge, *green],
                     replan=bool(amendments))
     if failed := proof.failures(store, green):
-        fail(store, cursor, proof.explain(failed), "Seldon", candidate=candidate, evidence=[judge, *red, *green])
+        fail(store, cursor, proof.explain(failed), "Seldon", candidate=candidate, evidence=[judge, *green])
         return
     gitwork.unchanged(project, base)
     with store.transaction():
