@@ -1535,7 +1535,8 @@ def approve(request):
 @pytest.mark.fast
 @pytest.mark.parametrize("arm", ["hello-reopen", "cumulative-repair", "unchanged", "proof-owner", "plan-owner",
                                  "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay",
-                                 "bound-note", "unresolved-plan", "missing-check", "guard-repair", "failed-witness"])
+                                 "bound-note", "unresolved-plan", "missing-check", "guard-repair", "failed-witness",
+                                 "guard-feedback"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
@@ -1552,6 +1553,7 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     a product file leaking onto the base through checkPaths, and evidence lost during cleanup.
     Its timeout catches a fresh guard losing completed actions and large streams losing output.
     failed-witness catches PROVE masking an observed check failure when the guard has no separate defect.
+    guard-feedback catches an empty guard observation reaching C; existing journeys always supply feedback.
     """
     from types import SimpleNamespace
 
@@ -1912,6 +1914,11 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             assert arm in ("missing-check", "guard-repair") or any("usage error asserted" in row["stdout"] for row in green)
             answer = {"why": "Walked the command and rejection from the guide.", "actions": actions,
                       "findings": [], "feedback": [{"step": "Reject bad input", "note": "Usage is easy to scan."}]}
+            if arm == "guard-feedback":
+                if facts.get("Exact corrections"):
+                    assert "feedback" in str(facts["Exact corrections"])
+                else:
+                    answer["feedback"] = []
 
             def finding(promise, kind, evidence, reason, quote=""):
                 answer["findings"].append({"promise": promise, "kind": kind, "quote": quote,
@@ -1957,6 +1964,9 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         if gate == "C" and arm == "proof-owner":
             assert request["subject"]["unverified"] == {
                 "guard:sourceAcceptance": "not judged: No independent action recorded."}
+        if gate == "C" and arm == "guard-feedback":
+            assert request["subject"]["guard"]["feedback"] == [
+                {"step": "Reject bad input", "note": "Usage is easy to scan."}]
         if gate == "C" and arm == "guard-repair":
             assert not request["subject"]["unverified"]
             guard = {a["action"]: a for a in request["subject"]["guard"]["actions"]}

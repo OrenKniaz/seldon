@@ -47,7 +47,7 @@ def milestone(store, provider, base, commit, subjects, current, refs):
     subjects = {**subjects, **LEAD_BINDINGS}
     schema = obj(answer=obj(why=TEXT, actions=array(obj(
         action=TEXT, actual=TEXT, promises=array(choice(*subjects)), baseline={"type": "string"}, screenshots=REFS)),
-        feedback=array(obj(step=TEXT, note=TEXT)), findings=array(obj(
+        feedback=array(obj(step=TEXT, note=TEXT), minimum=1), findings=array(obj(
             promise=choice(*subjects), kind=choice("defect", "uncertain", "amend", "note"),
             quote={"type": "string"}, evidence=TEXT, reason=TEXT))))
     runtime = Path(mkdtemp(prefix="guard-", dir=cursor.scratch))
@@ -60,7 +60,8 @@ def milestone(store, provider, base, commit, subjects, current, refs):
         "in scope. For keyboard access, Tab through the UI and operate controls with keys. Measure rendered "
         "text/background contrast. For SQLite integrity, query the file directly. "
         "Inspect source against B for stubs, mocks or gaps. Link actions or findings to each subject revisited. "
-        "Use uncertain for machine limits only; say what was partly seen and why. Describe how the UI felt. "
+        "Use uncertain for machine limits only; say what was partly seen and why. Give human feedback on a "
+        "screen or action, describing friction or ease. If blocked, describe the blocked step. "
         "For a defect, quote B's result or notMetIf verbatim and record the reproducing action, expected and "
         "actual in evidence, or cite the failed check ID. Use amend for ambiguous B and note for advice. "
         "Use one plain command per action inside the copies and their runtime. Record denials without retrying. "
