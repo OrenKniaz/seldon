@@ -19,4 +19,4 @@ Do not commit runtime state, logs, generated proof artifacts, secrets, local con
 The golden journey (tests/seldon/test_journey.py) is the first gate.
 Every user-visible change extends it in the same patch; a feature it does not exercise is not done.
 
-Dev tracking lives outside this repo, in the lead workspace: `C:/Users/oren/codex-harness/work/ladder/` (`STATUS.json`, `TICKETS.json`, `RECOMMENDATIONS.json`; rules in `TRACKING.md`; validate with `python tracking.py`). Any agent that lands work, finds a failure or starts or ends a lane or real run updates them (Blueprint P9).
+Dev tracking lives outside this repo, in the lead workspace's `ladder/` folder (set `SELDON_LADDER`) (`STATUS.json`, `TICKETS.json`, `RECOMMENDATIONS.json`; rules in `TRACKING.md`; validate with `python tracking.py`). Any agent that lands work, finds a failure or starts or ends a lane or real run updates them (Blueprint P9).

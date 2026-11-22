@@ -1,6 +1,7 @@
 """Saved fight replay. Run explicitly with pytest tests/seldon/size_fight_journey.py."""
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -11,7 +12,7 @@ import pytest
 from test_journey import strict_schema
 
 RETAINED = Path("C:/seldon/tests")
-LADDER = Path("C:/Users/oren/codex-harness/work/ladder")
+LADDER = Path(os.environ.get("SELDON_LADDER", Path.home() / "codex-harness/work/ladder"))
 REPORT = Path(__file__).with_name("run_report.py")
 
 

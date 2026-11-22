@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import sqlite3
 from collections import Counter
 from datetime import UTC, datetime
@@ -29,7 +30,7 @@ startRevision and the plain candidateRevision from the run's recorded revisions.
 Use comparisonSetup to retain the shared brief, toolchain and timing basis.
 """
 
-RUNS = Path("C:/Users/oren/codex-harness/work/ladder/RUNS.md")
+RUNS = Path(os.environ.get("SELDON_LADDER", Path.home() / "codex-harness/work/ladder")) / "RUNS.md"
 COLUMNS = ["Date (UTC)", "Slot", "Commit", "Outcome", "Furthest state", "Repairs", "Retries", "Gaps",
            "Uncertain", "Wall time", "Calls", "Plan nodes", "Plan bytes", "RED FLAG COUNT",
            "Question contract", "Vision lock"]

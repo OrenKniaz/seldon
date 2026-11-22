@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "seldon"
 version = "0.1.0"
-description = "Provider-normal planning, execution and evidence workflow."
+description = "Turns a person's dream into a working product: AI agents plan, build and prove it."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["mcp>=2.3,<3"]

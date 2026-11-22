@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from seldon import plan, providers, schema  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
-PIN = "93758568b6a6f2bcab6f4653478d73b0a798e63a"
+PIN = "6f832ee67621d6605ff34ef3533739fbf7fe305f"
 TREE = "8cccbff3dfff2547e37961676a385584a33eda13"
 RENDERER_TREE = "54f949d25f8b19c19009e26b45b80afaaed73a63"
 RIG = Path("C:/seldon/tests/m1")

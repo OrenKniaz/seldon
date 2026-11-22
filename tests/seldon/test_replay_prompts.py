@@ -1,6 +1,7 @@
 """Replay journeys using actual as-of-call WORK and folded JUDGE records."""
 
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -31,7 +32,7 @@ def pinned_tool(slot):
         replay.git(source, "cat-file", "-e", f"{replay.PIN}^{{commit}}")
     except ValueError:
         # Lane snapshots contain the source tree but omit the canonical history.
-        source = Path("C:/Users/oren/codex-harness/work/sprint-20261027/semantic-cc")
+        source = Path(os.environ.get("SELDON_CANON", Path.home() / "codex-harness/work/sprint-20261027/semantic-cc"))
     replay.git(source, "clone", "--quiet", "--shared", "--no-checkout", str(source), str(slot))
     replay.git(slot, "update-ref", "--no-deref", "HEAD", replay.PIN)
     replay.git(slot, "restore", "--source=HEAD", "--staged", "--worktree", "--", "src/seldon")
