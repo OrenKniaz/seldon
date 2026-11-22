@@ -1534,7 +1534,8 @@ def approve(request):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("arm", ["hello-reopen", "cumulative-repair", "unchanged", "proof-owner", "plan-owner",
-                                 "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay", "bound-note"])
+                                 "lh01", "lh02", "explicit-question", "lr01", "weak-check", "guide-replay",
+                                 "bound-note", "unresolved-plan"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
@@ -1545,7 +1546,9 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     lr01 guards against asking for a faulty CLI when the base has none. The weak-check twin catches
     accepting a base pass without review or losing the judge's correction on the next Builder turn.
     bound-note catches an unquoted demand sending a working product back to the builder, and
-    generated walkthrough dependencies reaching the judge. The other twins use actionable gaps.
+    generated walkthrough dependencies reaching the judge. It also catches an omitted proof standard
+    accepted before REVIEW or a named review amendment lost between B and WORK.
+    unresolved-plan catches a missing accepted promise disappearing at B or triggering a whole-plan retry.
     """
     from types import SimpleNamespace
 
@@ -1556,23 +1559,15 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     dream = "Run `python hello.py Ada` and say ‘Hello, Ada!’ exactly. Reject `python hello.py --help`. " + (
         "In a separate milestone add ‘Goodbye, Ada!’." if milestone_count == 2 else "")
     dream += " Fixture: " + arm
-    brief = ("Let the person choose the name and see the exact punctuation they asked for. "
-             "Keep the first command working before offering the second. Give them a guide they can "
-             "follow using Python already on this machine. Exercise the command, with its actual "
-             "argument and output, from a fresh checkout. Preserve the user’s exact greeting. "
-             "The visitor should be able to run the tool without setup or persistent state. "
-             "Keep the program readable and let the person see the command and resulting text together. "
-             "When writing the check, run the real program and compare the entire line of output, "
-             "including its punctuation, so an accidental wording change can be caught at a later "
-             "milestone. Return a useful walkthrough of what now works.")
     draft = questions.consequential_round_example()
     draft.update(questions=[], recommendation="done")
     vision = draft["vision"]
     vision.update(size="tiny", sizeWhy="A small command-line experience.", understanding=dream,
-                  constraints=[], scopeOut=[])
+                  constraints=[{"handle": "greeting", "value": "Hello, Ada!",
+                                "meaning": "The exact greeting for Ada", "source": "kickoff"}], scopeOut=[])
     vision["stories"] = [
         {"handle": name, "feature": name, "story": f"A visitor wants to run {name}.", "outcome": outcome,
-         "constraints": [], "sources": ["kickoff"]}
+         "constraints": ["greeting"] if name == "hello" else [], "sources": ["kickoff"]}
         for name, outcome in [("hello", "Hello, Ada!"), ("bye", "Goodbye, Ada!")][:milestone_count]
     ]
     vision["quality"] = [{"handle": "exact", "criterion": "Reject an unsupported argument with useful usage",
@@ -1587,10 +1582,7 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
             promises.append({"vision": "quality:exact", "action": "Pass --help",
                              "result": "Exit 2 with usage on stderr and empty stdout",
                              "notMetIf": "The command succeeds or omits usage."})
-        planned.append({"outcome": expected, "promises": promises,
-                        "spec": {"what": expected, "how": "Read a positional name in Python.",
-                                 "test": "Observe the exact output, streams and exit status."},
-                        "brief": brief + "\n\n" + expected})
+        planned.append({"outcome": expected, "promises": promises, "design": "Read a positional name in Python."})
 
     native = tmp_path / "lead_native.py"
     native.write_text(r"""
@@ -1618,7 +1610,7 @@ if arm == "plan-owner" and "positional" in facts["Approved spec"]["how"]:
           flush=True)
     print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
     raise SystemExit
-expected = facts["Approved spec"]["what"]
+expected = facts["Milestone brief"].splitlines()[1]
 name = "hello" if expected.startswith("Hello") else "bye"
 path = Path(f"checks/{name}.py")
 path.parent.mkdir(exist_ok=True)
@@ -1758,30 +1750,48 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
              "codexCommand": [sys.executable, "-B", str(native)], "python": {"path": sys.executable}}
     provider = Codex(tmp_path / "calls", setup)
     invoke = provider.invoke
+    reviewed = []
+    amendments = "Parse one name and reject extra flags."
 
     def scripted(question, started):
         strict_schema(question["schema"])
         kind, facts = question["kind"], question["facts"]
         if kind == "WORK":
+            expected = reviewed[-1].replace(planned[0]["design"], amendments) if arm == "bound-note" else reviewed[-1]
+            assert facts["Milestone brief"] in expected
             return invoke(question, started)
         if kind == "ALIGN":
             answer = draft
         elif kind == "MILESTONES":
             assert facts["Dream"] == dream
-            answer = {"milestones": planned}
+            answer = {"milestones": deepcopy(planned)}
             if facts.get("Exact failure"):
-                if arm == "bound-note":
-                    assert facts["Exact failure"] == "Amend B proof: Add notMetIf to scopeIn:hello"
+                assert arm == "plan-owner"
+                assert facts["Exact failure"] == "The approved design has an ambiguous parser."
+                answer["milestones"][0]["design"] = amendments
+            promises = answer["milestones"][0]["promises"]
+            if arm == "bound-note":
+                if not facts.get("Exact corrections"):
+                    del promises[0]["notMetIf"]
+                    promises[1]["vision"] = "unapproved"
                 else:
-                    assert arm == "plan-owner"
-                    assert facts["Exact failure"] == "The approved design has an ambiguous parser."
-                    planned[0]["spec"]["how"] = "Parse one name and reject extra flags."
-            elif arm == "bound-note":
-                answer = deepcopy(answer)
-                del answer["milestones"][0]["promises"][0]["notMetIf"]
+                    errors = " ".join(facts["Exact corrections"][0]["Errors"])
+                    assert "notMetIf" in errors and ".vision: expected one of" in errors
+                    promises.append(promises[0].copy())
+            if arm == "unresolved-plan":
+                promises.pop()
         elif kind == "REVIEW":
-            assert facts["Milestones"] == planned
-            answer = {"verdict": "adequate", "gaps": [], "why": "The plan exercises both commands as staged."}
+            document = facts["Builder spec"]
+            assert dream in document and plan.GUIDE_WALKTHROUGH in document
+            assert "Accepted constraint greeting\nHello, Ada!" in document
+            reviewed.append(document)
+            answer = {"amendments": [], "unresolved": [], "why": "The spec exercises the named action."}
+            if arm == "bound-note":
+                assert document.count("scopeIn:hello action\n") == 1
+                answer["amendments"] = [{"target": "M1 design", "replacement": amendments}]
+            if arm == "unresolved-plan":
+                assert "quality:exact" in facts["Unassigned promises"]
+                answer["unresolved"] = ["The guide must show the rejection path."]
         elif kind == "DECIDE":
             assert facts["User's words"] == "yes, please continue"
             answer = {"choice": "Unclear", "why": "No change to the named input."}
@@ -1902,13 +1912,17 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
     try:
         assert run.run().state == "B"
         before = run.store.cursor()
-        assert all(isinstance(item["spec"]["test"], str) for item in
-                   run.store.read(before.leadPlan)["milestones"])
         assert before.B is None and gitwork.git(project, "rev-list", "--count", "HEAD") == "1"
         base_commit = gitwork.git(project, "rev-parse", "HEAD")
         assert not list(run.store.records("lead_assignment"))
         assert not list((tmp_path / "calls").iterdir())
         assert frontdoor.state(str(project))["mode"] == "lead"
+        if arm == "unresolved-plan":
+            notes = run.store.read(before.decision)["subject"]["review"]["notJudged"]
+            assert notes["quality:exact"]["reason"] == "No milestone assigns this accepted promise."
+            assert notes["plan"]["reason"] == "The guide must show the rejection path."
+            assert len(reviewed) == 1 and len(run.store.records("milestone_plan")) == 1
+            return
     finally:
         run.close()
     mode[0] = "orchestrator"
@@ -1951,6 +1965,7 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         if arm == "bound-note":
             (original, _, _), (_, _, revised) = run.store.records("milestone_plan")
             assert revised["parent"] == original
+            assert len(reviewed) == 1
         if arm in ("weak-check", "guide-replay"):
             (_, _, failure), = run.store.records("lead_failure")
             assert failure["owner"] == "Builder"

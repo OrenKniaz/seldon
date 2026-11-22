@@ -106,11 +106,9 @@ DETAIL_GAP = obj(verdict=choice("contract_gap"), need=TEXT)
 CHECK = dict(purpose=TEXT, command=array(TEXT, 1), expectedEvidence=TEXT, requirements=REFS)
 
 
-def lead_plan_schema(bound):
-    promise = obj(vision=TEXT, action=TEXT, result=TEXT)
-    if bound:
-        promise = {"anyOf": [obj(**promise["properties"], notMetIf=TEXT), promise]}
-    milestone = obj(outcome=TEXT, promises=array(promise, 1), spec=obj(what=TEXT, how=TEXT, test=TEXT), brief=TEXT)
+def lead_plan_schema(bound, promises):
+    promise = obj(vision=choice(*promises), action=TEXT, result=TEXT, **({"notMetIf": TEXT} if bound else {}))
+    milestone = obj(outcome=TEXT, design=TEXT, promises=array(promise, 1))
     return obj(answer=obj(milestones=array(milestone, 1)))
 
 

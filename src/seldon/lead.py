@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import architecture, decisions, features, gitwork, inference, judgment, plan, proof, questions, recovery
 from .providers import ProviderFailure, recorded
-from .schema import REFS, TEXT, answer_schema, array, choice, lead_plan_schema, obj, validate
+from .schema import REFS, TEXT, array, choice, lead_plan_schema, obj, validate
 from .states import advance
 from .store import encode
 
@@ -66,86 +66,122 @@ def user_words(store, cursor):
                               if isinstance(b["words"], str) and not b.get("rejected")]}
 
 
+def spec_lines(item, number):
+    return {
+        f"M{number} outcome": (item, "outcome"),
+        f"M{number} design": (item["spec"], "how"),
+        **{f"{p['vision']} {field}": (p, field) for p in item["promises"] if isinstance(p, dict)
+           for field in ("action", "result", "notMetIf") if field in p},
+    }
+
+
+def render_spec(item, number, context, promises):
+    return questions.labelled({
+        **{line: body[key] for line, (body, key) in spec_lines(item, number).items()},
+        "Accepted promises": {key: promises[key] for key in obligations(item, promises) if key in promises},
+        **context,
+    })
+
+
+def spec_context(store, cursor):
+    words = user_words(store, cursor)
+    vision = questions.vision_body(store.read(cursor.vision)["answer"])
+    return {**words, "Owner replies": "\n\n".join(words["Owner replies"]),
+            **{f"Accepted constraint {c['handle']}": c["value"] for c in vision.get("constraints", [])},
+            "Try-it guide": plan.GUIDE_WALKTHROUGH}
+
+
 def propose(store, provider, cursor):
     previous = milestones(store, cursor)
     bound = features.enabled("leadBoundProof")
     amend = bound and (cursor.failure or "").startswith("Amend B proof: ")
     completed = [] if amend else previous[:cursor.wave - 1]
     promises = commitments(store, cursor)
-    open_promises = {key: value for key, value in promises.items()
-                     if not any(key in obligations(m, promises) for m in completed)}
+    assigned = {key for m in completed for key in obligations(m, promises)}
+    open_promises = {key: value for key, value in promises.items() if key not in assigned}
     example = {"outcome": "Greet a named visitor", "promises": [
                    {"vision": next(iter(open_promises or promises)), "action": "Pass Ada as the name",
                     "result": "See Hello, Ada! on standard output.",
                     **({"notMetIf": "The greeting omits Ada or its exclamation mark."} if bound else {})}],
-               "spec": {"what": "A greeting names the visitor", "how": "Read the name from a CLI argument",
-                        "test": "Observe the full greeting and punctuation for the supplied name."},
-               "brief": "Let visitors pass a name and see a personalized greeting. Write the check and try-it guide."}
-    facts = {**user_words(store, cursor), "Accepted vision": store.read(cursor.vision)["answer"],
-             "Open promises": open_promises, "Completed milestones": completed,
-             "Remaining proposal": previous[len(completed):],
+               "design": "Read the name from a CLI argument."}
+    context = spec_context(store, cursor)
+    facts = {**context, "Accepted vision": store.read(cursor.vision)["answer"],
+             "Open promises": open_promises, "Milestone outline": [m["outcome"] for m in previous],
              "Runtime": questions.runtime(store.read(cursor.kickoff)["setup"])}
     if cursor.failure:
         facts["Exact failure"] = cursor.failure
     if cursor.requestedChange:
         facts["Owner direction"] = store.read(cursor.requestedChange)["words"]
-    if cursor.review:
-        facts["Previous review"] = store.read(cursor.review)["answer"]
     prompt = (
         "Plan the remaining milestones from these approved promises and owner words. A micro dream usually "
         "needs one milestone. Keep staging the owner asked for. Reference the supplied promise handles. "
-        "State each action and observable result. Give a what/how/proof spec without code or commands. "
-        "Write a mission brief with the exact owner constraints. Assign checks and guide to the builder. "
+        "State the outcome and material design choices. Assign each open promise once with its action and "
+        "observable result. Seldon includes the owner's exact words and guide obligation in the spec. "
         + ("State one or two wrong behaviours per promise in notMetIf. " if bound else "")
-        + ("Return the entire plan preserving milestone order and ownership. Clarify only the named proof lines." if amend else "")
+        + ("Preserve milestone order and ownership while addressing the named proof issue." if amend else "")
     )
 
     def consume(source, answer):
+        remaining = dict(open_promises or promises)
+        items = completed.copy()
+        for proposed in answer["milestones"]:
+            unique = [p for p in proposed["promises"] if remaining.pop(p["vision"], None) is not None]
+            if unique:
+                item = {"outcome": proposed["outcome"], "promises": unique,
+                        "spec": {"how": proposed["design"], "test": None, "rendered": True}}
+                item["brief"] = render_spec(item, len(items) + 1, context, promises)
+                items.append(item)
         ref = store.record("milestone_plan", {"source": source, "vision": cursor.vision,
-            "parent": cursor.leadPlan, "milestones": completed + answer["milestones"]})
+            "parent": cursor.leadPlan, "milestones": items})
         advance(store, "planned", ref, leadPlan=ref, B=None, requestedChange=None, failure="")
 
-    inference.call(store, provider, questions.question("MILESTONES", prompt, facts, lead_plan_schema(bound),
-                   [{"milestones": [example]}]), consume=consume, binding=cursor.A)
+    question = questions.question("MILESTONES", prompt, facts, lead_plan_schema(bound, open_promises or promises),
+                                  [{"milestones": [example]}])
+    inference.call(store, provider, question, consume=consume, binding=cursor.A)
 
 
 def review(store, provider, cursor):
     if cursor.requestedChange:
         advance(store, "repair-plan", cursor.requestedChange)
         return
-    facts = {**user_words(store, cursor), "Accepted promises": commitments(store, cursor),
-             "Milestones": milestones(store, cursor)}
     if amend_missing(store, cursor):
         return
+    items, vision = milestones(store, cursor), commitments(store, cursor)
+    lines = {line: target for i, item in enumerate(items, 1) if i >= cursor.wave
+             for line, target in spec_lines(item, i).items()}
+    missing = {key: vision[key] for key in vision if not any(key in obligations(m, vision) for m in items)}
+    schema = obj(answer=obj(amendments=array(obj(target=choice(*lines), replacement=TEXT)),
+                            unresolved=REFS, why=TEXT))
     question = questions.question("REVIEW",
-        "Does this milestone plan cover the locked dream, with specific what, how and observable results? "
-        "Check the owner's exact constraints, staging, milestone briefs and walkthrough obligation. "
-        "Name material corrections, including ambiguous proof lines.",
-        facts, answer_schema("REVIEW"),
-        [{"verdict": "adequate", "gaps": [], "why": "The named greeting is specified and exercised."}])
+        "Review the builder's spec against the accepted promises, owner constraints and staging. "
+        "For a material gap that fits an editable line, give its handle and full replacement text. "
+        "Use unresolved for gaps requiring a coverage or staging decision. Follow the supplied constraints "
+        "and guide obligation by reference without restating them in your amendments.",
+        {"Builder spec": "\n\n".join(m["brief"] for m in items), "Unassigned promises": missing},
+        schema, [{"amendments": [], "unresolved": [], "why": "The named greeting is specified and exercised."}])
 
     def consume(source, answer):
         providers = store.read(cursor.kickoff)["setup"].get("providers", {})
         reviewer, planner = (providers.get(role, {}) for role in ("reviewer", "planner"))
         tier = ("cross-provider review" if reviewer.get("provider") != planner.get("provider") else
                 "fresh same-provider review")
-        ref = store.record("plan_review", {"revision": cursor.leadPlan, "source": source,
-            "answer": answer, "notJudged": {}, "reviewTier": tier})
-        named = [p["vision"] if isinstance(p, dict) else p
-                 for item in facts["Milestones"] for p in item["promises"]]
-        if set(named) != facts["Accepted promises"].keys() or len(named) != len(set(named)):
-            failure = f"Assign each accepted promise exactly once. Planned: {named}."
-        elif answer["verdict"] != "adequate":
-            failure = "; ".join([gap["correction"] for gap in answer.get("gaps", [])]
-                                or answer.get("neededFacts", []) or [answer["why"]])
-        else:
-            advance(store, "reviewed", ref, review=ref, repairs=0)
-            return
-        key = "lead-plan:" + str(cursor.A)
-        if recovery.failed(store, ref, key=key, shape=failure):
-            decisions.owner_question(store, "Planner", failure)
-        else:
-            advance(store, "repair-plan", ref, review=ref, failure=failure)
+        revision = cursor.leadPlan
+        for edit in answer["amendments"]:
+            body, field = lines[edit["target"]]
+            body[field] = edit["replacement"]
+        if answer["amendments"]:
+            context = spec_context(store, cursor)
+            for i, item in enumerate(items, 1):
+                if i >= cursor.wave:
+                    item["brief"] = render_spec(item, i, context, vision)
+            revision = store.record("milestone_plan", {"source": source, "vision": cursor.vision,
+                "parent": revision, "milestones": items})
+        deferred = {key: {"reason": "No milestone assigns this accepted promise."} for key in missing}
+        if answer["unresolved"]:
+            deferred["plan"] = {"reason": "\n".join(answer["unresolved"])}
+        ref = store.record("plan_review", {"revision": revision, "source": source, "answer": answer,
+            "notJudged": deferred, "reviewTier": tier})
+        advance(store, "reviewed", ref, leadPlan=revision, review=ref, repairs=0)
 
     inference.call(store, provider, question, consume=consume, binding=cursor.leadPlan)
 
@@ -160,8 +196,12 @@ def amend_missing(store, cursor):
 def render_builder(question):
     facts = question["facts"]
     brief = facts["Milestone brief"]
-    context = questions.labelled({key: value for key, value in facts.items() if key != "Milestone brief"})
     rules = question["prompt"]
+    rendered = facts.get("Approved spec", {}).get("rendered", False)
+    projected = {"Approved spec", "Promises", "Owner words", "Guide path"} if rendered else set()
+    context = questions.labelled({k: v for k, v in facts.items() if k != "Milestone brief" and k not in projected})
+    if rendered:
+        rules = rules.removesuffix(plan.GUIDE_WALKTHROUGH).rstrip()
     return "\n\n".join((brief, rules, context, "Return schema\n" + encode(question["schema"]),
                         "Example receipt\n" + encode(question["examples"][0]))), rules
 
