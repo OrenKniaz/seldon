@@ -24,6 +24,7 @@ class Run:
         Path(scratch).mkdir()
         self.store = Store(self.project)
         self._lease = self.store.claim_controller()
+        self._reconcile_lead = False
         self.provider, self.user = provider, user
         self.capacity = capacity or max(1, min(32, os.cpu_count() or 1))
         if type(self.capacity) is not int or self.capacity < 1:
@@ -46,9 +47,10 @@ class Run:
         self._lease = self.store.claim_controller()
         self.provider, self.user = provider, user
         self.capacity = self.store.read(self.store.cursor().kickoff)["capacity"]
+        self._reconcile_lead = lead.enabled(self.store)
         if self.store.cursor().state not in TERMINAL:
             gitwork.publish(self.project, self.store)
-            if not lead.enabled(self.store):
+            if not self._reconcile_lead:
                 from . import units
                 for ref, row in self.store.units().items():
                     if row.state == "WORKING":
@@ -63,6 +65,9 @@ class Run:
         state = cursor.state
         if state in TERMINAL:
             return state
+        if self._reconcile_lead:
+            lead.reconcile_call(store)
+            self._reconcile_lead = False
         if state not in ("ALIGN", "A"):
             if lead.enabled(store):
                 return lead.step(store, self.provider, self.user)
@@ -174,6 +179,7 @@ class Run:
                     with self.store.transaction():
                         cursor = self.store.cursor(replace(self.store.cursor(), failure=reason))
                     if (isinstance(error, proof.UncertainCleanup) and cursor.state == "PROVE"
+                            and not self._reconcile_lead
                             and not (lead.enabled(self.store) and features.enabled("leadSeldonOwns"))):
                         decisions.owner_question(self.store, "Seldon", reason)
                         break

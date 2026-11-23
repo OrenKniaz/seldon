@@ -1634,7 +1634,8 @@ def test_lead_sizes_by_builder_session(tmp_path, monkeypatch, staging):
                                  "guard-feedback", "incomplete-witness", "unrelated-witness", "carry-witness",
                                  "carry-with-limit", "owner-interruption", "keep-building", "builder-stalled",
                                  "keep-building-off", "guard-once", "scope-note", "absolute-evidence",
-                                 "d01-evidence", "d01-evidence-off", "guide-coached"])
+                                 "d01-evidence", "d01-evidence-off", "guide-coached",
+                                 "killed-work", "killed-before-thread"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
@@ -1681,6 +1682,9 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     builder-stalled catches rewritten status prose masking a repeated tree and bypassing planner options.
     Existing repair arms resume only after proof or an explicit owner decision. keep-building-off
     confirms the same early receipt follows the original routing in the control arm.
+    Killed WORK catches a controller exit before result.json strands an approved build.
+    These arms kill the controller with partial product writes and check both native resume
+    and a fresh call without a thread. Existing resumes all have a completed recording.
     """
     from types import SimpleNamespace
 
@@ -1688,6 +1692,9 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     from seldon.decisions import Waiting
 
     milestone_count = 2 if arm in ("cumulative-repair", "unchanged") else 1
+    killed_work = arm in ("killed-work", "killed-before-thread")
+    if killed_work and sys.platform != "win32":
+        pytest.skip("Controller death tears down the native Windows Job")
     micro = arm == "micro-redraft"
     guide_case = arm in ("guide-replay", "guide-coached")
     if not micro and milestone_count == 1:
@@ -1817,6 +1824,24 @@ assert "--ephemeral" not in args and 'sandbox_mode="danger-full-access"' in args
 arm = facts["Owner words"]["Dream"].rsplit(" Fixture: ", 1)[1].splitlines()[0]
 thread = args[args.index("resume") + 1] if "resume" in args else (
     "milestone-builder" if arm in ("keep-building", "builder-stalled", "keep-building-off") else str(uuid.uuid4()))
+if arm in ("killed-work", "killed-before-thread"):
+    marker = Path.cwd().parents[1] / "kill-ready"
+    partial = Path("hello.py")
+    if not marker.exists():
+        import time
+
+        partial.write_text("import sys\n", encoding="utf-8")
+        if arm == "killed-work":
+            thread = "interrupted-builder"
+            print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
+        marker.touch()
+        time.sleep(60)
+        raise AssertionError("The controller should have been killed during WORK")
+    assert ("resume" in args) == (arm == "killed-work")
+    if arm == "killed-work":
+        assert thread == "interrupted-builder"
+    assert "You were interrupted. Continue" in prompt
+    assert partial.read_text() == "import sys\n"
 print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
 assert Path.cwd().resolve() == Path(facts["Write scope"]).resolve()
 if arm == "micro-redraft":
@@ -1875,8 +1900,10 @@ path.write_text(probe, encoding="utf-8")
 checks = [{"vision": f"scopeIn:{name}", "purpose": f"Run {name} with Ada",
            "command": [sys.executable, "-B", path.as_posix()], "expectedEvidence": expected}]
 def implement(name, greeting):
-    Path(name + ".py").write_text(
-        "import sys\nif sys.argv[1:] == ['--help']:\n"
+    target = Path(name + ".py")
+    prefix = target.read_text() if arm in ("killed-work", "killed-before-thread") else "import sys\n"
+    target.write_text(
+        prefix + "if sys.argv[1:] == ['--help']:\n"
         "    print('Usage: pass a name', file=sys.stderr)\n    sys.exit(2)\n"
         + f"print(f'{greeting}, {{sys.argv[1]}}!')\n", encoding="utf-8")
 implement(name, expected.split(",")[0])
@@ -1971,7 +1998,7 @@ if arm == "bound-note":
         generated = Path(legacy, "generated.txt")
         generated.parent.mkdir(parents=True, exist_ok=True)
         generated.write_text("legacy generated file")
-if "resume" not in args or arm in ("keep-building", "builder-stalled"):
+if "resume" not in args or arm in ("keep-building", "builder-stalled", "killed-work"):
     with guide.open("a", encoding="utf-8") as output:
         output.write(f"\nRun `python {name}.py Ada`. Expect {expected}\n")
         if name == "hello":
@@ -2449,9 +2476,42 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
             assert notes["plan"]["reason"] == "The guide must show the rejection path."
             assert len(reviewed) == 1 and len(run.store.records("milestone_plan")) == 1
             return
+        if killed_work:
+            run.user = user
+            assert run.step() == "BUILD"
     finally:
         run.close()
     mode[0] = "orchestrator"
+    if killed_work:
+        import os
+        import subprocess
+
+        controller = """
+import json, sys
+from pathlib import Path
+from seldon.providers import Provider
+from seldon.run import Run
+slot = Path(sys.argv[1])
+provider = Provider(slot / 'calls', json.loads(sys.argv[2]))
+def unexpected(request):
+    raise AssertionError(request)
+Run.reopen(slot / 'product', provider, unexpected).run()
+"""
+        source = Path(gitwork.__file__).resolve().parents[1]
+        child = subprocess.Popen([sys.executable, "-B", "-c", controller, str(tmp_path), json.dumps(setup)],
+                                 env={**os.environ, "PYTHONPATH": str(source)},
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
+        try:
+            deadline = time.monotonic() + 20
+            while not (tmp_path / "kill-ready").exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert (tmp_path / "kill-ready").is_file() and child.poll() is None
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=10)
+        (interrupted,) = (tmp_path / "calls").iterdir()
+        assert not (interrupted / "result.json").exists()
     run = Run.reopen(project, provider, user)
     try:
         cursor = run.run()
@@ -2506,6 +2566,8 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                            for row in failed)
             return
         assert cursor.state == "SCRIPTED_C", frontdoor.state(str(project))
+        if killed_work:
+            assert run.store.records("outcome")[-1][2]["verification_complete"] is True
         if arm in ("scope-note", "absolute-evidence"):
             assert [row["kind"] for _, _, row in run.store.records("question")] == [
                 "ALIGN", "MILESTONES", "REVIEW", "WORK", "JUDGE"]

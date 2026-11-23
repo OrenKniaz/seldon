@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import decisions, features, gitwork, inference, judgment, proof, questions, recovery
 from .answers import Mismatch
+from .processes import interrupted_streams_closed
 from .providers import ProviderFailure, recorded
 from .schema import REFS, TEXT, array, choice, lead_milestone_schema, obj, validate
 from .states import advance
@@ -229,33 +230,44 @@ def attempts(store, assignment):
             if store.read(body["question"]).get("execution", {}).get("lead") == assignment]
 
 
-def recover_return(store, attempt, question):
-    """Only a completed recording can recover a return after controller interruption."""
-    folder = next((Path(b["folder"]) for _, _, b in store.records("call_started")
-                   if b["attempt"] == attempt), None)
-    if folder is None:
-        return None
+def reconcile_call(store):
+    """Reconcile a call left by the previous controller before dispatching its state again."""
+    started = store.records("call_started")
+    if not started:
+        return
+    _, _, call = started[-1]
+    if any(row["attempt"] == call["attempt"] for _, _, row in store.records("attempt_end")):
+        return
+    folder = Path(call["folder"])
     receipt = folder / "result.json"
-    if not receipt.is_file():
-        raise proof.UncertainCleanup("Builder cleanup is unverified. Resume when its recording is complete.")
-    result = json.loads(receipt.read_text("utf-8"))
-    if not result["cleanupVerified"]:
+    if receipt.is_file():
+        if not json.loads(receipt.read_text("utf-8"))["cleanupVerified"]:
+            raise proof.UncertainCleanup("Provider cleanup is unverified. Inspect " + str(receipt))
+    elif not interrupted_streams_closed(folder):
+        raise proof.UncertainCleanup("Waiting for the interrupted provider's process cleanup: " + str(folder))
+
+
+def recover_return(store, attempt, question, folder):
+    """Recover a finished builder receipt, or carry its recorded thread into the next turn."""
+    receipt = folder / "result.json"
+    result = json.loads(receipt.read_text("utf-8")) if receipt.is_file() else None
+    if result is not None and not result["cleanupVerified"]:
         raise proof.UncertainCleanup("Builder cleanup is unverified. Inspect " + str(receipt))
-    output = (folder / "stdout.bin").read_text("utf-8", errors="replace")
+    stdout = folder / "stdout.bin"
+    output = stdout.read_text("utf-8", errors="replace") if stdout.is_file() else ""
     native = recorded(folder)
-    if session := native.session(output):
-        store.record("call_session", {"attempt": attempt, "session": session})
-    if result["timedOut"]:
-        return None
+    session = native.session(output) or store.read(question)["execution"].get("session")
+    if result is None or result["timedOut"]:
+        return None, session
     try:
         raw = json.loads(native.answer(output))
         validate(raw, store.read(question)["schema"])
     except RuntimeError:
-        return None
+        return None, session
     except ValueError as error:
-        return store.record("invalid_lead_receipt", {"answer": {}, "error": str(error)})
+        return store.record("invalid_lead_receipt", {"answer": {}, "error": str(error)}), session
     return store.record("answer", {"attempt": attempt, "kind": "WORK", "answer": raw["answer"],
-                                   "recovered": True})
+                                   "recovered": True}), session
 
 
 def build(store, provider, cursor):
@@ -287,20 +299,30 @@ def build(store, provider, cursor):
     recorded_question = calls[last]["question"] if last else None
     current = recorded_question and store.read(recorded_question)["execution"]["turn"] == cursor.repairs
     keep_building = features.enabled("leadKeepBuilding")
-    if current and not cursor.leadReturn and (returned := recover_return(store, last, recorded_question)):
-        cursor = store.cursor(replace(cursor, leadReturn=returned))
     if not cursor.leadReturn:
-        session = next((b["session"] for _, _, b in reversed(store.records("call_session"))
-                        if b["attempt"] in calls), None)
-        resumable = calls.keys() if keep_building else {last} if current else ()
-        if not session and any(b["attempt"] in resumable for _, _, b in store.records("call_started")):
-            raise proof.UncertainCleanup("The builder has no resumable session in its recording.")
+        sessions = {b["attempt"]: b["session"] for _, _, b in store.records("call_session")
+                    if b["attempt"] in calls}
+        session = next(reversed(sessions.values()), None)
+        folder = next((Path(b["folder"]) for _, _, b in store.records("call_started")
+                       if b["attempt"] == last), None)
+        interrupted = current and not any(
+            b["attempt"] == last for _, _, b in store.records("attempt_end"))
+        if interrupted:
+            session = sessions.get(last) or store.read(recorded_question)["execution"].get("session")
+            if folder:
+                returned, recorded_session = recover_return(store, last, recorded_question, folder)
+                session = recorded_session or session
+                if returned:
+                    store.cursor(replace(cursor, leadReturn=returned))
+                    return
         spec = item["spec"]
         facts = {"Milestone brief": assignment["brief"],
                  "Approved spec": spec if isinstance(spec["test"], str) else {**spec, "test": "See promises."},
                  "Promises": obligations(item, commitments(store, cursor)),
                  "Owner words": user_words(store, cursor), "Write scope": assignment["workspace"],
                  "Guide path": questions.GUIDE_PATH}
+        if interrupted:
+            facts["Interruption"] = "You were interrupted. Continue the approved milestone from the current workspace."
         if cursor.productVerdict:
             previous = store.read(cursor.productVerdict)
             facts["Previous checkpoint"] = previous

@@ -492,6 +492,34 @@ def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
             control["nativeFailure"] = native_failed
 
 
+def interrupted_streams_closed(folder):
+    """After controller loss, wait for inherited Windows Job stream handles to close."""
+    streams = [folder / name for name in ("stdout.bin", "stderr.bin")]
+    if sys.platform != "win32":
+        return not any(path.exists() for path in streams)
+    from ctypes import wintypes as w
+
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_file = api.CreateFileW
+    open_file.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p, w.DWORD, w.DWORD, w.HANDLE]
+    open_file.restype = w.HANDLE
+    api.CloseHandle.argtypes = [w.HANDLE]
+    deadline = time.monotonic() + 5
+    for path in streams:
+        while True:
+            handle = open_file(str(path), 0x80000000, 1, None, 3, 0, None)  # Read, share read, existing file.
+            if handle != ctypes.c_void_p(-1).value:
+                api.CloseHandle(handle)
+                break
+            error = ctypes.get_last_error()
+            if error == 2:
+                break  # The controller died before opening this stream.
+            if error != 32 or time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+    return True
+
+
 def execute(command, cwd, timeout=30, input_path=None, env=None, output_dir=None):
     """Return honest observations; callers stop if descendant cleanup is unverified."""
     start = time.monotonic()

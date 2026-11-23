@@ -302,7 +302,9 @@ class Provider:
         receipt.update(role=invocation["role"], timeout=invocation["timeout"])
         if used := native.usage(output):
             receipt["usage"] = used
-        (folder / "result.json").write_text(encode(receipt), encoding="utf-8")
+        staging = folder / "result.tmp"
+        staging.write_text(encode(receipt), encoding="utf-8")
+        staging.replace(folder / "result.json")
         stderr = result["stderr"].decode("utf-8", errors="replace")
         diagnostics = output + "\n" + stderr
         session = native.session(output)
