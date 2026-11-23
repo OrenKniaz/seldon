@@ -177,6 +177,8 @@ def milestone_checks(store, previous, milestone, current, receipt, candidate, wo
     retained = {key: check for key, check in retained.items() if "witness" in check}
     tracked = set(gitwork.paths(root, candidate))
     paths, omitted = [], set()
+    normalise = features.enabled("leadPlausibleGuard")
+    arguments = {arg for check in submitted for arg in check["command"]}
     for path in receipt["checkPaths"]:
         if workspace and (submitted_path := Path(path)).anchor:
             absolute = Path(os.path.abspath(path)) if submitted_path.is_absolute() else None
@@ -185,9 +187,12 @@ def milestone_checks(store, previous, milestone, current, receipt, candidate, wo
                 omitted.add(path)
                 continue
             path = relative
-        paths.append(gitwork.safe_path(path))
+        if normalise and path not in arguments and path not in tracked:
+            omitted.add(path)
+        else:
+            paths.append(gitwork.safe_path(path))
     if missing := set(paths) - tracked:
-        required = missing & {arg for check in submitted for arg in check["command"]}
+        required = missing & arguments
         if required or not features.enabled("leadSeldonOwns"):
             raise ValueError(f"Check files absent from candidate: {', '.join(sorted(required or missing))}.")
     paths = list(dict.fromkeys(path for path in paths if path in tracked))

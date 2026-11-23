@@ -1634,6 +1634,7 @@ def test_lead_sizes_by_builder_session(tmp_path, monkeypatch, staging):
                                  "guard-feedback", "incomplete-witness", "unrelated-witness", "carry-witness",
                                  "carry-with-limit", "owner-interruption", "keep-building", "builder-stalled",
                                  "keep-building-off", "guard-once", "scope-note", "absolute-evidence",
+                                 "extreme-advisory", "undeclared-credit",
                                  "d01-evidence", "d01-evidence-off", "guide-coached",
                                  "killed-work", "killed-before-thread"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
@@ -1666,6 +1667,10 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     incomplete-witness catches a green retained check hiding missing recorded steps of a multi-line B promise.
     failed-witness uses a nonzero exit, and guard-repair observes the defect directly in the walk.
     unrelated-witness catches an executed check for a different promise authorizing the same builder repair.
+    It also catches a stale action number or a nonexistent B field causing another judge call.
+    extreme-advisory catches an oversized name reopening the builder instead of reaching the owner as advice.
+    scope-note covers plan restatements only. undeclared-credit catches a second judge or false proof when a
+    valid greeting observation is credited to rejection as well. No other arm mixes valid and invalid credits.
     carry-witness catches C treating a missing lifecycle row as missing product proof after a real guard walk.
     carry-with-limit catches the wc04 repair loop when another aspect of the same promise remains uncertain.
     incomplete-witness has no independent observation; neither carry case replaces its required repair.
@@ -1708,7 +1713,7 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     if arm == "keep-building-off":
         monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadKeepBuilding,leadSeldonOwns,leadThinBrief")
     if arm == "d01-evidence-off":
-        monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadSeldonOwns")
+        monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadSeldonOwns,leadPlausibleGuard")
     edit = "Require the exact stderr text Usage: pass a name when rejecting --help."
     flow = []
     dream = "Run `python hello.py Ada` and say ‘Hello, Ada!’ exactly. Reject `python hello.py --help`. " + (
@@ -2084,7 +2089,7 @@ if arm.startswith("d01-evidence"):
                      "evidence.joinpath('operation-lifecycle.json').write_text('[]')\n")
 if arm == "absolute-evidence":
     receipt["checkPaths"] = [str(Path.cwd() / path) for path in check_paths]
-    receipt["checkPaths"].append(str(Path.cwd().parent / "outside-evidence.png"))
+    receipt["checkPaths"].extend([str(Path.cwd().parent / "outside-evidence.png"), "../generated.csv"])
 if arm == "bound-note":
     err.write_text(err.read_text() +
         "import json, os\nfrom pathlib import Path\n"
@@ -2273,6 +2278,21 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                     assert "feedback" in str(facts["Exact corrections"])
                 else:
                     answer["feedback"] = []
+            if arm == "extreme-advisory":
+                long_name = "A" * 10000
+                result = subprocess.run([sys.executable, "-B", "hello.py", long_name], cwd=work,
+                                        capture_output=True, text=True, check=True)
+                assert result.stdout.strip() == f"Hello, {long_name}!"
+                answer["findings"].append({"promise": "scopeIn:hello", "kind": "extreme",
+                    "evidence": "A 10,000-character name was accepted and echoed in full.",
+                    "reason": "No limit on name length. Consider 200 characters."})
+            if arm == "undeclared-credit":
+                greeting, = [ref for ref, row in facts["Observations"].items()
+                             if row["requirements"] == ["scopeIn:hello"]]
+                answer["reuse"] = [{"observation": greeting, "promises": ["scopeIn:hello", "quality:exact"],
+                                    "baseline": actions[0]["baseline"]}]
+                actions[:] = [a for a in actions if a["action"] in ("Greet", "Inspect implementation")]
+                actions[0]["promises"].remove("scopeIn:hello")
 
             def defect(promise, reason, **link):
                 answer["findings"].append({"promise": promise, "kind": "defect", "field": "result",
@@ -2319,7 +2339,6 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                     assert len(repair["Defects"]) == 2 and "startswith('--')" in repair["Diff"]
                 else:
                     assert "Reject unknown flags" in facts["Dream"]
-                    assert "A complete report saves a repair round." in question["prompt"]
                 for flag in ("--help", "--unknown"):
                     command = [sys.executable, "-B", "hello.py", flag]
                     result = subprocess.run(command, cwd=work, capture_output=True, text=True)
@@ -2357,13 +2376,13 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                             answer["findings"][-1].update(witnessPath="checks/usage.py", provedAction=rejection)
                             if arm == "carry-with-limit":
                                 uncertain("Reject bad input", "A separate shell rendering remains unobserved.")
-                    elif facts.get("Exact corrections"):
-                        assert "does not cover quality:exact" in str(facts["Exact corrections"])
-                        uncertain("Greet", "No linked observation of the rejection was supplied.")
                     else:
                         unrelated, = [ref for ref, row in facts["Observations"].items()
                                       if "scopeIn:hello" in row["requirements"]]
                         defect("quality:exact", "I could not observe the rejection.", observation=unrelated)
+                        defect("tryItGuide", "The guide step was not recorded.", action=len(actions) + 1)
+                        defect("sourceAcceptance", "The file layout could be clearer.", action=len(actions))
+                        answer["findings"][-1]["field"] = "notMetIf"
             if arm == "weak-check":
                 actions[2]["baseline"] = ""
             if guide_case:
@@ -2444,7 +2463,10 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                 "tryItGuide:walkthrough": "not judged: Follow the guide manually",
             } if arm == "carry-with-limit" else {})
         if gate == "C" and arm == "unrelated-witness":
-            assert "guard:quality:exact" in request["subject"]["unverified"]
+            assert "does not cover quality:exact" in request["subject"]["unverified"]["guard:quality:exact"]
+            assert "does not cover tryItGuide" in request["subject"]["unverified"]["guard:tryItGuide"]
+            assert any(f["kind"] == "note" and "No approved B line" in f["reason"]
+                       for f in request["subject"]["guard"]["findings"])
         if gate == "C" and arm in ("bound-note", "weak-check"):
             assert "guard:quality:exact" in request["subject"]["unverified"]
             if arm == "bound-note":
@@ -2583,7 +2605,8 @@ Run.reopen(slot / 'product', provider, unexpected).run()
                     ("note", "This walk does not expand scope to a network service."),
                     ("note", "Keep the approved greeting.")]
             else:
-                assert "outside-evidence.png" in " ".join(guard["normalisations"])
+                assert all(path in " ".join(guard["normalisations"])
+                           for path in ("outside-evidence.png", "../generated.csv"))
                 assert all("checks/usage.py" in run.store.read(ref)["witness"]["paths"]
                            for ref in cursor.finalObservations)
         if arm.startswith("d01-evidence"):
@@ -2631,6 +2654,19 @@ Run.reopen(slot / 'product', provider, unexpected).run()
             assert receipt["binding"] == proofs[0]["commit"]
         kept = [row for row in questions.observed(run.store, cursor.finalObservations)
                 if "scopeIn:hello" in row["requirements"]]
+        if arm in ("extreme-advisory", "undeclared-credit", "unrelated-witness"):
+            assert [row["kind"] for _, _, row in run.store.records("question")].count("JUDGE") == 1
+            assert not run.store.records("lead_failure")
+            (decision,) = [row for _, _, row in run.store.records("decision_request") if row["gate"] == "C"]
+            subject = decision["subject"]
+            if arm == "extreme-advisory":
+                note, = subject["guard"]["findings"]
+                assert (note["kind"], note["reason"]) == ("note", "No limit on name length. Consider 200 characters.")
+                assert not subject["unverified"]
+            elif arm == "undeclared-credit":
+                note, = subject["guard"]["findings"]
+                assert note["kind"] == "note" and "Dropped undeclared credit for quality:exact" in note["reason"]
+                assert set(subject["unverified"]) == {"guard:quality:exact"}
         if milestone_count == 1 and not guide_case and arm not in ("missing-check", "guard-repair", "guard-once"):
             green = [run.store.read(ref) for ref in cursor.finalObservations]
             usage = [r for r in green if "quality:exact" in r["requirements"]]

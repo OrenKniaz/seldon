@@ -145,7 +145,8 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
             store.record("consumption_failure", {"attempt": attempt, "kind": kind,
                 "field": failed_field, "reason": reason, "exceptionType": type(error).__name__,
                 "answer": answer})
-            if correction is not None or not features.enabled("answerRepair"):
+            if (correction is not None or not features.enabled("answerRepair")
+                    or (walk or kind == "RECEIPT") and features.enabled("leadPlausibleGuard")):
                 raise ConsumptionFailure(f"Seldon's fault using {kind}.{failed_field}: {reason}") from error
             correction = {"Rejected answer": answer, "Errors": [reason]}
             retained = None

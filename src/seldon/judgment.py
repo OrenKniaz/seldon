@@ -88,10 +88,11 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
     executed = {ref: row for ref, row in packet.items() if row["commit"] == commit and proof.executed(row)}
     links = [obj(action=POSITION)] + ([obj(observation=choice(*executed))] if executed else [])
     handles = choice(*subjects)
+    plausible = features.enabled("leadPlausibleGuard")
     finding = dict(promise=handles, reason=TEXT)
     field = choice("action", "result", "notMetIf")
     defect = obj(**finding, kind=choice("defect"), field=field, evidenceLink={"anyOf": links})
-    other = obj(**finding, kind=choice("uncertain", "amend", "note"), evidence=TEXT)
+    other = obj(**finding, kind=choice("uncertain", "amend", "note", *(["extreme"] if plausible else [])), evidence=TEXT)
     concrete = features.enabled("leadNoFalseAmend")
     amendment = [obj(**finding, kind=choice("amend"), evidence=TEXT, field=field, replacement=TEXT)] if concrete else []
     carry = features.enabled("leadWitnessCarry")
@@ -136,7 +137,16 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
     elif prior:
         context.update({"Previous walk": {k: prior[k] for k in ("commit", "actions", "fixes", "limitations")},
                         "Changed paths": gitwork.git(store.root.parent, "diff", "--name-only", prior["commit"], commit)})
-    if once:
+    if plausible:
+        walk += (" Walk as the owner's real users on a normal week, including the interruptions they would "
+                 "really cause. Use one end-to-end boundary check per real input class. Where relevant, try a "
+                 "short malformed record among valid ones, ordinary labels in the real display, and a delayed "
+                 "retry after replacement. Finish unaffected steps and report all reproduced defects together. "
+                 "A defect needs a violated B line and either a plausible failure for these users or a risk "
+                 "of losing or corrupting their data. Select the violated B field and cite the owner's exact "
+                 "words when they explain the impact. Report implausible extremes without that risk as extreme, with advice "
+                 "such as ‘No limit on name length. Consider 200 characters.’")
+    elif once:
         walk += (" Finish every journey in scope even when an early step fails. Use independent steps or "
                  "fresh state to continue. Walk normal, interrupted and boundary cases, including invalid input "
                  "at operation and storage boundaries and retries across lifecycle changes. "
@@ -144,8 +154,8 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
     else:
         walk += " On repair revisit affected and outstanding behavior."
     if concrete:
-        walk += (" When you find a boundary defect, test the same boundary end to end in this walk "
-                 "(for example, import → API → storage → browser display). "
+        walk += ((" When you find a boundary defect, test it end to end "
+                  "(for example, import → API → storage → browser display)." if not plausible else "") + " "
                  "Use amend only to propose a concrete change to an accepted promise or proof standard. "
                  "Select its field and give the full replacement. Record scope restatements as notes.")
     question = questions.question("JUDGE",
@@ -167,17 +177,27 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
         execution={"walk": str(work)})
 
     def consume(ref, answer):
-        reused = set()
+        credits, findings = [], []
         for index, credit in enumerate(answer.get("reuse", [])):
-            if set(credit["promises"]) - set(passing[credit["observation"]]["requirements"]):
-                raise Mismatch(f"reuse[{index}]", "Credit only promises declared for this observation.")
-            reused.update(credit["promises"])
-        fixes, findings, amendments = [], [], []
+            observation = credit["observation"]
+            declared = passing[observation]["requirements"]
+            for promise in dict.fromkeys(credit["promises"]):
+                if promise not in declared:
+                    if not plausible:
+                        raise Mismatch(f"reuse[{index}]", "Credit only promises declared for this observation.")
+                    findings.append(dict(promise=promise, kind="note", quote="", evidence=observation,
+                                         reason=f"Dropped undeclared credit for {promise} on {observation}."))
+            if kept := [p for p in credit["promises"] if p in declared]:
+                credits.append({**credit, "promises": kept})
+        reused = {p for credit in credits for p in credit["promises"]}
+        fixes, amendments = [], []
         for index, item in enumerate(answer["findings"]):
             promise, kind, reason = (item[k] for k in ("promise", "kind", "reason"))
             bound = subjects[promise]
             if kind != "defect":
-                if kind == "amend":
+                if kind == "extreme":
+                    item = {**item, "kind": "note"}
+                elif kind == "amend":
                     field, replacement = item.get("field"), item.get("replacement", "").strip()
                     if not concrete:
                         amendments.append(f"{promise}: {reason}")
@@ -189,26 +209,27 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
                 findings.append({**item, "quote": ""})
                 continue
             quote = bound.get(item["field"]) if isinstance(bound, dict) else None
-            if not quote:
+            if not quote and not plausible:
                 raise Mismatch(f"findings[{index}].field", f"Select an approved B field for {promise}.")
             link = item["evidenceLink"]
             if "action" in link:
                 position = link["action"]
                 action = answer["actions"][position - 1] if position <= len(answer["actions"]) else None
-                if not (action and promise in action["promises"] and action["action"].strip()
-                        and action["actual"].strip()):
-                    raise Mismatch(f"findings[{index}].evidenceLink",
-                                   f"Link a current action with an actual result for {promise}, or use uncertain.")
-                evidence, actual = action["action"], action["actual"]
+                linked = action and promise in action["promises"] and action["action"].strip() and action["actual"].strip()
+                evidence, actual = (action["action"], action["actual"]) if linked else (f"Action {position}", "")
             else:
                 observation = link["observation"]
                 row = executed[observation]
-                if promise not in row["requirements"]:
-                    raise Mismatch(f"findings[{index}].evidenceLink",
-                                   f"Observation {observation} does not cover {promise}. "
-                                   "Link an observation or current action that covers it, or use uncertain.")
+                linked = promise in row["requirements"]
                 evidence = f"{observation}: {row['command']}"
                 actual = f"{proof.explain([row])}\nCheck: {judge_fields(row)}\nFiles: {row['evidenceFiles']}"
+            if not linked or not quote:
+                problem = f"{evidence} does not cover {promise}." if not linked else f"No approved B line for {promise}."
+                if not plausible:
+                    raise Mismatch(f"findings[{index}].evidenceLink", problem)
+                findings.append({**item, "kind": "uncertain" if not linked else "note", "quote": quote or "",
+                                 "evidence": evidence, "reason": f"{problem} {reason}"})
+                continue
             position, path = item.get("provedAction", 0), item.get("witnessPath", "")
             if position:
                 walk = answer["actions"][position - 1:position]
@@ -233,7 +254,7 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
                     | {f["promise"] for f in findings if f["kind"] != "note"}
                     | {f["promise"] for f in prior.get("findings", []) if f["kind"] == "defect"})
         baselines = set(prior.get("baselines", [])) | {
-            p for a in actions + answer.get("reuse", []) if a["baseline"].strip() for p in a["promises"]}
+            p for a in actions + credits if a["baseline"].strip() for p in a["promises"]}
         result = {**answer, "source": ref, "commit": commit, "milestone": cursor.wave, "B": cursor.B,
                   "observations": refs, "previous": source if prior else None, "baselines": sorted(baselines),
                   "fixes": fixes, "findings": findings, "evidenceFiles": prior.get("evidenceFiles", {}) | files,
@@ -243,11 +264,13 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
         result["actions"] = actions + [
             {**a, "promises": kept} for a in prior.get("actions", [])
             if (kept := [p for p in a["promises"] if p not in affected])]
+        if "reuse" in answer:
+            result["reuse"] = credits
         if scoped:
             kept_credits = [{**credit, "observation": matched[credit["observation"]], "promises": kept}
                             for credit in prior.get("reuse", []) if credit["observation"] in matched
                             if (kept := [p for p in credit["promises"] if p not in affected])]
-            result["reuse"] = answer.get("reuse", []) + kept_credits
+            result["reuse"] = credits + kept_credits
             reused.update(p for credit in kept_credits for p in credit["promises"])
         linked = reused | {p for a in result["actions"] for p in a["promises"]}
         missing = (dict.fromkeys(current.keys() - baselines, "Failure on the base was not observed.")
