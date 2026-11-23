@@ -181,7 +181,7 @@ def recorded(folder):
 def render_question(question, provider="codex", images=(), *, prompts2=None, planner_brief=None):
     prompt, instructions = _render_question(question, provider, images, prompts2=prompts2,
                                             planner_brief=planner_brief)
-    if question["kind"] == "WORK" or question["execution"].get("walk"):
+    if (question["kind"] == "WORK" and not question["execution"].get("lead")) or question["execution"].get("walk"):
         prompt += "\n\n" + desktop.WRITE_RULE
     return prompt, instructions
 

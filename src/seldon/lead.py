@@ -5,7 +5,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
-from . import decisions, features, gitwork, inference, judgment, proof, questions, recovery
+from . import decisions, desktop, features, gitwork, inference, judgment, proof, questions, recovery
 from .answers import Mismatch
 from .processes import interrupted_streams_closed
 from .providers import ProviderFailure, recorded
@@ -204,6 +204,8 @@ def amend_missing(store, cursor):
 
 
 def render_builder(question):
+    if features.enabled("leadThinBrief") and "leadSpec" in question.get("renderContext", {}):
+        return render_thin_builder(question)
     facts = question["facts"]
     brief = facts["Milestone brief"]
     rules = question["prompt"]
@@ -222,7 +224,60 @@ def render_builder(question):
                   "Write the lifecycle so a reader could retrace your run from it alone: the actual commands, "
                   "interactions and observed outcomes, recorded as you go.")
     return "\n\n".join((brief, rules, context, "Return schema\n" + encode(question["schema"]),
-                        "Example receipt\n" + encode(question["examples"][0]))), rules
+                        "Example receipt\n" + encode(question["examples"][0]), desktop.WRITE_RULE)), rules
+
+
+def render_thin_builder(question):
+    facts = question["facts"]
+    spec = question["renderContext"]["leadSpec"]
+    words = facts["Owner words"]
+    sections = [words["Dream"], "Approved spec\n" + spec["outcome"], facts["Approved spec"]["how"]]
+    if spec["carried"]:
+        sections.append("First task: repair and redeclare the carried checks.\n" + "\n".join(
+            f"- {gap['witnessPath']}: {gap['reason']}\n  Approved standard: {gap['quote']}"
+            for gap in spec["carried"]))
+    for heading, lines in (
+        ("Constraints", spec["constraints"]), ("Outside scope", spec["exclusions"]),
+        ("Preserve", spec["preserve"]),
+    ):
+        if lines:
+            sections.append(heading + "\n" + "\n\n".join(lines))
+    for handle, standard in facts["Promises"].items():
+        lines = [f"`{handle}`"]
+        if isinstance(standard, dict) and "action" in standard:
+            lines.extend(f"{label}: {standard[key]}" for key, label in (
+                ("action", "Exercise"), ("result", "Expect"), ("notMetIf", "Must fail if")) if key in standard)
+        else:
+            lines.extend(promise_words(standard))
+        sections.append("\n".join(lines))
+    if isinstance(test := facts["Approved spec"]["test"], str) and test != "See promises.":
+        sections.append("Approved checks\n" + test)
+    if feedback := facts.get("How the previous milestone felt"):
+        sections.append("Feedback from the previous walk\n" + "\n".join(
+            f"- {entry['step']}: {entry['note']}" for entry in feedback))
+    if direction := facts.get("Owner direction"):
+        sections.append("Owner direction\n" + direction)
+    if failure := facts.get("Exact failure"):
+        sections.append("Repair\n" + failure)
+    rules = "\n".join((
+        "Build the whole milestone in this checkout. Keep the code readable for the next developer.",
+        "Design the data model around the real-world identities in the owner's story (for example, which night a tap belongs to) before writing handlers.",
+        "Write and run your regression checks against the approved standards. Preserve existing checks and fix reproduced defects.",
+        "Never open desktop apps. Use TEMP for scratch. Wait for any provider-native sub-agents and skills you use. Leave commits and global settings alone.",
+        "Write docs/try-it.md and an unattended clean-copy walkthrough in docs/try-it/. Exercise each surface, stop what you start, and log actual steps and results as a JSON array in SELDON_EVIDENCE_DIR/operation-lifecycle.json. Record an unavailable runtime with observed=false and a reason.",
+        "Return when done or blocked. List checkPaths and commands with their promise handles, including tryItGuide. Use question for required input.",
+    ))
+    sections.extend(("How we work\n" + rules, "Return schema\n" + encode(question["schema"]),
+                     "Example receipt\n" + encode(question["examples"][0])))
+    return "\n\n".join(sections), rules
+
+
+def promise_words(promise):
+    if promise is None:
+        return []
+    if isinstance(promise, str):
+        return [promise]
+    return [promise[key] for key in ("story", "outcome", "criterion", "verification") if key in promise]
 
 
 def attempts(store, assignment):
@@ -278,11 +333,13 @@ def build(store, provider, cursor):
     if (approval.get("subject", {}).get("plan") != cursor.leadPlan
             or approval["subject"]["vision"] != cursor.vision):
         raise ValueError("A builder requires the owner's B for this plan and spec")
-    item = milestones(store, cursor)[cursor.wave - 1]
+    plan = milestones(store, cursor)
+    item = plan[cursor.wave - 1]
+    previous = store.read(cursor.productVerdict) if cursor.productVerdict else {}
+    carried = previous.get("carriedWitnesses", [])
     if not cursor.leadBuild:
         gitwork.unchanged(project, cursor.candidate)
         workspace = gitwork.admit(project, cursor.scratch, cursor.candidate)
-        carried = store.read(cursor.productVerdict).get("carriedWitnesses", []) if cursor.productVerdict else []
         brief = item["brief"]
         if carried:
             brief = ("First task: repair and redeclare these carried witnesses before building the milestone.\n"
@@ -316,15 +373,16 @@ def build(store, provider, cursor):
                     store.cursor(replace(cursor, leadReturn=returned))
                     return
         spec = item["spec"]
+        vision = questions.vision_body(store.read(cursor.vision)["answer"])
+        accepted = questions.commitments(vision)
         facts = {"Milestone brief": assignment["brief"],
                  "Approved spec": spec if isinstance(spec["test"], str) else {**spec, "test": "See promises."},
-                 "Promises": obligations(item, commitments(store, cursor)),
+                 "Promises": obligations(item, accepted),
                  "Owner words": user_words(store, cursor), "Write scope": assignment["workspace"],
                  "Guide path": questions.GUIDE_PATH}
         if interrupted:
             facts["Interruption"] = "You were interrupted. Continue the approved milestone from the current workspace."
-        if cursor.productVerdict:
-            previous = store.read(cursor.productVerdict)
+        if previous:
             facts["Previous checkpoint"] = previous
             facts["How the previous milestone felt"] = store.read(previous["judge"]).get("feedback", [])
         if cursor.failure:
@@ -347,7 +405,15 @@ def build(store, provider, cursor):
                if cursor.failure and features.enabled("leadNoFalseAmend") else "")
             + WRITE_RULES, facts, RECEIPT, [example],
             execution={"cwd": assignment["workspace"], "session": session, "lead": cursor.leadBuild,
-                       "turn": cursor.repairs})
+                       "turn": cursor.repairs},
+            context={"leadSpec": {
+                "outcome": item["outcome"],
+                "constraints": [constraint["value"] for constraint in vision.get("constraints", [])],
+                "exclusions": [entry["outcome"] if isinstance(entry, dict) else entry for entry in vision["scopeOut"]],
+                "preserve": [line for earlier in plan[:cursor.wave - 1] for key in obligations(earlier, accepted)
+                             if key in accepted for line in promise_words(accepted[key])],
+                "carried": carried,
+            }})
 
         try:
             inference.call(store, provider, question, binding=cursor.leadBuild, retries=0,

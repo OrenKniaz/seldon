@@ -1676,8 +1676,9 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     guard-once catches serial defect discovery or a repair re-walk that replays a complete packet:
     two real bad inputs must reach one resumed builder turn, with only the affected path walked again.
     guard-repair only reproduces one defect.
-    micro-redraft catches an extra call or stale spec after an A edit, and missing coaching in the transmitted
-    builder prompt. bound-note checks that coaching can be disabled. The other arms miss these boundaries.
+    micro-redraft catches an extra call or stale spec after an A edit. The native builder must receive the
+    owner's exact words first and the revised proof standard before its receipt. bound-note exercises the
+    old brief switch. Looking only at stored WORK facts misses a renderer that sends the wrong brief.
     keep-building catches an early status receipt becoming a user question or a cold builder start.
     builder-stalled catches rewritten status prose masking a repeated tree and bypassing planner options.
     Existing repair arms resume only after proof or an explicit owner decision. keep-building-off
@@ -1698,13 +1699,14 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     micro = arm == "micro-redraft"
     guide_case = arm in ("guide-replay", "guide-coached")
     if not micro and milestone_count == 1:
-        monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadWitnessCoach" if arm == "bound-note" else "leadPlanOne")
+        monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadWitnessCoach,leadThinBrief"
+                           if arm == "bound-note" else "leadPlanOne")
     else:
         monkeypatch.delenv("SELDON_OFF", raising=False)
     if arm == "proof-owner":
         monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadGuardOwner")
     if arm == "keep-building-off":
-        monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadKeepBuilding,leadSeldonOwns")
+        monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadKeepBuilding,leadSeldonOwns,leadThinBrief")
     if arm == "d01-evidence-off":
         monkeypatch.setenv("SELDON_OFF", "leadPlanOne,leadSeldonOwns")
     edit = "Require the exact stderr text Usage: pass a name when rejecting --help."
@@ -1817,11 +1819,17 @@ if q["kind"] == "JUDGE":
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({"answer": answer})}}))
     print(json.dumps({"type": "turn.completed"}))
     raise SystemExit
-assert prompt.startswith(facts["Milestone brief"] + "\n\n")
+arm = facts["Owner words"]["Dream"].rsplit(" Fixture: ", 1)[1].splitlines()[0]
+if arm in ("bound-note", "keep-building-off"):
+    assert prompt.startswith(facts["Milestone brief"] + "\n\n")
+else:
+    assert prompt.startswith(facts["Owner words"]["Dream"] + "\n\nApproved spec\n")
+    assert prompt.index("How we work\n") < prompt.index("Return schema\n")
+    assert json.loads(prompt.split("\n\nExample receipt\n", 1)[1]) == q["examples"][0]
+    assert str(Path.cwd()) not in prompt and "Previous checkpoint" not in prompt
 assert "provider-native sub-agents and skills" in prompt and "Return schema" in prompt
 assert "features.multi_agent=true" in args and "skills.bundled.enabled=true" in args
 assert "--ephemeral" not in args and 'sandbox_mode="danger-full-access"' in args
-arm = facts["Owner words"]["Dream"].rsplit(" Fixture: ", 1)[1].splitlines()[0]
 thread = args[args.index("resume") + 1] if "resume" in args else (
     "milestone-builder" if arm in ("keep-building", "builder-stalled", "keep-building-off") else str(uuid.uuid4()))
 if arm in ("killed-work", "killed-before-thread"):
@@ -1845,17 +1853,13 @@ if arm in ("killed-work", "killed-before-thread"):
 print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
 assert Path.cwd().resolve() == Path(facts["Write scope"]).resolve()
 if arm == "micro-redraft":
-    assert (
-        "Coaching\nFor each result you describe, follow the actual interaction through to the specific "
-        "observable outcome, and describe only what that observation establishes. "
-        "Write the lifecycle so a reader could retrace your run from it alone: the actual commands, "
-        "interactions and observed outcomes, recorded as you go."
-    ) in prompt
+    assert "Exit 2 with Usage: pass a name on stderr and empty stdout" in prompt.split("\nHow we work\n")[0]
+    assert "Design the data model around the real-world identities in the owner's story" in prompt
 if arm == "bound-note":
     assert "\nCoaching\n" not in prompt and "Use one runnable path" in prompt
 assert "`python hello.py --help`" in facts["Owner words"]["Dream"]
 if arm in ("keep-building", "builder-stalled", "keep-building-off"):
-    assert ("only when done or truly blocked" in prompt) is (arm != "keep-building-off")
+    assert ("Return when done or blocked" in prompt) is (arm != "keep-building-off")
     partial = Path("hello.py")
     if "resume" in args:
         assert args[args.index("resume") + 1] == "milestone-builder"
@@ -1922,7 +1926,7 @@ if arm == "guard-once":
     if "resume" in args:
         assert "status 0, stdout 'Hello, --help!\\n'" in facts["Exact failure"]
         assert "status 0, stdout 'Hello, --unknown!\\n'" in facts["Exact failure"]
-        assert "Run your regression checks" in prompt
+        assert "run your regression checks" in prompt
         product.write_text(product.read_text().replace(
             "sys.argv[1:] == ['--help']", "sys.argv[1].startswith('--')"), encoding="utf-8")
     else:
