@@ -1,4 +1,15 @@
-# Seldon Lead charter v1.1 — delta to CHARTER v1.8
+# Seldon Lead charter v1.2 — delta to CHARTER v1.8
+
+**RATIFIED v1.2 by Oren · 23 November 2026 ("Agreed, ratify v3"): the fresh Lead design (docs/design/LEAD-FRESH-v3.md). Where v1.2 wording below conflicts with a v1.1 clause, v1.2 governs.**
+
+## v1.2 amendments (Lead only)
+- **C5/C8/C12/C17/C28 and journey.** B approves the reviewed spec, build order and working deliveries the person wants demonstrated. Build order, progress updates and session changes need no proof gate. One accountable writer continues between deliveries. Show and record each demonstration. The person may waive its reply.
+- **C9/C10/C19.** The editable DB spec traces the person's words through stories, promises, design and checks to candidate code and observed results. Preserve accepted revisions and decisions. Show affected work and missing or outdated proof after each edit. Render handoffs from the store.
+- **C16/C25.** During the build the person may discuss, add, remove, pause or redirect work in chat. Show the impact and obtain their decision before changing accepted scope. Hold affected work. Record which revision the builder received.
+- **C13/C15/C16.** At every agreed delivery independently verify all promises delivered so far on the integrated candidate. The planner walks the final multi-user stories. A fresh judge assesses coverage and quality from the accepted trace and real observations. The planner then orders repair, seeks a scope decision or offers C. C requires current core proof, source completeness, the Vision Lock quality bar, a live demo, a verified fresh-copy guide and the person's acceptance.
+- **Grow and align (C6, R18).** There is no question budget: the planner asks every question that matters, in rounds, until the person says the expanded vision is aligned.
+
+## v1.1 text (retained; amended above)
 
 **RATIFIED v1.1 by Oren · 19 November 2026** (C28: "coding should start once spec is done"). **RATIFIED v1.0 · 19 November 2026** ("ok I ratify"). The owner offers two shapes, chosen at kickoff (C27). CHARTER v1.8 and BLUEPRINT v1.15 govern Orchestrator; this delta governs Lead. Only Oren ratifies changes. Clause numbers below retain their original subjects.
 
