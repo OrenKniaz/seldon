@@ -1633,7 +1633,8 @@ def test_lead_sizes_by_builder_session(tmp_path, monkeypatch, staging):
                                  "bound-note", "unresolved-plan", "missing-check", "guard-repair", "failed-witness",
                                  "guard-feedback", "incomplete-witness", "unrelated-witness", "carry-witness",
                                  "carry-with-limit", "owner-interruption", "keep-building", "builder-stalled",
-                                 "keep-building-off", "guard-once", "d01-evidence", "d01-evidence-off", "guide-coached"])
+                                 "keep-building-off", "guard-once", "scope-note", "absolute-evidence",
+                                 "d01-evidence", "d01-evidence-off", "guide-coached"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     """The Lead charter's B owns writes and each later candidate must preserve earlier promises.
 
@@ -1654,6 +1655,9 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     failed-witness catches an observed nonzero builder check becoming a PROVE question when the guard
     finds no separate product defect. It requires the exact failed check to reach the same session.
     d01-evidence catches generated PNG, CSV and lifecycle paths in a receipt blocking tracked checks.
+    absolute-evidence catches both rejecting absolute paths and silently losing a tracked witness.
+    d01-evidence only submits relative paths. scope-note catches a guard restatement triggering
+    another plan, approval and build. bound-note changes a proof line before B through REVIEW.
     guide-replay instead has a missing command file and still needs receipt correction.
     guide-coached catches an unsuccessful receipt correction reaching the person before the planner
     can supply a candidate-specific correction. guide-replay fixes the receipt on its first pass.
@@ -1712,6 +1716,9 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     vision.update(size="tiny", sizeWhy="A small command-line experience.", understanding=dream,
                   constraints=[{"handle": "greeting", "value": "Hello, Ada!",
                                 "meaning": "The exact greeting for Ada", "source": "kickoff"}], scopeOut=[])
+    if arm == "scope-note":
+        vision["scopeOut"] = [{"outcome": "A network service is outside the approved CLI scope.",
+                               "sources": ["kickoff"]}]
     vision["stories"] = [
         {"handle": name, "feature": name, "story": f"A visitor wants to run {name}.", "outcome": outcome,
          "constraints": ["greeting"] if name == "hello" else [], "sources": ["kickoff"]}
@@ -2044,6 +2051,9 @@ if arm.startswith("d01-evidence"):
                      "evidence.joinpath('full-390.png').write_bytes(Path('preview.png').read_bytes())\n"
                      "evidence.joinpath('fridays.csv').write_text('day,count\\nFriday,14\\n')\n"
                      "evidence.joinpath('operation-lifecycle.json').write_text('[]')\n")
+if arm == "absolute-evidence":
+    receipt["checkPaths"] = [str(Path.cwd() / path) for path in check_paths]
+    receipt["checkPaths"].append(str(Path.cwd().parent / "outside-evidence.png"))
 if arm == "bound-note":
     err.write_text(err.read_text() +
         "import json, os\nfrom pathlib import Path\n"
@@ -2212,6 +2222,14 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                 assert any("usage error asserted" in row["stdout"] for row in green)
             answer = {"why": "Walked the command and rejection from the guide.", "actions": actions,
                       "findings": [], "feedback": [{"step": "Reject bad input", "note": "Usage is easy to scan."}]}
+            if arm == "scope-note":
+                answer["findings"] = [{"promise": "scopeIn:hello", "kind": "amend",
+                                       "reason": "This walk does not expand scope to a network service.",
+                                       "evidence": "Only the approved CLI path was walked."},
+                                      {"promise": "scopeIn:hello", "kind": "amend", "field": "result",
+                                       "replacement": facts["Subjects"]["scopeIn:hello"]["result"],
+                                       "reason": "Keep the approved greeting.",
+                                       "evidence": "The greeting matches the result at B."}]
             if arm == "proof-owner":
                 assert "Owner decisions" not in facts
             else:
@@ -2488,6 +2506,20 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
                            for row in failed)
             return
         assert cursor.state == "SCRIPTED_C", frontdoor.state(str(project))
+        if arm in ("scope-note", "absolute-evidence"):
+            assert [row["kind"] for _, _, row in run.store.records("question")] == [
+                "ALIGN", "MILESTONES", "REVIEW", "WORK", "JUDGE"]
+            assert run.store.records("outcome")[-1][2]["verification_complete"] is True
+            (decision,) = [row for _, _, row in run.store.records("decision_request") if row["gate"] == "C"]
+            guard = decision["subject"]["guard"]
+            if arm == "scope-note":
+                assert [(f["kind"], f["reason"]) for f in guard["findings"]] == [
+                    ("note", "This walk does not expand scope to a network service."),
+                    ("note", "Keep the approved greeting.")]
+            else:
+                assert "outside-evidence.png" in " ".join(guard["normalisations"])
+                assert all("checks/usage.py" in run.store.read(ref)["witness"]["paths"]
+                           for ref in cursor.finalObservations)
         if arm.startswith("d01-evidence"):
             assert run.store.records("outcome")[-1][2]["verification_complete"] is True
             assert len(run.store.records("call_session")) == 1

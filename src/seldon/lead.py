@@ -320,6 +320,9 @@ def build(store, provider, cursor):
             + ("Repair every reproduced defect in Exact failure in this turn. Run your regression checks "
                "for the fixes and affected behavior before returning, and report what ran and the results. "
                if cursor.failure and features.enabled("leadGuardOnce") else "")
+            + ("Fix each affected boundary at every layer it crosses and check each layer, including "
+               "the browser display where applicable, before returning. "
+               if cursor.failure and features.enabled("leadNoFalseAmend") else "")
             + WRITE_RULES, facts, RECEIPT, [example],
             execution={"cwd": assignment["workspace"], "session": session, "lead": cursor.leadBuild,
                        "turn": cursor.repairs})
@@ -403,7 +406,8 @@ def prove(store, provider, cursor):
     try:
         if "error" in returned:
             raise ValueError(returned["error"])
-        checks, omitted = proof.milestone_checks(store, previous, cursor.wave, current, receipt, candidate)
+        workspace = assignment["workspace"] if features.enabled("leadNoFalseAmend") else None
+        checks, omitted = proof.milestone_checks(store, previous, cursor.wave, current, receipt, candidate, workspace)
     except ValueError as error:
         if returned.get("kind") == "RECEIPT" and not cursor.requestedChange:
             fail(store, cursor, str(error), "Seldon", candidate=candidate)
@@ -455,7 +459,7 @@ def prove(store, provider, cursor):
             "commit": candidate, "assignment": cursor.leadBuild, "return": cursor.leadReturn,
             "changed": changed, "checks": checks,
             "observations": green, "judge": judge,
-            **({"normalisations": ["Omitted check paths absent from the candidate: " + ", ".join(omitted)]}
+            **({"normalisations": ["Omitted check paths outside or absent from the candidate: " + ", ".join(omitted)]}
                if omitted else {}),
             **({"carriedWitnesses": carried} if carried else {}),
             "previous": cursor.productVerdict})

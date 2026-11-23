@@ -89,9 +89,11 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
     links = [obj(action=POSITION)] + ([obj(observation=choice(*executed))] if executed else [])
     handles = choice(*subjects)
     finding = dict(promise=handles, reason=TEXT)
-    defect = obj(**finding, kind=choice("defect"), field=choice("action", "result", "notMetIf"),
-                 evidenceLink={"anyOf": links})
+    field = choice("action", "result", "notMetIf")
+    defect = obj(**finding, kind=choice("defect"), field=field, evidenceLink={"anyOf": links})
     other = obj(**finding, kind=choice("uncertain", "amend", "note"), evidence=TEXT)
+    concrete = features.enabled("leadNoFalseAmend")
+    amendment = [obj(**finding, kind=choice("amend"), evidence=TEXT, field=field, replacement=TEXT)] if concrete else []
     carry = features.enabled("leadWitnessCarry")
     carried = store.read(cursor.productVerdict).get("carriedWitnesses", []) if cursor.productVerdict else []
     witness = [obj(**defect["properties"], witnessPath=TEXT, provedAction=POSITION)] if carry else []
@@ -103,7 +105,7 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
         extras["reuse"] = array(credit)
     schema = obj(answer=obj(why=TEXT, actions=array(obj(action=TEXT, actual=TEXT, promises=array(handles),
         baseline=baseline, screenshots=REFS)), feedback=array(obj(step=TEXT, note=TEXT), minimum=1),
-        findings=array({"anyOf": [defect, other, *witness]}), **extras))
+        findings=array({"anyOf": [defect, other, *amendment, *witness]}), **extras))
     runtime = Path(mkdtemp(prefix="guard-", dir=cursor.scratch))
     work, before, evidence_dir = (runtime / name for name in ("product", "base", "evidence"))
     walk = (questions.LEAD_GUARD if owner else "Walk each B promise on Candidate. Observe new failures on Base. "
@@ -141,6 +143,11 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
                  "Report all reproduced defects together. A complete report saves a repair round.")
     else:
         walk += " On repair revisit affected and outstanding behavior."
+    if concrete:
+        walk += (" When you find a boundary defect, test the same boundary end to end in this walk "
+                 "(for example, import → API → storage → browser display). "
+                 "Use amend only to propose a concrete change to an accepted promise or proof standard. "
+                 "Select its field and give the full replacement. Record scope restatements as notes.")
     question = questions.question("JUDGE",
         walk + " A defect selects the violated B field "
         "and links a one-based action or an executed observation for that promise. "
@@ -165,13 +172,22 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
             if set(credit["promises"]) - set(passing[credit["observation"]]["requirements"]):
                 raise Mismatch(f"reuse[{index}]", "Credit only promises declared for this observation.")
             reused.update(credit["promises"])
-        fixes, findings = [], []
+        fixes, findings, amendments = [], [], []
         for index, item in enumerate(answer["findings"]):
             promise, kind, reason = (item[k] for k in ("promise", "kind", "reason"))
+            bound = subjects[promise]
             if kind != "defect":
+                if kind == "amend":
+                    field, replacement = item.get("field"), item.get("replacement", "").strip()
+                    if not concrete:
+                        amendments.append(f"{promise}: {reason}")
+                    elif (isinstance(bound, dict) and (accepted := bound.get(field)) and replacement
+                          and replacement != accepted.strip()):
+                        amendments.append(f"{promise} {field}: replace {accepted!r} with {replacement!r}. {reason}")
+                    else:
+                        item = {**item, "kind": "note"}
                 findings.append({**item, "quote": ""})
                 continue
-            bound = subjects[promise]
             quote = bound.get(item["field"]) if isinstance(bound, dict) else None
             if not quote:
                 raise Mismatch(f"findings[{index}].field", f"Select an approved B field for {promise}.")
@@ -211,6 +227,8 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
             files[n] for n in a["screenshots"] if n in files and proof.image(Path(files[n]).read_bytes())
         ]} for a in answer["actions"]]
         walked = {p for a in actions for p in a["promises"]}
+        if concrete:
+            findings += [f for f in prior.get("findings", []) if f["kind"] == "note" and f not in findings]
         affected = (reused | walked | refresh
                     | {f["promise"] for f in findings if f["kind"] != "note"}
                     | {f["promise"] for f in prior.get("findings", []) if f["kind"] == "defect"})
@@ -219,7 +237,7 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
         result = {**answer, "source": ref, "commit": commit, "milestone": cursor.wave, "B": cursor.B,
                   "observations": refs, "previous": source if prior else None, "baselines": sorted(baselines),
                   "fixes": fixes, "findings": findings, "evidenceFiles": prior.get("evidenceFiles", {}) | files,
-                  "amendments": [f"{f['promise']}: {f['reason']}" for f in findings if f["kind"] == "amend"],
+                  "amendments": amendments,
                   "limitations": [f for f in prior.get("limitations", []) if f["promise"] not in affected]
                                  + [f for f in findings if f["kind"] == "uncertain"]}
         result["actions"] = actions + [
