@@ -6,15 +6,12 @@ import uuid
 from pathlib import Path
 
 from . import features, gitwork, observations as evidence_facts
+from .processes import UncertainCleanup as UncertainCleanup
 from .processes import execute
 from .providers import ROLES
 
 
 _observer = threading.local()
-
-
-class UncertainCleanup(RuntimeError):
-    pass
 
 
 class Failed(ValueError):

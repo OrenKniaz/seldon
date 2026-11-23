@@ -11,7 +11,29 @@ import subprocess
 import sys
 import time
 from contextlib import ExitStack
+from pathlib import Path
 from tempfile import TemporaryFile
+
+
+class UncertainCleanup(RuntimeError):
+    pass
+
+
+def reconcile_call(store):
+    """Check ownership of a provider call left by a previous controller."""
+    started = store.records("call_started")
+    if not started:
+        return
+    _, _, call = started[-1]
+    if any(row["attempt"] == call["attempt"] for _, _, row in store.records("attempt_end")):
+        return
+    folder = Path(call["folder"])
+    receipt = folder / "result.json"
+    if receipt.is_file():
+        if not json.loads(receipt.read_text("utf-8"))["cleanupVerified"]:
+            raise UncertainCleanup("Provider cleanup is unverified. Inspect " + str(receipt))
+    elif not interrupted_streams_closed(folder):
+        raise UncertainCleanup("Waiting for the interrupted provider's process cleanup: " + str(folder))
 
 
 _BOOTSTRAP = r"""

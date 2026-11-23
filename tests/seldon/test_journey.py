@@ -419,6 +419,306 @@ def test_grow_align_receipt_and_lock_journey(tmp_path, monkeypatch):
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("loose_answer", [False, True])
+def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
+    """A stale reply cannot approve a new vision or undo a review repair before B.
+
+    The graph-only journey bypasses kickoff, the provider, displayed options and bind-on-reopen.
+    It cannot catch an early approval or a nested wire union that stalls the native planner.
+    """
+    import asyncio
+
+    from seldon import decisions, frontdoor, schema
+    from seldon.lead2 import SpecStore, render_person
+    from seldon.providers import render_question
+
+    dream = "Let volunteers share the coat check. Keep receipts usable when the tablet restarts."
+    other = "A volunteer can also hand off to the next shift while a coat is still out."
+    calls = []
+    draft = {"build_order": [{"outcome": "Check in and recover a coat",
+                             "separate_session_reason": "", "recommend_demo": True}]}
+
+    def add(name, kind, **body):
+        return {"op": "add", "name": name, "node": {"kind": kind, **body}}
+
+    def link(source, target):
+        return {"op": "link", "source": source, "target": target}
+
+    def flat(edits):
+        return [{
+            "op": edit["op"], "ref_or_source": edit.get("name") or edit.get("id") or edit.get("source"),
+            "target": edit.get("target", ""), "node_json": json.dumps(edit["node"]) if "node" in edit else "",
+        } for edit in edits]
+
+    def material_question(question, label):
+        return {"question": question, "options": [
+            {"label": label, "means": "Show the same record"},
+            {"label": "Use a separate list", "means": "Keep a local log"},
+        ]}
+
+    def fill(story):
+        return [
+            add("receipt", "promise", action="Claim a coat after restart",
+                result="The receipt still finds it", not_met_if="A restart loses the receipt"),
+            add("storage", "design", decision="Save the claim before showing the receipt",
+                reason="Durability", words=other),
+            add("claims", "interface", contract="Claim identity persists across shifts and restarts."),
+            add("restart", "check", action="Restart after allocating a claim",
+                expected="Claim is retrievable"),
+            add("handoff", "walk", scenario="Two volunteers see an outstanding claim",
+                interruption="The first shift signs out before return"),
+            link(story, "$receipt"), link("$receipt", "$storage"), link("$storage", "$claims"),
+            link("$claims", "$restart"),
+        ]
+
+    def provider(q):
+        kind, facts = q["kind"], q["facts"]
+        calls.append(kind)
+        pending = [q["schema"]]
+        while pending:
+            field = pending.pop()
+            assert not {"anyOf", "oneOf", "allOf", "$ref"} & field.keys()
+            pending.extend(field.get("properties", {}).values())
+            if "items" in field:
+                pending.append(field["items"])
+        proposal = facts["Current proposal"]
+        prompt, _ = render_question(q)
+        assert facts["Owner's words"] == dream and prompt.startswith(dream)
+        words = SpecStore(run.store).snapshot().graph.nodes
+        assert all(ref not in prompt for ref in words)
+        story = next((line.split("]")[0][1:] for line in proposal.splitlines()
+                      if '"kind":"story"' in line), None)
+        if kind == "LEAD2-ALIGN":
+            count = calls.count(kind)
+            people, role_refs, sources = [], ["desk", "shift"], ["brief"]
+            if count == 1:
+                people = [{"ref": "desk", "role": "Volunteer"}, {"ref": "shift", "role": "Incoming shift"}]
+                story = "handoff"
+                if loose_answer:
+                    role_refs.append(story)  # A redundant self-link is discarded before the batch is applied.
+            else:
+                owner_reply = "Share a live list" if count == 2 else other
+                assert facts["Owner's chosen size"] == "small"
+                assert owner_reply in facts["Earlier replies"]
+                sources += [block.splitlines()[0] for block in facts["Earlier replies"].split("\n\n")]
+                role_refs = [line.split("]")[0][1:] for line in proposal.splitlines()
+                             if line.startswith("[p")]
+            questions = [
+                material_question("Which list do volunteers use?", "Share a live list"),
+                material_question("What if the first shift leaves early?", "Keep the claim open"),
+                material_question("How should an interrupted claim look?", "Show the outstanding claim"),
+            ]
+            changed_story = {"ref": story, "story": "Two shifts share and recover outstanding claims",
+                             "people": role_refs, "sources": sources}
+            answer = dict(reason="Propose the shared handoff", people=people, stories=[changed_story],
+                          retire=[],
+                          questions=[questions[count - 1]],
+                          aligned=count != 2, size="micro", size_reason="One coat desk")
+            if count == 1 and loose_answer:
+                return json.dumps({**answer, "plan": draft})
+        elif kind == "LEAD2-SPEC":
+            assert "accepted default" in proposal and "Show the outstanding claim" in proposal
+            assert "Use a separate list" not in proposal
+            edits = fill(story)
+            if loose_answer:
+                edits.append({"op": "amend", "id": story, "node": {
+                    "kind": "story", "story": "Two shifts share outstanding claims and audit handoffs",
+                }})
+            answer = dict(reason="Specify the complete handoff", edits=flat(edits), **draft)
+        else:
+            assert kind == "REVIEW" and facts["Proposed build order"] == draft["build_order"]
+            assert other in facts["Earlier replies"] and "A restart loses the receipt" in proposal
+            assert any("walk" in issue for issue in facts["Missing proof links"])
+            walk = next(line.split("]")[0][1:] for line in proposal.splitlines() if '"kind":"walk"' in line)
+            edits = [{"op": "amend", "id": walk, "node": {
+                "kind": "walk", "scenario": "Two volunteers recover a claim and return the coat",
+                "interruption": "Restart the tablet before the second shift scans the receipt",
+            }}]
+            promise = next(line for line in proposal.splitlines() if '"kind":"promise"' in line)
+            ref, body = promise.split("] ", 1)
+            node = json.loads(body)
+            node["result"] = "The next shift finds the same outstanding coat after restart"
+            edits.append({"op": "amend", "id": ref[1:], "node": node})
+            edits.append(link(ref[1:], walk))
+            if loose_answer:
+                default = next(line.split("]")[0][1:] for line in proposal.splitlines()
+                               if "Show the outstanding claim" in line and '"kind":"design"' in line)
+                edits.append({"op": "retire", "id": default})
+            answer = dict(reason="Exercise the original restart constraint", build_order=[], questions=[],
+                          findings="The walk misses a tablet restart while the claim is still out.",
+                          edits=flat(edits))
+        response = {"answer": answer}
+        schema.validate(response, q["schema"])
+        return json.dumps(response)
+
+    product = tmp_path / "product"
+    monkeypatch.setenv("SELDON_MODE", "lead2")
+    run = Run(product, tmp_path / "workers", dream, {"scriptedUser": True}, provider, None)
+    run.user = lambda _: (_ for _ in ()).throw(decisions.Waiting())
+    initial_commit = run.store.cursor().candidate
+    try:
+        def reply(name, *selected, words=None):
+            displayed = frontdoor.state(product)["waitingFor"]
+            envelope = {"request": displayed["request"], "replyId": name,
+                        "selections": [dict(groupId=key, optionId=option, **extra)
+                                       for key, option, extra in selected]}
+            if words is not None:
+                # Use the chat tool to prove that grouped ingress preserves both selection and exact words.
+                side = frontdoor.side(product)
+                side.mkdir(exist_ok=True)
+                result = asyncio.run(frontdoor.server().call_tool(
+                    "answer", {"run": str(product), **envelope, "words": words},
+                ))
+                assert not result.is_error, result
+                if name == "list":
+                    returned = json.loads(result.content[0].text)
+                    assert returned["waitingFor"] is None and "round 2" in returned["reason"]
+                run.user = lambda _: frontdoor.read_answer(side / "answer.json")
+            else:
+                run.user = lambda _: envelope
+            return displayed
+
+        assert run.step() == "A"
+        spec = SpecStore(run.store)
+        assert not spec.pins()  # Planner recommended alignment in the first round.
+        first = reply("list", ("q1", "o1", {}), ("size", "small", {}), words="Share a live list")
+        assert first["ask"]["groups"][0]["options"][-1]["label"] == "Other"
+        assert "plan" not in run.store.read(run.store.cursor().vision)["answer"]
+        if loose_answer:
+            assert run.store.records("lead2_normalisation")[-1][2]["ignoredEdits"] == 1
+        assert run.step() == "ALIGN"
+        assert run.step() == "A"
+        reply("handoff", ("q1", "other", {"text": other}), ("round", "approve", {}))
+        stale_user = run.user
+        assert run.step() == "ALIGN"  # The simultaneous request for a change must be folded first.
+        assert other in render_person(spec)
+        assert run.step() == "A"
+        run.close()
+
+        monkeypatch.setenv("SELDON_MODE", "lead")
+        run = Run.reopen(product, provider, stale_user)
+        spec = SpecStore(run.store)
+        with pytest.raises(decisions.Waiting):
+            run.step()
+        assert not spec.pins()
+        a = reply("vision lock", ("round", "approve", {}), words="Yes, that is the coat-check flow.")
+        assert a["subject"]["size"] == "small"  # The scripted planner kept recommending micro.
+        assert run.step() == "L2-SPEC"
+        if loose_answer:
+            assert run.step() == "L2-SPEC"
+            scope = reply("scope", ("round", "approve", {}), words="Include the handoff audit.")
+            proposal = scope["ask"]["proposal"]
+            assert "Changed story" in proposal and "audit handoffs" in proposal
+            assert "Claim a coat after restart" not in proposal
+            assert "Claim a coat after restart" in frontdoor.state(product, full_spec=True)["spec"]
+        assert run.step() == "L2-REVIEW"
+        pinned = spec.snapshot(spec.pins()["A"])
+        assert pinned.parent == a["subject"]["lead2_revision"]
+        assert any(n.get("reason") == "accepted default" and "Show the outstanding claim" in n["decision"]
+                   for n in pinned.graph.nodes.values())
+        assert run.step() == "B"
+        assert run.step() == "B"
+        b = reply("demo", ("delivery-1", "show", {}))
+        assert "Restart the tablet before the second shift scans the receipt" not in b["ask"]["proposal"]
+        full = frontdoor.state(product, full_spec=True)
+        assert "Restart the tablet before the second shift scans the receipt" in full["spec"]
+        assert full["buildOrder"] == draft["build_order"]
+        assert "The next shift finds the same outstanding coat after restart" in b["ask"]["proposal"]
+        assert "Check in and recover a coat" in b["ask"]["proposal"]
+        assert run.step() == "B"
+        assert "B" not in spec.pins()
+        waiting = reply("spec lock", ("round", "approve", {}), words="I approve the spec and demo.")
+        assert waiting["ask"]["retained"][0]["label"] == "Show me this working"
+        assert "### Demonstrations\n- Delivery 1" in waiting["ask"]["proposal"]
+        cursor = run.run()
+        assert cursor.state == "L2-READY"
+        receipt = run.store.read(cursor.B)
+        assert receipt["demonstrations"] == ["delivery-1"]
+        assert receipt["scripted"] is True and receipt["request"] == waiting["request"]
+        assert spec.pins()["B"] == b["subject"]["lead2_revision"] > spec.pins()["A"]
+        assert any(n.get("reason") == "accepted default" and "Show the outstanding claim" in n["decision"]
+                   for n in spec.snapshot(spec.pins()["B"]).graph.nodes.values())
+        assert run.store.read(receipt["userWords"])["words"] == "I approve the spec and demo."
+        status = frontdoor.state(product)
+        assert status["status"] == "PLANNED"
+        assert status["controller"] == "idle"
+        assert status["approvedSpec"]["revision"] == spec.pins()["B"]
+        assert status["approvedSpec"]["buildOrder"] == draft["build_order"]
+        assert gitwork.git(product, "rev-parse", "HEAD") == initial_commit
+        assert calls == ["LEAD2-ALIGN"] * 3 + ["LEAD2-SPEC", "REVIEW"]
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
+def test_fresh_lead_attempt_and_pause_journey(tmp_path, monkeypatch):
+    """Only transport retries keep the same request. Bad content starts a fresh round.
+
+    The approval journey cannot catch hidden retries, raw provider warnings leaking into chat,
+    or the idle controller reporting a paused run as active.
+    """
+    from types import SimpleNamespace
+
+    from seldon import decisions, frontdoor
+    from seldon.lead2 import chat
+
+    warning = '{"type":"warning","message":"private diagnostic"}'
+    clock = time.time
+    monkeypatch.setattr(chat, "time", SimpleNamespace(time=lambda: clock() + 180))
+    product = tmp_path / "product"
+
+    class Planner:
+        calls = 0
+
+        def invoke(self, question, started):
+            self.calls += 1
+            progress = frontdoor.state(product)
+            assert progress["status"] == "RUNNING" and "resume" not in progress["next"].lower()
+            assert progress["attempt"]["number"] == (2 if self.calls == 2 else 1)
+            assert "3 min" in progress["reason"] and warning not in progress["reason"]
+            if self.calls == 1:
+                raise ProviderFailure(f"Provider timed out; {warning}", True, True)
+            if self.calls == 2:
+                return json.dumps({"answer": {"reason": "Initial proposal", "edits": [],
+                                   "questions": [], "aligned": False, "size": "micro",
+                                   "size_reason": "One screen"}}), None
+            if self.calls == 4:
+                raise ProviderFailure(f"Provider timed out; {warning}", False, True)
+            assert "Describe at least one story" in question["facts"]["Unresolved proposal issue"]
+            assert "Exact corrections" not in question["facts"]
+            answer = {"reason": "Keep the shelf visible", "aligned": False, "size": "micro",
+                      "size_reason": "One screen", "questions": [], "retire": [],
+                      "people": [{"ref": "keeper", "role": "Librarian"}],
+                      "stories": [{"ref": "shelf", "story": "View the shelf",
+                                   "people": ["keeper"], "sources": ["brief"]}]}
+            return json.dumps({"answer": answer}), None
+
+    def waiting(_):
+        raise decisions.Waiting()
+
+    planner = Planner()
+    run = Run(product, tmp_path / "workers", "Show a shared shelf.", {}, planner, waiting, mode="lead2")
+    try:
+        assert run.run().state == "A" and planner.calls == 3
+        assert len(run.store.records("lead2_unusable_answer")) == 1
+        paused = frontdoor.pause(str(product))
+        assert paused["status"] == "PAUSED" and frontdoor.state(product)["status"] == "PAUSED"
+        request = paused["waitingFor"]["request"]
+    finally:
+        run.close()
+    reply = {"request": request, "replyId": "revise",
+             "selections": [{"groupId": "round", "optionId": "revise"}]}
+    run = Run.reopen(product, planner, lambda _: reply)
+    try:
+        assert run.run().state == "ALIGN" and planner.calls == 4
+        failed = frontdoor.state(product)
+        assert failed["status"] == "PAUSED" and failed["reason"] == "The planner timed out."
+        assert warning in run.store.records("provider_failure")[-1][2]["reason"]
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
 def test_grow_align_tiny_first_done_journey(tmp_path, monkeypatch):
     """A complete tiny proposal locks immediately; revision-only journeys miss forced extra turns."""
     from seldon import decisions, frontdoor, schema

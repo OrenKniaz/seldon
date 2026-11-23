@@ -7,10 +7,9 @@ from pathlib import Path
 
 from . import decisions, desktop, features, gitwork, inference, judgment, proof, questions, recovery
 from .answers import Mismatch
-from .processes import interrupted_streams_closed
 from .providers import ProviderFailure, recorded
 from .schema import REFS, TEXT, array, choice, lead_milestone_schema, obj, validate
-from .states import advance
+from .states import LEAD2_MODE, advance
 from .store import encode
 
 RECEIPT = obj(answer=obj(
@@ -37,7 +36,8 @@ BOUND_RULES = ("Write checks against exactly the approved action, result and not
 
 def kickoff_mode(selected):
     value = os.getenv("SELDON_MODE", "") if selected is None else selected
-    return "lead" if value.strip().casefold() == "lead" else "orchestrator"
+    value = value.strip().casefold()
+    return value if value in {"lead", LEAD2_MODE} else "orchestrator"
 
 
 def enabled(store):
@@ -287,23 +287,6 @@ def promise_words(promise):
 def attempts(store, assignment):
     return [(ref, body) for ref, _, body in store.records("attempt")
             if store.read(body["question"]).get("execution", {}).get("lead") == assignment]
-
-
-def reconcile_call(store):
-    """Reconcile a call left by the previous controller before dispatching its state again."""
-    started = store.records("call_started")
-    if not started:
-        return
-    _, _, call = started[-1]
-    if any(row["attempt"] == call["attempt"] for _, _, row in store.records("attempt_end")):
-        return
-    folder = Path(call["folder"])
-    receipt = folder / "result.json"
-    if receipt.is_file():
-        if not json.loads(receipt.read_text("utf-8"))["cleanupVerified"]:
-            raise proof.UncertainCleanup("Provider cleanup is unverified. Inspect " + str(receipt))
-    elif not interrupted_streams_closed(folder):
-        raise proof.UncertainCleanup("Waiting for the interrupted provider's process cleanup: " + str(folder))
 
 
 def recover_return(store, attempt, question, folder):

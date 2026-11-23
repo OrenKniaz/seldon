@@ -129,7 +129,7 @@ class SpecStore:
                 return EditResult(current.revision, True)
             if mode == "wording-only" and not _wording_only(delta):
                 mode = "substantive"
-            if mode == "substantive" and self._changes_scope(delta):
+            if mode == "substantive" and any(self.scope_changes(delta)):
                 mode = "scope-proposal"
             row = self._store.db.execute("""
                 INSERT INTO lead2_spec(parent, graph, mode, author, reason, time) VALUES (?, ?, ?, ?, ?, ?)
@@ -151,11 +151,16 @@ class SpecStore:
             "SELECT gate, revision FROM lead2_spec_decision WHERE gate IN ('A', 'B')"))
 
     def bind_decision(self, gate: str, revision: int, approval: str) -> None:
-        """Consume a bound user approval from the controller, outside the planner batch API."""
+        """Bind the displayed revision and materialize A's accepted defaults in the same transaction."""
         if gate not in {"A", "B", "scope"}:
             raise ValueError("Choose A, B or scope.")
         with self._store.transaction():
             if approval and self.decision(gate, revision) == approval:
+                return
+            request, words = self._check_approval(gate, revision, approval)
+            if self._store.db.execute(
+                "SELECT 1 FROM lead2_spec_decision WHERE gate = ? AND approval = ?", (gate, approval),
+            ).fetchone():
                 return
             snapshot = self.snapshot(revision)
             current = self.snapshot()
@@ -168,7 +173,9 @@ class SpecStore:
                 if revision == 0 or gate in pins or (gate == "B" and "A" not in pins):
                     raise ValueError("Pin A then B, each once, on a saved spec.")
                 self._require_head(snapshot, current)
-            self._check_approval(gate, revision, approval)
+            if gate == "A" and (edits := _accepted_defaults(request, words)):
+                revision = self.apply(dict(revision=revision, mode="substantive", edits=edits,
+                                           reason="Record defaults accepted at A"), author="owner").revision
             self._store.db.execute("INSERT INTO lead2_spec_decision VALUES (?, ?, ?)",
                                    (gate, revision, approval))
 
@@ -213,27 +220,33 @@ class SpecStore:
         if requested.revision != current.revision:
             raise Conflict(requested.revision, current.revision, Delta(requested.graph, current.graph))
 
-    def _changes_scope(self, delta: Delta) -> bool:
+    def scope_changes(self, delta: Delta):
+        """The exact changes that need separate scope approval."""
         pins = self.pins()
         if "A" not in pins:
-            return False
+            return set(), set()
+        locked = self.snapshot(pins["A"]).graph.nodes
+        nodes = set()
         for ref in delta.nodes:
             before, after = delta.before.nodes.get(ref), delta.after.nodes.get(ref)
             kind = (after or before)["kind"]
-            if kind in {"dream", "story"} or (kind == "promise" and (before or "B" in pins)):
-                return True
+            if kind in {"dream", "story"} or (kind == "promise" and (ref in locked or "B" in pins)):
+                nodes.add(ref)
+            if kind == "design" and locked.get(ref, {}).get("reason") == "accepted default":
+                nodes.add(ref)
             if kind == "person" and any(
                 source == ref and graph.nodes[target]["kind"] == "story"
                 for graph in (delta.before, delta.after) for source, target in graph.links
             ):
-                return True
-        locked = {("dream", "story"), ("person", "story")}
+                nodes.add(ref)
+        locked_links = {("dream", "story"), ("person", "story")}
         if "B" in pins:
-            locked.add(("story", "promise"))
-        return any(kind in locked for graph in (delta.before, delta.after)
-                   for kind in (graph.kinds(link) for link in delta.links & set(graph.links)))
+            locked_links.add(("story", "promise"))
+        links = {link for graph in (delta.before, delta.after) for link in delta.links & set(graph.links)
+                 if graph.kinds(link) in locked_links}
+        return nodes, links
 
-    def _check_approval(self, gate: str, revision: int, approval: str) -> None:
+    def _check_approval(self, gate: str, revision: int, approval: str) -> tuple[dict, dict]:
         receipt = self._record("approval", approval)
         request = self._record("decision_request", receipt.get("request"))
         words = self._record("user_words", receipt.get("userWords"))
@@ -245,6 +258,7 @@ class SpecStore:
                 or words.get("request") != receipt["request"] or words.get("origin") != request.get("origin")
                 or not words.get("words")):
             raise ValueError(f"Use the person's approval bound to {gate} revision {revision}.")
+        return request, words
 
     def _record(self, kind: str, ref: str | None) -> dict:
         if isinstance(ref, str) and ref.startswith("r") and ref[1:].isascii() and ref[1:].isdigit():
@@ -253,6 +267,20 @@ class SpecStore:
             if row:
                 return json.loads(row[0])
         raise ValueError(f"Use a stored {kind} record, got {ref!r}.")
+
+
+def _accepted_defaults(request, words):
+    chosen = {choice["group"] for choice in words.get("choices", [])}
+    edits = []
+    for group in request.get("ask", {}).get("groups", []):
+        if group["id"] == "round" or group["id"] in chosen:
+            continue
+        option = next(item for item in group["options"] if item["id"] == group["default"])
+        edits.append(dict(op="add", name=None, node=dict(
+            kind="design", reason="accepted default", decision=f"{group['question']} {option['label']}",
+            words=option["means"],
+        )))
+    return edits
 
 
 def _wording_only(delta: Delta) -> bool:

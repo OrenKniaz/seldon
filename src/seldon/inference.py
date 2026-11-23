@@ -9,7 +9,7 @@ from .providers import Deadline, ProviderFailure, ResumeUnavailable, role_for
 
 
 def call(store, provider, question, unit=None, check=lambda answer: None, retries=2, binding=None,
-         consume=lambda source, answer: None, field="answer", retained=None):
+         consume=lambda source, answer: None, field="answer", retained=None, normalise=None):
     setup = store.read(store.cursor().kickoff)["setup"]
     kind = question["kind"]
     attempt = None
@@ -30,7 +30,8 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                 qref = store.record("question", current)
                 attempt = store.record("attempt", {"operation": kind, "question": qref,
                     "unit": unit, "provider": setup.get("providers", {}).get(role_for(kind, {}), {}),
-                    "deadline": time.time() + timeout, "retryOf": previous, "startedAt": time.time()})
+                    "deadline": time.time() + timeout, "retryOf": previous, "startedAt": time.time(),
+                    **({"number": recovery + 1} if normalise else {})})
                 if unit:
                     store.unit(unit, replace(store.unit(unit), callAttempt=attempt))
 
@@ -85,7 +86,8 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
             body = store.read(retained)
             attempt, answer = body.get("attempt"), body["answer"]
         else:
-            answer = questions.ask(invoke, question, recorded, retries=retries)
+            answer = questions.ask(invoke, question, recorded, retries=0 if normalise else retries,
+                                   normalise=normalise)
         try:
             # Only answer-to-record work belongs here; provider calls and execution stay outside.
             # Roll back partial records so an exact correction never applies an answer twice.
@@ -145,7 +147,7 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
             store.record("consumption_failure", {"attempt": attempt, "kind": kind,
                 "field": failed_field, "reason": reason, "exceptionType": type(error).__name__,
                 "answer": answer})
-            if (correction is not None or not features.enabled("answerRepair")
+            if (normalise is not None or correction is not None or not features.enabled("answerRepair")
                     or (walk or kind == "RECEIPT") and features.enabled("leadPlausibleGuard")):
                 raise ConsumptionFailure(f"Seldon's fault using {kind}.{failed_field}: {reason}") from error
             correction = {"Rejected answer": answer, "Errors": [reason]}

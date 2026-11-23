@@ -8,6 +8,7 @@ from .contracts import NODE_BODIES
 PROOF = {
     ("promise", "design"), ("promise", "interface"), ("design", "interface"),
     ("design", "check"), ("design", "walk"), ("interface", "check"), ("interface", "walk"),
+    ("promise", "check"), ("promise", "walk"), ("check", "walk"),
 }
 LINEAGE = PROOF | {("dream", "story"), ("story", "promise")}
 CONTEXT = {("person", "story"), ("person", "walk"), ("story", "walk"), ("design", "person")}
@@ -52,6 +53,28 @@ class Graph:
         refs |= people
         return Graph({ref: self.nodes[ref] for ref in sorted(refs)},
                      tuple(link for link in self.links if set(link) <= refs))
+
+
+def review_issues(graph):
+    """A reviewed spec connects every story to what, how and test."""
+    if not any(node["kind"] == "story" for node in graph.nodes.values()):
+        return ["Describe the product's stories and link them to verifiable promises."]
+    issues = []
+    for ref, node in graph.nodes.items():
+        if node["kind"] == "story":
+            sources = {graph.nodes[source]["kind"] for source, target in graph.links if target == ref}
+            if not {"dream", "person"} <= sources or graph.follow(ref) == {ref}:
+                issues.append("Link the owner's words and a role to this story, then a promise: "
+                              + node["story"])
+        elif node["kind"] == "promise":
+            roots = {graph.nodes[parent]["kind"] for parent in graph.follow(ref, upstream=True)}
+            witnesses = {graph.nodes[child]["kind"] for child in graph.follow(ref, PROOF)}
+            missing = {"design", "check", "walk"} - witnesses
+            if "dream" not in roots:
+                missing.add("owner words")
+            if missing:
+                issues.append(f"Link this promise to {', '.join(sorted(missing))}: {node['action']}")
+    return issues
 
 
 def edited(graph: Graph, batch: dict) -> tuple[Graph, dict[str, str]]:

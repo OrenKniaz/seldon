@@ -5,7 +5,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import decisions, features, gitwork, inference, lead, proof, questions
-from .states import TERMINAL, advance
+from .processes import reconcile_call
+from .states import LEAD2_MODE, TERMINAL, advance
 from .store import RunRow, Store
 
 
@@ -18,6 +19,19 @@ def eligible(store):
 
 class Run:
     """The front door owns only its dependencies; modules receive the store and subjects explicitly."""
+    @classmethod
+    def _controller(cls, mode):
+        if mode == LEAD2_MODE:
+            from .lead2.controller import FreshRun
+            return FreshRun
+        return cls
+
+    def __new__(cls, *args, mode=None, **kwargs):
+        mode = lead.kickoff_mode(mode)
+        run = object.__new__(cls._controller(mode))
+        run._kickoff_mode = mode
+        return run
+
     def __init__(self, project, scratch, dream, setup, provider, user, capacity=None, *, mode=None):
         self.project = Path(project)
         self.project.mkdir()
@@ -33,7 +47,7 @@ class Run:
         with self.store.transaction():
             kickoff = self.store.record("kickoff", {"words": dream,
                                                     "setup": {**setup, **features.planning_setup()},
-                                                    "mode": lead.kickoff_mode(mode),
+                                                    "mode": self._kickoff_mode,
                                                     "capacity": self.capacity})
             self.store.cursor(RunRow(kickoff=kickoff, scratch=str(Path(scratch).resolve()),
                                      candidate=candidate, waveStart=candidate))
@@ -41,12 +55,18 @@ class Run:
 
     @classmethod
     def reopen(cls, project, provider, user):
-        self = cls.__new__(cls)
-        self.project = Path(project)
-        self.store = Store(self.project)
-        self._lease = self.store.claim_controller()
+        project = Path(project)
+        store = Store(project)
+        kickoff = store.read(store.cursor().kickoff)
+        self = object.__new__(cls._controller(kickoff.get("mode")))
+        self.project, self.store = project, store
+        self._lease = store.claim_controller()
         self.provider, self.user = provider, user
-        self.capacity = self.store.read(self.store.cursor().kickoff)["capacity"]
+        self.capacity = kickoff["capacity"]
+        self._reopen()
+        return self
+
+    def _reopen(self):
         self._reconcile_lead = lead.enabled(self.store)
         if self.store.cursor().state not in TERMINAL:
             gitwork.publish(self.project, self.store)
@@ -57,7 +77,6 @@ class Run:
                         units.thread_from_recording(self.store, ref)
                         reason = "Controller interrupted WORKING; reconcile its report or resume its partial patch"
                         advance(self.store, "reopen", reason, unit=ref, failure=row.failure + "\n" + reason)
-        return self
 
     def step(self):
         store = self.store
@@ -66,7 +85,7 @@ class Run:
         if state in TERMINAL:
             return state
         if self._reconcile_lead:
-            lead.reconcile_call(store)
+            reconcile_call(store)
             self._reconcile_lead = False
         if state not in ("ALIGN", "A"):
             if lead.enabled(store):

@@ -2,8 +2,17 @@
 
 from dataclasses import replace
 
-
-TERMINAL = {"ACCEPTED", "SCRIPTED_C", "STOPPED"}
+LEAD2_MODE = "lead2"
+LEAD2_READY = "L2-READY"
+LEAD2_RUN = {
+    "ALIGN": {"aligned": "A"},
+    "A": {"revise": "ALIGN", "approve": "L2-SPEC"},
+    "L2-SPEC": {"planned": "L2-REVIEW", "revise": "L2-SPEC"},
+    "L2-REVIEW": {"reviewed": "B", "revise": "L2-SPEC"},
+    "B": {"revise": "L2-SPEC", "approve": LEAD2_READY},
+    LEAD2_READY: {},
+}
+TERMINAL = {"ACCEPTED", "SCRIPTED_C", "STOPPED", LEAD2_READY}
 
 RUN = {
     "NEW": {"start": "ALIGN"},
@@ -27,6 +36,7 @@ RUN = {
     "C": {"approve": "ACCEPTED", "scripted": "SCRIPTED_C"},
     "ACCEPTED": {}, "SCRIPTED_C": {}, "STOPPED": {},
 }
+RUN.update({state: {} for state in LEAD2_RUN if state not in RUN})
 LEAD = {
     ("A", "approve"): "MILESTONES",
     ("B", "approve"): "BUILD",
@@ -50,12 +60,11 @@ UNIT = {
 }
 
 
-def advance(store, event, cause, unit=None, **updates):
+def advance(store, event, cause, unit=None, *, transitions=RUN, **updates):
     with store.transaction():
         row = store.unit(unit) if unit else store.cursor()
-        table = UNIT if unit else RUN
-        target = ("STOPPED" if not unit and event == "stop" and row.state not in
-                  ("ACCEPTED", "SCRIPTED_C", "STOPPED") else
+        table = UNIT if unit else transitions
+        target = ("STOPPED" if not unit and event == "stop" and row.state not in TERMINAL else
                   "ARCHITECT" if not unit and event == "steer" and row.state in
                   ("ARCHITECT", "DETAIL", "REVIEW", "REPAIR", "PRODUCT-JUDGE", "C") else
                   table[row.state].get(event))

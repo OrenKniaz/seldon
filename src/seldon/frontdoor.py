@@ -14,6 +14,7 @@ from typing import NotRequired, TypedDict
 
 from . import decisions, lead, providers
 from .decisions import Waiting
+from .lead2 import chat
 from .run import Run
 from .states import TERMINAL
 from .store import Store
@@ -69,11 +70,16 @@ def grouped(waiting):
     return "groups" in waiting.get("ask", {})
 
 
-def state(run: str):
-    """Show canonical progress, the displayed request, and where the next words go."""
+def state(run: str, full_spec: bool = False):
+    """Show canonical progress and decisions. Request full_spec for the full Fresh Lead spec."""
     with opened(run) as store:
         cursor = store.cursor()
         active = running(store)
+        if store.read(cursor.kickoff).get("mode") == chat.MODE:
+            reply = read_answer(side(run) / "answer.json") if cursor.decision and active else None
+            submitted = bool(reply and reply["request"] == cursor.decision and
+                             not acknowledged(store, reply))
+            return chat.state(store, cursor, run, active, submitted, full_spec)
         waiting = ({"request": cursor.decision, **store.read(cursor.decision)}
                    if cursor.decision and cursor.state not in TERMINAL else None)
         if waiting and (decisions.retired_owner_question(store, waiting)
@@ -153,6 +159,8 @@ def pause(run: str):
             if time.monotonic() >= deadline:
                 raise Refusal("Controller still owns the run; wait for it to exit, then use pause")
             time.sleep(.02)
+        if store.read(store.cursor().kickoff).get("mode") == chat.MODE:
+            chat.set_paused(store, True)
     return state(run)
 
 
@@ -265,15 +273,20 @@ def server(setup=providers.setup_facts):
             raise Refusal("Run is " + value["state"] + "; use start with a new folder")
         waiting = value["waitingFor"]
         if not waiting:
+            if value.get("mode") == chat.MODE:
+                raise Refusal(value["next"])
             raise Refusal("No request is waiting; use resume")
         if request != waiting["request"]:
             raise Refusal("Use answer request " + waiting["request"])
         target = side(run) / "answer.json"
         if grouped(waiting):
-            if not replyId or (words is None) == (not selections):
+            if value.get("mode") == chat.MODE:
+                response = chat.answer(request, words, replyId, selections, Refusal)
+            elif not replyId or (words is None) == (not selections):
                 raise Refusal(f"Use answer request {request} with a replyId and either words or selections")
-            response = {"request": request, "replyId": replyId,
-                        **({"words": words} if words is not None else {"selections": selections})}
+            else:
+                response = {"request": request, "replyId": replyId,
+                            **({"words": words} if words is not None else {"selections": selections})}
             with opened(run) as store, store.transaction():
                 current = store.cursor().decision
                 if current != request:

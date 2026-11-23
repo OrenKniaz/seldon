@@ -192,6 +192,9 @@ def _render_question(question, provider="codex", images=(), *, prompts2=None, pl
     Pass an explicit arm for offline replay and the actual attachment paths for that invocation.
     """
     from .questions import labelled, reviewed_brief
+    if question.get("renderContext", {}).get("lead2"):
+        from .lead2.prompts import render
+        return render(question)
     image_directions = NATIVE[provider].prompt(images)
     if question["execution"].get("walk"):
         instructions = question["prompt"]

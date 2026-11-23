@@ -650,7 +650,7 @@ class AnswerRejected(ValueError):
         self.answer = answer
 
 
-def ask(provider, question, record, retries=2):
+def ask(provider, question, record, retries=2, normalise=None):
     original = question
     rejected = []
     for attempt in range(retries + 1):
@@ -659,6 +659,8 @@ def ask(provider, question, record, retries=2):
         answer = None
         try:
             decoded = json.loads(raw)
+            if normalise:
+                decoded = normalise(decoded, question["schema"])
             changes = render_constraint_values(decoded) if original["kind"] == "ALIGN" else []
             validate(decoded, question["schema"])
             answer = decoded["answer"]
