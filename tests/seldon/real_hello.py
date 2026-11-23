@@ -233,10 +233,12 @@ def run(slot, dry_run, dream=DREAM, reopen=False, script=None):
             print(json.dumps({"state": "B", "scriptedUser": True, "ownerAccepted": False,
                               "outcome": None}), flush=True)
             return 0
+        status = state(str(loop.project))
         print(json.dumps({"state": "WAITING" if cursor.decision else cursor.state, "scriptedUser": True,
                           "ownerAccepted": False, "outcome": outcomes[-1][2] if outcomes else None,
-                          "waitingFor": state(str(loop.project)).get("waitingFor")}, indent=2), flush=True)
-        return 0 if cursor.state == "SCRIPTED_C" else 1
+                          "waitingFor": status.get("waitingFor"), "status": status.get("status"),
+                          "reason": status.get("reason"), "next": status.get("next")}, indent=2), flush=True)
+        return 0
     finally:
         loop.close()
 

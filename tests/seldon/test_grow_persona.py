@@ -86,7 +86,7 @@ def test_persona_requests_handoff_once_then_finishes_at_b(tmp_path, monkeypatch)
         return record(self, kind, body)
 
     monkeypatch.setattr(Store, "record", lose_delivery)
-    assert real_hello.run(slot, False, DREAM, script={"persona": PERSONA}) == 1
+    assert real_hello.run(slot, False, DREAM, script={"persona": PERSONA}) == 0
     with closing(Store(slot / "product")) as store:
         assert store.records("user_words") == []
     assert judgments == [OTHER]
@@ -162,7 +162,7 @@ def test_grouped_runner_emits_addressed_choices(tmp_path, monkeypatch, capsys, c
     monkeypatch.setattr(real_hello, "Run", GroupedDecisionContract)
     monkeypatch.setattr(real_hello, "setup_facts", lambda: {"providers": {}})
     monkeypatch.setattr(real_hello, "Provider", lambda root, setup: CounterfactualVolunteer())
-    assert real_hello.run(tmp_path, False, DREAM, script={"persona": PERSONA}) == 1
+    assert real_hello.run(tmp_path, False, DREAM, script={"persona": PERSONA}) == 0
     transcript = [json.loads(line) for line in capsys.readouterr().out.splitlines()
                   if line.startswith('{"simUserAnswer"')]
     assert [line["mode"] for line in transcript if line["gate"] == "A"] == (

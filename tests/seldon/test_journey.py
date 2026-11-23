@@ -1634,7 +1634,7 @@ def test_lead_sizes_by_builder_session(tmp_path, monkeypatch, staging):
                                  "guard-feedback", "incomplete-witness", "unrelated-witness", "carry-witness",
                                  "carry-with-limit", "owner-interruption", "keep-building", "builder-stalled",
                                  "keep-building-off", "guard-once", "scope-note", "absolute-evidence",
-                                 "extreme-advisory", "undeclared-credit",
+                                 "extreme-advisory", "undeclared-credit", "environment-limit",
                                  "d01-evidence", "d01-evidence-off", "guide-coached",
                                  "killed-work", "killed-before-thread"])
 def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
@@ -1685,9 +1685,11 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     owner's exact words first and the revised proof standard before its receipt. bound-note exercises the
     old brief switch. Looking only at stored WORK facts misses a renderer that sends the wrong brief.
     keep-building catches an early status receipt becoming a user question or a cold builder start.
+    environment-limit catches a built milestone being resumed for a physical-device check, or
+    losing the reason before C. The other limit arms originate in guard findings or replayed commands.
     builder-stalled catches rewritten status prose masking a repeated tree and bypassing planner options.
     Existing repair arms resume only after proof or an explicit owner decision. keep-building-off
-    confirms the same early receipt follows the original routing in the control arm.
+    confirms a proof fault still follows the original routing in the control arm.
     Killed WORK catches a controller exit before result.json strands an approved build.
     These arms kill the controller with partial product writes and check both native resume
     and a fresh call without a thread. Existing resumes all have a completed recording.
@@ -1697,7 +1699,7 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     from seldon import frontdoor, lead
     from seldon.decisions import Waiting
 
-    milestone_count = 2 if arm in ("cumulative-repair", "unchanged") else 1
+    milestone_count = 2 if arm in ("cumulative-repair", "unchanged", "environment-limit") else 1
     killed_work = arm in ("killed-work", "killed-before-thread")
     if killed_work and sys.platform != "win32":
         pytest.skip("Controller death tears down the native Windows Job")
@@ -1724,6 +1726,10 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
         dream += "\n" + interruption
     if arm == "guard-once":
         dream += "\nReject unknown flags such as --unknown the same way as --help."
+    device_check = "Run the greeting from a physical accessibility terminal"
+    device_reason = "No physical accessibility terminal is connected to this build environment."
+    if arm == "environment-limit":
+        dream += f"\n{device_check}."
     draft = questions.consequential_round_example()
     draft.update(questions=[], recommendation="done")
     vision = draft["vision"]
@@ -1740,6 +1746,9 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
     ]
     vision["quality"] = [{"handle": "exact", "criterion": "Reject an unsupported argument with useful usage",
                           "verification": "Compare exit status and streams", "constraints": [], "sources": ["kickoff"]}]
+    if arm == "environment-limit":
+        vision["quality"].append({"handle": "device", "criterion": "Greet on the physical terminal",
+                                  "verification": device_check, "constraints": [], "sources": ["kickoff"]})
     planned = []
     for story in vision["stories"]:
         name = story["handle"]
@@ -1752,6 +1761,10 @@ def test_lead_milestones_golden(tmp_path, monkeypatch, arm):
                              "notMetIf": "The command succeeds or omits usage."})
             if arm == "guard-once":
                 promises[-1]["action"] = "Pass --help or an unknown flag"
+            if arm == "environment-limit":
+                promises.append({"vision": "quality:device", "action": device_check,
+                                 "result": "The connected terminal shows Hello, Ada!",
+                                 "notMetIf": "The connected terminal cannot display the greeting."})
         planned.append({"outcome": expected, "promises": promises, "design": "Read a positional name in Python."})
     reviewed_rejection = {"vision": "quality:exact", "action": "Run `python hello.py --help`",
                           "result": "Exit 2 with Usage: pass a name on stderr and empty stdout",
@@ -1864,7 +1877,7 @@ if arm == "bound-note":
     assert "\nCoaching\n" not in prompt and "Use one runnable path" in prompt
 assert "`python hello.py --help`" in facts["Owner words"]["Dream"]
 if arm in ("keep-building", "builder-stalled", "keep-building-off"):
-    assert ("Return when done or blocked" in prompt) is (arm != "keep-building-off")
+    assert "Use work remains only for unfinished implementation" in prompt
     partial = Path("hello.py")
     if "resume" in args:
         assert args[args.index("resume") + 1] == "milestone-builder"
@@ -1880,7 +1893,8 @@ if arm in ("keep-building", "builder-stalled", "keep-building-off"):
                      else "build the CLI" if "resume" in args else "implement the greeting")
         summary = f"The milestone is incomplete. The next step is to {next_step}."
         checks = [{"command": [sys.executable, "-B", "hello.py", "Ada"], "promises": ["scopeIn:hello"]}]
-        receipt = {"outcome": "proof fault", "summary": summary, "question": "", "checkPaths": [],
+        receipt = {"outcome": "proof fault" if arm == "keep-building-off" else "work remains",
+                   "summary": summary, "question": "", "checkPaths": [], "unverified": [],
                    "checks": checks if partial.exists() else []}
         print(json.dumps({"type": "item.completed", "item": {"type": "agent_message",
                           "text": json.dumps({"answer": receipt})}}))
@@ -1891,7 +1905,7 @@ if arm in ("keep-building", "builder-stalled", "keep-building-off"):
 if arm == "plan-owner" and "positional" in facts["Approved spec"]["how"]:
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(
         {"answer": {"outcome": "plan correction", "summary": "The approved design has an ambiguous parser.",
-                    "checks": [], "checkPaths": [], "question": ""}})}}),
+                    "checks": [], "checkPaths": [], "unverified": [], "question": ""}})}}),
           flush=True)
     print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
     raise SystemExit
@@ -1976,10 +1990,10 @@ elif "resume" in args:
     assert "Observed: Broken, Ada!" in facts["Exact failure"]
     if arm != "unchanged":
         implement("hello", "Hello")
-else:
+elif arm != "environment-limit":
     implement("hello", "Broken")
     Path("checks/hello.py").write_text("print('Hello, Ada!')\n", encoding="utf-8")
-if name == "bye":
+if name == "bye" and arm != "environment-limit":
     check_paths.append("checks/hello.py")
     checks.append({"vision": "scopeIn:hello", "purpose": "Proposed replacement",
                    "command": [sys.executable, "-B", "checks/hello.py"], "expectedEvidence": "Hello, Ada!"})
@@ -2060,7 +2074,10 @@ if arm in ("missing-check", "guard-repair", "guard-once"):
     elif arm != "guard-once":
         checks[0]["promises"].append("tryItGuide")
 receipt = {"outcome": "done", "summary": f"A visitor can run {name}. Resumed: {'resume' in args}.",
-           "checks": checks, "checkPaths": check_paths, "question": ""}
+           "checks": checks, "checkPaths": check_paths, "question": "", "unverified": []}
+if arm == "environment-limit" and name == "hello":
+    receipt["unverified"] = [{"promise": "quality:device", "action": facts["Promises"]["quality:device"]["action"],
+                              "reason": "No physical accessibility terminal is connected to this build environment."}]
 # Retained e2dc3f5 lh01 r57 and lh02 r40, with the fixture's runnable witnesses attached.
 if arm == "lh01":
     receipt.update(outcome="question", summary=(
@@ -2213,6 +2230,13 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
 
             assert kind == "JUDGE"
             work = Path(question["execution"]["walk"])
+            if arm == "environment-limit" and "scopeIn:bye" not in facts["Subjects"]:
+                limit, = facts["Unverified checks"]
+                assert limit == {"promise": "quality:device", "action": device_check, "reason": device_reason,
+                                 "observed": False, "commit": facts["Candidate commit"], "source": limit["source"]}
+            if arm == "environment-limit" and "scopeIn:bye" in facts["Subjects"]:
+                limit, = facts["Earlier unverified checks"]
+                assert limit["commit"] != facts["Candidate commit"] and limit["reason"] == device_reason
             if arm == "hello-reopen":
                 return invoke(question, started)
             assert (work / questions.GUIDE_PATH).is_file()
@@ -2441,6 +2465,13 @@ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
         if gate == "C" and arm == "proof-owner":
             assert request["subject"]["unverified"] == {
                 "guard:sourceAcceptance": "not judged: No independent action recorded."}
+        if gate == "C" and arm == "environment-limit":
+            subject = request["subject"]
+            assert subject["unverified"] == {"guard:quality:device": f"not judged: {device_check}: {device_reason}"}
+            limit, = subject["guard"]["limitations"]
+            assert limit["observed"] is False and limit["reason"] == device_reason
+            assert any(row["exitCode"] == 0 and "scopeIn:hello" in row["requirements"]
+                       for row in subject["observations"])
         if gate == "C" and arm == "guard-feedback":
             assert request["subject"]["guard"]["feedback"] == [
                 {"step": "Reject bad input", "note": "Usage is easy to scan."}]
@@ -2592,6 +2623,11 @@ Run.reopen(slot / 'product', provider, unexpected).run()
                            for row in failed)
             return
         assert cursor.state == "SCRIPTED_C", frontdoor.state(str(project))
+        if arm == "environment-limit":
+            assert [row["kind"] for _, _, row in run.store.records("question")] == [
+                "ALIGN", "MILESTONES", "REVIEW", "WORK", "JUDGE", "WORK", "JUDGE"]
+            assert not run.store.records("lead_failure")
+            assert run.store.records("outcome")[-1][2]["verification_complete"] is False
         if killed_work:
             assert run.store.records("outcome")[-1][2]["verification_complete"] is True
         if arm in ("scope-note", "absolute-evidence"):
@@ -2721,6 +2757,8 @@ Run.reopen(slot / 'product', provider, unexpected).run()
         elif arm == "unrelated-witness":
             assert len(sessions) == 1 and not run.store.records("lead_failure")
             assert run.store.records("outcome")[-1][2]["verification_complete"] is False
+        elif arm == "environment-limit":
+            assert len(sessions) == 2 and sessions[0] != sessions[1]
         elif milestone_count == 1:
             assert len(sessions) == (2 if arm == "plan-owner" else 1)
         else:

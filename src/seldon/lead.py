@@ -14,17 +14,21 @@ from .states import advance
 from .store import encode
 
 RECEIPT = obj(answer=obj(
-    outcome=choice("done", "question", "plan correction", "proof fault"),
+    outcome=choice("done", "work remains", "question", "plan correction", "proof fault"),
     summary=TEXT, checks=array(obj(promises=array(TEXT, 1), command=array(TEXT, 1))),
+    unverified=array(obj(promise=TEXT, action=TEXT, reason=TEXT)),
     checkPaths=REFS, question={"type": "string"}))
+RETURN_RULES = ("Return done for a built milestone. Link runnable checks to the promises they exercise. "
+                "For each check the environment prevents, put its promise handle, action and reason in "
+                "unverified. An unavailable check can coexist with runnable checks for the same promise. "
+                "Use work remains only for unfinished implementation. Use question for required input. ")
 WRITE_RULES = (
     "Write the product, semantic checks and try-it guide in the assigned workspace. Preserve accepted "
     "behavior and earlier witnesses. You may use provider-native sub-agents and skills within this "
     "assignment; wait for them to finish. Keep Seldon's store, decisions and proof untouched. Do not "
     "commit or change global settings. Return unattended commands with handles for every promise "
     "they cover, including tryItGuide for the walkthrough. Use headless browsers. List all witness files "
-    "in checkPaths. Return done when written. Put doubts in summary and leave question empty unless "
-    "you need an answer. " + questions.GUIDE_WALKTHROUGH
+    "in checkPaths. " + RETURN_RULES + questions.GUIDE_WALKTHROUGH
 )
 BOUND_RULES = ("Write checks against exactly the approved action, result and notMetIf. "
                "Put walkthrough scratch, fresh copies, dependencies and generated build outputs "
@@ -265,7 +269,7 @@ def render_thin_builder(question):
         "Write and run your regression checks against the approved standards. Preserve existing checks and fix reproduced defects.",
         "Never open desktop apps. Use TEMP for scratch. Wait for any provider-native sub-agents and skills you use. Leave commits and global settings alone.",
         "Write docs/try-it.md and an unattended clean-copy walkthrough in docs/try-it/. Exercise each surface, stop what you start, and log actual steps and results as a JSON array in SELDON_EVIDENCE_DIR/operation-lifecycle.json. Record an unavailable runtime with observed=false and a reason.",
-        "Return when done or blocked. List checkPaths and commands with their promise handles, including tryItGuide. Use question for required input.",
+        "List checkPaths and commands with their promise handles, including tryItGuide. " + RETURN_RULES,
     ))
     sections.extend(("How we work\n" + rules, "Return schema\n" + encode(question["schema"]),
                      "Example receipt\n" + encode(question["examples"][0])))
@@ -390,10 +394,11 @@ def build(store, provider, cursor):
         if cursor.requestedChange:
             facts["Owner direction"] = store.read(cursor.requestedChange)["words"]
         path = "docs/try-it/walkthrough.py"
-        example = {"outcome": "done", "summary": "A visitor can greet Ada.", "question": "", "checkPaths": [path],
+        example = {"outcome": "done", "summary": "A visitor can greet Ada.", "question": "",
+                   "checkPaths": [path], "unverified": [],
                    "checks": [{"command": ["python", path], "promises": [next(iter(facts["Promises"])), "tryItGuide"]}]}
         mission = ("Keep all tooling headless. Implement now and continue until every B promise is built and "
-                   "checked. Return only when done or truly blocked. Put any required outside input in question. "
+                   "checked wherever the environment allows. Return only when done or truly blocked. "
                    if keep_building else "")
         question = questions.question("WORK", mission + (BOUND_RULES if features.enabled("leadBoundProof") else
             "Check the full approved result and diagnostic meaning. A missing product must fail its check. ")
@@ -434,10 +439,10 @@ def build(store, provider, cursor):
     returned = store.read(cursor.leadReturn)
     answer = returned["answer"]
     question, outcome = answer.get("question", "").strip(), answer.get("outcome")
-    covered = {promise for check in answer.get("checks", ()) for promise in check["promises"]}
-    unfinished = (keep_building and not question and outcome in ("question", "proof fault")
-                  and bool(obligations(item, commitments(store, cursor)).keys() - covered))
-    if "error" not in returned and (unfinished or question or not covered and outcome != "done"):
+    unfinished = keep_building and not question and outcome == "work remains"
+    blocked = outcome in ("work remains", "plan correction") or (
+        outcome in ("question", "proof fault") and not answer.get("checks"))
+    if "error" not in returned and (question or blocked):
         _, candidate, _ = gitwork.snapshots(assignment["workspace"], assignment["base"], ["**"], [], cursor.scratch)
         owner = "Builder" if unfinished else "Planner" if question or outcome != "proof fault" else "Seldon"
         return fail(store, cursor, question or answer["summary"], owner, candidate=candidate,
@@ -494,6 +499,12 @@ def prove(store, provider, cursor):
     try:
         if "error" in returned:
             raise ValueError(returned["error"])
+        limits = receipt.get("unverified", [])
+        for limit in limits:
+            if limit["promise"] not in subjects and limit["promise"] != "tryItGuide":
+                raise ValueError(f"Unverified check names an unknown promise: {limit['promise']}.")
+            if not limit["action"].strip() or not limit["reason"].strip():
+                raise ValueError("Each unverified check needs an action and an environment reason.")
         workspace = assignment["workspace"] if features.enabled("leadNoFalseAmend") else None
         checks, omitted = proof.milestone_checks(store, previous, cursor.wave, current, receipt, candidate, workspace)
     except ValueError as error:
@@ -506,7 +517,8 @@ def prove(store, provider, cursor):
         if cursor.requestedChange:
             facts["Recovery direction"] = store.read(cursor.requestedChange)["words"]
         question = questions.question("RECEIPT",
-            "Correct the receipt for this frozen candidate. Reference existing witness files and commands.",
+            "Correct the receipt for this frozen candidate. Preserve valid unverified checks. "
+            "Reference existing witness files and commands.",
             facts, RECEIPT,
             [work_question["examples"][0]["answer"]])
 
@@ -523,7 +535,9 @@ def prove(store, provider, cursor):
                                      "selections": [s["label"] for s in row.get("selections", [])]}
                                     for _, _, row in store.records("approval") if row.get("userWords")]
     judge, verdict = judgment.milestone(
-        store, provider, base, candidate, subjects, current, green, owner=owner)
+        store, provider, base, candidate, subjects, current, green, owner=owner,
+        unverified=[{**limit, "observed": False, "commit": candidate, "source": cursor.leadReturn}
+                    for limit in limits])
     amendments, fixes = verdict["amendments"], verdict["fixes"]
     carried = [{**item, "judge": judge, "commit": candidate} for item in verdict["findings"]
                if item.get("carry") and features.enabled("leadWitnessCarry")]

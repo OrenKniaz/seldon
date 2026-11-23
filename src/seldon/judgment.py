@@ -58,11 +58,12 @@ def _check_result(row):
             "fileCleanup", "evidenceFiles") if key in row}
 
 
-def milestone(store, provider, base, commit, subjects, current, refs, *, owner=None):
+def milestone(store, provider, base, commit, subjects, current, refs, *, owner=None, unverified=()):
     cursor = store.cursor()
     source, prior = next(((ref, row) for ref, _, row in reversed(store.records("lead_verdict"))
                           if (row["milestone"], row["B"]) == (cursor.wave, cursor.B)), (None, {}))
-    if prior.get("commit") == commit and (not owner or
+    limit_source = unverified[0]["source"] if unverified else None
+    if prior.get("commit") == commit and prior.get("unverifiedSource") == limit_source and (not owner or
             list(map(store.read, prior.get("observations", []))) == list(map(store.read, refs))):
         return source, prior
     prior = prior if prior.get("fixes") and prior["commit"] != commit else {}
@@ -96,7 +97,12 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
     concrete = features.enabled("leadNoFalseAmend")
     amendment = [obj(**finding, kind=choice("amend"), evidence=TEXT, field=field, replacement=TEXT)] if concrete else []
     carry = features.enabled("leadWitnessCarry")
-    carried = store.read(cursor.productVerdict).get("carriedWitnesses", []) if cursor.productVerdict else []
+    checkpoint = store.read(cursor.productVerdict) if cursor.productVerdict else {}
+    carried = checkpoint.get("carriedWitnesses", [])
+    published_limits = store.read(checkpoint["judge"]).get("limitations", []) if checkpoint else []
+    earlier = list({(f["promise"], f["action"]): f
+                    for f in [*published_limits, *prior.get("limitations", [])]
+                    if f.get("observed") is False and f["promise"] in subjects}.values())
     witness = [obj(**defect["properties"], witnessPath=TEXT, provedAction=POSITION)] if carry else []
     baseline = {"type": "string"}
     passing = {ref: row for ref, row in executed.items() if row["exitCode"] == 0}
@@ -161,6 +167,11 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
     question = questions.question("JUDGE",
         walk + " A defect selects the violated B field "
         "and links a one-based action or an executed observation for that promise. "
+        + ("The builder's unverified checks name actions the environment prevented. Walk the available "
+           "steps and report their actual results. A missing environment is a disclosed limit; "
+           "report any independently reproduced product defect as usual. " if unverified else "")
+        + ("Carry forward earlier environment limits. Credit the affected promise only if you independently "
+           "observe the previously unavailable action on this candidate. " if earlier else "")
         + ("For a broken retained witness, give witnessPath and provedAction if a separate successful action "
            "demonstrates the same promise. Recheck carried gaps. " if carry else "")
         + "Use plain commands in the supplied copies. Record denials without retrying. "
@@ -168,6 +179,8 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
         {**context, "Candidate": str(work), "Candidate commit": commit, "Base": str(before),
          "Guide path": questions.GUIDE_PATH,
          "Observations": {ref: {**row, **judge_fields(row)} for ref, row in packet.items()},
+         **({"Unverified checks": unverified} if unverified else {}),
+         **({"Earlier unverified checks": earlier} if earlier else {}),
          **({"Carried witness tasks": carried} if carried and carry else {})}, schema,
         [{"actions": [{"action": "Run hello Ada", "actual": "Hello, Ada!", "promises": [next(iter(subjects))],
                       "baseline": "Run hello Ada: entry point absent.", "screenshots": []}],
@@ -259,8 +272,10 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
                   "observations": refs, "previous": source if prior else None, "baselines": sorted(baselines),
                   "fixes": fixes, "findings": findings, "evidenceFiles": prior.get("evidenceFiles", {}) | files,
                   "amendments": amendments,
-                  "limitations": [f for f in prior.get("limitations", []) if f["promise"] not in affected]
-                                 + [f for f in findings if f["kind"] == "uncertain"]}
+                  **({"unverifiedSource": limit_source} if limit_source else {}),
+                  "limitations": [f for f in prior.get("limitations", []) if f["promise"] not in affected
+                                  and f.get("observed") is not False]
+                                 + [f for f in findings if f["kind"] == "uncertain"] + list(unverified)}
         result["actions"] = actions + [
             {**a, "promises": kept} for a in prior.get("actions", [])
             if (kept := [p for p in a["promises"] if p not in affected])]
@@ -273,6 +288,9 @@ def milestone(store, provider, base, commit, subjects, current, refs, *, owner=N
             result["reuse"] = credits + kept_credits
             reused.update(p for credit in kept_credits for p in credit["promises"])
         linked = reused | {p for a in result["actions"] for p in a["promises"]}
+        current_limits = {(f["promise"], f["action"]) for f in unverified}
+        result["limitations"] += [f for f in earlier if f["promise"] not in (walked | reused)
+                                  and (f["promise"], f["action"]) not in current_limits]
         missing = (dict.fromkeys(current.keys() - baselines, "Failure on the base was not observed.")
                    | dict.fromkeys(subjects.keys() - linked, "No independent action recorded."))
         missing.update(dict.fromkeys(refresh - walked, "No current action recorded for the repair scope."))
@@ -584,8 +602,10 @@ def not_judged(store):
             if row.get("observed") is False and isinstance(step, str) and step.strip():
                 reason = row.get("reason")
                 limits.append(f"{step}: {reason}" if isinstance(reason, str) and reason.strip() else step)
-    deferred.update({f"guard:{item['promise']}": "not judged: " + item["reason"]
-                     for item in guard.get("limitations", [])})
+    for item in guard.get("limitations", []):
+        key = f"guard:{item['promise']}"
+        reason = f"{item['action']}: {item['reason']}" if item.get("observed") is False else item["reason"]
+        deferred[key] = f"{deferred[key]}\n{reason}" if key in deferred else "not judged: " + reason
     if limits:
         deferred["tryItGuide:walkthrough"] = "not judged: " + "; ".join(dict.fromkeys(limits))
     return deferred
