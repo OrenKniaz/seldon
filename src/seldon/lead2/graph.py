@@ -141,22 +141,24 @@ class Delta:
     def links(self) -> set[tuple[str, str]]:
         return set(self.before.links) ^ set(self.after.links)
 
-    def describe(self) -> tuple[str, ...]:
+    def describe(self, *, references=True) -> tuple[str, ...]:
         changes = []
         for ref in sorted(self.nodes):
             old, new = self.before.nodes.get(ref), self.after.nodes.get(ref)
+            label = f" {ref}" if references else ""
             if old is None:
-                changes.append(f"Added {new['kind']} {ref}: {_body(new)}")
+                changes.append(f"Added {new['kind']}{label}: {_body(new)}")
             elif new is None:
-                changes.append(f"Retired {old['kind']} {ref}: {_body(old)}")
+                changes.append(f"Retired {old['kind']}{label}: {_body(old)}")
             else:
                 fields = [f"{key} from {old.get(key)!r} to {new.get(key)!r}"
                           for key in sorted(old.keys() | new.keys()) if old.get(key) != new.get(key)]
-                changes.append(f"Amended {new['kind']} {ref}: " + ", ".join(fields))
+                changes.append(f"Amended {new['kind']}{label}: " + ", ".join(fields))
         for source, target in sorted(self.links):
             verb = "Linked" if (source, target) in self.after.links else "Unlinked"
             graph = self.after if verb == "Linked" else self.before
-            changes.append(f"{verb} {_label(graph, source)} → {_label(graph, target)}")
+            left, right = (_label(graph, ref, references) for ref in (source, target))
+            changes.append(f"{verb} {left} → {right}")
         return tuple(changes)
 
     def reopens(self) -> set[str]:
@@ -189,8 +191,8 @@ def _body(node: dict) -> str:
     return " / ".join(str(value) for key, value in sorted(node.items()) if key != "kind")
 
 
-def _label(graph: Graph, ref: str) -> str:
+def _label(graph: Graph, ref: str, references: bool) -> str:
     node = graph.nodes[ref]
     kind = node["kind"]
     field = next(iter(NODE_BODIES[kind]["properties"]))
-    return f"{kind} {node[field]!r} ({ref})"
+    return f"{kind} {node[field]!r}" + (f" ({ref})" if references else "")

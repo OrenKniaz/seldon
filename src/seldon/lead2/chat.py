@@ -1,11 +1,13 @@
 """C8/C20: present fresh Lead choices through the existing bound chat records."""
 
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from .. import decisions
 from ..processes import UncertainCleanup, reconcile_call
+from ..providers import role_for
+from ..states import LEAD2_BUILT as BUILT
 from ..states import LEAD2_MODE as MODE
 from ..states import LEAD2_READY as READY
 from .store import SpecStore
@@ -37,15 +39,25 @@ def state(store, cursor, run, active, submitted=False, full_spec=False):
               "run": str(Path(run).resolve()), "status": "RUNNING" if active else "PAUSED",
               "state": cursor.state, "controller": "running" if active else "idle",
               "units": {}, "outcome": None, "waitingFor": None}
-    if cursor.state == READY:
+    metrics = {row["attempt"]: row for _, _, row in store.records("lead2_call_metric")}
+    result["calls"] = [metrics.get(ref, {"attempt": ref, "kind": row["operation"],
+                                       "elapsedSeconds": None, "freshPlusOutputTokens": None})
+                       for ref, _, row in store.records("attempt")]
+    if cursor.state in (READY, BUILT):
         approval = store.read(cursor.B)
         subject = approval["subject"]
         plan = store.read(subject["plan"])
-        result.update(status="PLANNED", next="The spec and build order are approved at B.", approvedSpec={
+        result.update(approvedSpec={
             "revision": subject["lead2_revision"], "approval": cursor.B, "scripted": approval["scripted"],
             "buildOrder": plan["build_order"], "accessNeeds": plan.get("access", []),
             "demonstrations": approval["demonstrations"],
         })
+        spec = SpecStore(store)
+        result["build"] = spec.build_status()
+        result["build"]["unverified"] = [asdict(obs) for obs in spec.observations()
+                                         if obs.outcome == "not-verifiable-here"]
+    if cursor.state == BUILT:
+        result.update(status="BUILT", next="The builder returned the candidate and its code map.")
     elif cursor.state == "STOPPED":
         outcomes = store.records("outcome")
         result.update(status="STOPPED", next="Use start with a new folder for your next dream.",
@@ -80,22 +92,28 @@ def state(store, cursor, run, active, submitted=False, full_spec=False):
 
 
 def _show_attempt(store, cursor, result):
-    actor = "reviewer" if cursor.state == "L2-REVIEW" and not cursor.requestedChange else "planner"
+    actor = ("builder" if cursor.state == READY else
+             "reviewer" if cursor.state == "L2-REVIEW" and not cursor.requestedChange else "planner")
     if cursor.state in ("ALIGN", "A"):
         round_number = 1 + sum(r["gate"] == "A" for _, _, r in store.records("decision_request"))
         result["reason"] = f"The planner is working on round {round_number}."
     else:
         result["reason"] = f"The {actor} is working."
-    row = next(reversed(store.records("attempt")), None)
+    ended = {row["attempt"] for kind in ("attempt_end", "lead2_call_metric", "provider_failure")
+             for _, _, row in store.records(kind)}
+    latest = {body["operation"]: (ref, body) for ref, _, body in store.records("attempt")}
+    row = max((body for ref, body in latest.values() if ref not in ended),
+              key=lambda body: body["startedAt"], default=None)
     if not row:
         return
-    ref, _, attempt = row
-    if any(end["attempt"] == ref for _, _, end in store.records("attempt_end")):
-        return
-    elapsed = max(0, int(time.time() - attempt["startedAt"]))
+    elapsed = max(0, int(time.time() - row["startedAt"]))
     duration = f"{elapsed // 60} min" if elapsed >= 60 else f"{elapsed} s"
-    number = attempt.get("number", 1)
-    result["attempt"] = {"number": number, "elapsedSeconds": elapsed, "role": actor}
+    number = row.get("number", 1)
+    role = role_for(row["operation"], {})
+    result["attempt"] = {"number": number, "elapsedSeconds": elapsed,
+                         "role": "builder" if role == "build" else role}
+    if "silenceWindowSeconds" in row:
+        result["attempt"]["silenceWindowSeconds"] = row["silenceWindowSeconds"]
     result["reason"] += f" Attempt {number}, {duration} elapsed."
 
 

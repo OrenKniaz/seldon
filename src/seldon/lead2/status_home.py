@@ -14,8 +14,8 @@ from ..store import Store, encode
 from .status_read import HOME_STAGES, HomeSummary, last_activity, summary
 
 PAGE_SIZE = 20
-TONES = {"Waiting on you": "wait", "Building": "build", "Fixing": "fix", "Done": "done",
-         "Stopped": "stop", "Missing": "stop", "Paused": "stop"}
+TONES = {"Waiting on you": "wait", "Building": "build", "Fixing": "fix", "Review failed": "fix",
+         "Done": "done", "Built": "done", "Stopped": "stop", "Missing": "stop", "Paused": "stop"}
 
 
 def status_template(name):
@@ -54,7 +54,7 @@ def _card(run, plan, now):
     tone = TONES.get(plan.chip, "")
     waiting = tone == "wait"
     pulse = '<span class="pulse" aria-hidden="true"></span>' if waiting else ""
-    completed = plan.stage + (plan.chip == "Done")
+    completed = plan.stage + (plan.chip in ("Built", "Done"))
     current = plan.stage if plan.chip != "Missing" else -1
     marker = "bad" if tone == "fix" else "cur"
     segments = "".join(
@@ -106,13 +106,16 @@ class Home:
         return plan
 
     def sidebar(self, current):
-        rows = self.db.execute("""
-            SELECT home.run, folder, summary FROM home JOIN run ON run.id = home.run
-            ORDER BY activity DESC, home.run DESC LIMIT 5
-        """)
+        with self.db:
+            rows = self.db.execute("""
+                SELECT home.run, folder, summary, earlier FROM home JOIN run ON run.id = home.run
+                ORDER BY activity DESC, home.run DESC LIMIT 5
+            """).fetchall()
+            plans = [(run, self._saved_summary(folder, body) if earlier else
+                      self.refresh(run, folder, HomeSummary(**json.loads(body))))
+                     for run, folder, body, earlier in rows]
         links = []
-        for run, folder, body in rows:
-            plan = self._saved_summary(folder, body)
+        for run, plan in plans:
             active = ' aria-current="page"' if run == current else ""
             css = "plan active" if active else "plan"
             name, state = escape(plan.name), escape(plan.chip)

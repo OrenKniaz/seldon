@@ -289,8 +289,8 @@ def attempts(store, assignment):
             if store.read(body["question"]).get("execution", {}).get("lead") == assignment]
 
 
-def recover_return(store, attempt, question, folder):
-    """Recover a finished builder receipt, or carry its recorded thread into the next turn."""
+def recover_recording(question, folder):
+    """Read the native return and recover the thread from a stopped builder."""
     receipt = folder / "result.json"
     result = json.loads(receipt.read_text("utf-8")) if receipt.is_file() else None
     if result is not None and not result["cleanupVerified"]:
@@ -298,17 +298,34 @@ def recover_return(store, attempt, question, folder):
     stdout = folder / "stdout.bin"
     output = stdout.read_text("utf-8", errors="replace") if stdout.is_file() else ""
     native = recorded(folder)
-    session = native.session(output) or store.read(question)["execution"].get("session")
+    session = native.session(output) or question["execution"].get("session")
     if result is None or result["timedOut"]:
         return None, session
     try:
-        raw = json.loads(native.answer(output))
-        validate(raw, store.read(question)["schema"])
+        return native.answer(output), session
     except RuntimeError:
         return None, session
+
+
+def recover_return(store, attempt, question, folder, normalise=None):
+    """Recover a finished builder receipt, or carry its recorded thread into the next turn."""
+    question = store.read(question)
+    answer, session = recover_recording(question, folder)
+    if answer is None:
+        return None, session
+    try:
+        try:
+            raw = json.loads(answer)
+        except ValueError:
+            if normalise is None:
+                raise
+            raw = answer
+        if normalise:
+            raw = normalise(raw, question["schema"])
+        validate(raw, question["schema"])
     except ValueError as error:
         return store.record("invalid_lead_receipt", {"answer": {}, "error": str(error)}), session
-    return store.record("answer", {"attempt": attempt, "kind": "WORK", "answer": raw["answer"],
+    return store.record("answer", {"attempt": attempt, "kind": "WORK", "answer": raw if normalise else raw["answer"],
                                    "recovered": True}), session
 
 

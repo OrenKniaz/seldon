@@ -1,21 +1,29 @@
-"""C1/C18/C23: run Fresh Lead planning independently of the legacy execution loop."""
+"""C1/C18/C23: run Fresh Lead independently of the legacy execution loop."""
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 from ..decisions import Waiting
 from ..processes import UncertainCleanup
-from ..providers import ProviderFailure
+from ..providers import Frozen, ProviderFailure
 from ..run import Run
-from ..states import TERMINAL
-from . import chat, planning
+from ..states import LEAD2_READY, TERMINAL
+from . import build, chat, planning
+from .store import SpecStore
 
 
 class FreshRun(Run):
     def _reopen(self):
-        # Planning reconciles its own provider call before it launches a replacement.
-        pass
+        """The selected phase reconciles its own provider work."""
 
     def step(self):
+        if self.store.cursor().state == LEAD2_READY:
+            if not hasattr(self, "_chunk_pool"):
+                self._chunk_pool = ThreadPoolExecutor(max_workers=1)
+                self._chunk_reviews = {}
+            build.step(self.store, SpecStore(self.store), self.provider, self.user,
+                       self._chunk_pool, self._chunk_reviews)
+            return self.store.cursor().state
         return planning.step(self.store, self.provider, self.user)
 
     def run(self, wait=None):
@@ -28,20 +36,32 @@ class FreshRun(Run):
         except Exception as error:
             with self.store.transaction():
                 self.store.record("lead2_fault", {"reason": str(error)})
-                self.store.cursor(replace(self.store.cursor(), failure=_reason(error)))
+                cursor = self.store.cursor()
+                self.store.cursor(replace(cursor, failure=_reason(error, cursor.state == LEAD2_READY)))
         finally:
+            self._finish_reviews()
             self._lease.close()
         return self.store.cursor()
 
+    def close(self):
+        self._finish_reviews()
+        super().close()
 
-def _reason(error):
+    def _finish_reviews(self):
+        if pool := self.__dict__.pop("_chunk_pool", None):
+            pool.shutdown()
+
+
+def _reason(error, building):
     if isinstance(error, planning.UnusableAnswer):
         return str(error)
-    cause = error.__cause__ or error
+    cause = error if isinstance(error, ProviderFailure) else error.__cause__
     if (isinstance(error, UncertainCleanup)
             or isinstance(cause, ProviderFailure) and not cause.cleanup_verified):
-        return "Waiting for the planner's process cleanup to be verified."
+        return "Waiting for provider process cleanup to be verified."
     if isinstance(cause, ProviderFailure):
-        return ("The planner timed out." if "timed out" in str(cause).lower()
-                else "The planner could not answer.")
-    return "Planning stopped unexpectedly. See the run log."
+        if isinstance(cause, Frozen):
+            return str(cause)
+        actor = "Provider" if building else "The planner"
+        return actor + (" timed out." if "timed out" in str(cause).lower() else " could not answer.")
+    return ("Build" if building else "Planning") + " stopped unexpectedly. See the run log."

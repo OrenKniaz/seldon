@@ -44,7 +44,8 @@ class ProviderFailure(RuntimeError):
 
 
 def role_for(kind, context):
-    return {"REVIEW": "reviewer", "WORK": "build", "JUDGE": "judge", "RECEIPT": "judge", "FLOW": "demo", "PRODUCT": "demo",
+    return {"REVIEW": "reviewer", "LEAD2-CHUNK": "reviewer", "WORK": "build", "JUDGE": "judge",
+            "RECEIPT": "judge", "FLOW": "demo", "PRODUCT": "demo",
             "DECIDE": "decider"}.get(kind, "planner")
 
 
@@ -58,6 +59,45 @@ class InputRejected(ProviderFailure):
 
 class Deadline(ProviderFailure):
     """A verified WORK or guard deadline. Only WORK is charged to the unit."""
+
+
+class Frozen(ProviderFailure):
+    """A Lead2 provider stopped emitting native events."""
+
+
+def fresh_tokens(usage):
+    return usage["input_tokens"] - usage.get("cached_input_tokens", 0) + usage["output_tokens"]
+
+
+def codex_total(session):
+    try:
+        if not session or str(uuid.UUID(session)) != session:
+            return None
+    except ValueError:
+        return None
+    root = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
+    path = next(root.rglob(f"*{session}.jsonl"), None)
+    if path is None:
+        return None
+    total = None
+    try:
+        with path.open("rb") as log:
+            for line in log:
+                if b'"type":"token_count"' not in line:
+                    continue
+                try:
+                    info = json.loads(line)["payload"].get("info")
+                    if info:
+                        total = info["total_token_usage"]
+                except (ValueError, KeyError):
+                    continue
+    except OSError:
+        return None
+    return total
+
+
+def lead2_call(question):
+    return question.get("execution", {}).get("lead2") or question.get("renderContext", {}).get("lead2")
 
 
 def session_id(output):
@@ -157,7 +197,7 @@ def codex_command(setup, config, folder, worker, session, images):
         native = ('features.multi_agent', 'skills.include_instructions', 'skills.bundled.enabled')
         options = [opt for opt in options if opt.partition("=")[0] not in native]
         options.extend(key + '=true' for key in native)
-    if not (worker or config.get("walk")):
+    if not (worker or config.get("walk") or config.get("persist")):
         command.append("--ephemeral")
     if not (worker or config.get("walk")):
         options += ['features.shell_tool=false', 'features.code_mode_host=false']
@@ -181,7 +221,8 @@ def recorded(folder):
 def render_question(question, provider="codex", images=(), *, prompts2=None, planner_brief=None):
     prompt, instructions = _render_question(question, provider, images, prompts2=prompts2,
                                             planner_brief=planner_brief)
-    if (question["kind"] == "WORK" and not question["execution"].get("lead")) or question["execution"].get("walk"):
+    execution = question["execution"]
+    if (question["kind"] == "WORK" and not execution.get("lead")) or execution.get("walk"):
         prompt += "\n\n" + desktop.WRITE_RULE
     return prompt, instructions
 
@@ -242,10 +283,17 @@ class Provider:
         role = "build" if context.get("walk") else role_for(kind, context)
         return self.timeout if self.timeout is not None else self.setup["providers"][role]["timeout"]
 
+    def silence_for(self, question):
+        role = role_for(question["kind"], {})
+        return self.setup.get("lead2SilenceSeconds", {}).get(role, 600 if role == "build" else 180)
+
     def prepare(self, question):
         role = role_for(question["kind"], {})
         config = dict(self.setup["providers"][role])
         native = NATIVE[name := config.setdefault("provider", "codex")]
+        fresh = lead2_call(question)
+        if fresh:
+            config["persist"] = True
         if not self.setup.get(name + "Command"):
             raise ProviderFailure(f"{name.title()} executable unavailable; install/authenticate {name} "
                                   "before resuming", False, True)
@@ -258,6 +306,7 @@ class Provider:
         worker = question["kind"] == "WORK"
         if worker:
             cwd = Path(question["execution"]["cwd"])
+        if worker and not question.get("renderContext", {}).get("lead2"):
             if question["execution"].get("lead"):
                 config["lead"] = True
             else:
@@ -278,8 +327,11 @@ class Provider:
         session = question.get("execution", {}).get("session")
         command = native.command(self.setup, {**config, "cwd": cwd}, folder, worker, session, images)
         metadata = {"command": command, "commandLine": subprocess.list2cmdline(command),
-                    "cwd": str(cwd), "timeout": self.timeout_for(question["kind"], question["execution"]),
+                    "cwd": str(cwd), "timeout": None if fresh else
+                    self.timeout_for(question["kind"], question["execution"]),
                     "role": role, "provider": config}
+        if fresh:
+            metadata["silenceWindow"] = self.silence_for(question)
         (folder / "invocation.json").write_text(encode(metadata), encoding="utf-8")
         return folder, metadata
 
@@ -295,22 +347,34 @@ class Provider:
         temp = {key: str(Path(walk).parent / "temp") for key in ("TMP", "TEMP", "TMPDIR")} if walk else {}
         if walk:
             temp["SELDON_EVIDENCE_DIR"] = str(Path(walk).parent / "evidence")
+        silence = invocation.get("silenceWindow")
+        previous = question["execution"].get("session")
+        baseline = codex_total(previous) if silence is not None and name == "codex" else None
         result = execute(invocation["command"], invocation["cwd"], invocation["timeout"],
-                         folder / "prompt.txt", env=desktop.environment(temp), output_dir=folder)
+                         folder / "prompt.txt", env=desktop.environment(temp), output_dir=folder,
+                         **({"silence_window": silence} if silence is not None else {}))
         if result["exitCode"] is None and not result["timedOut"]:
             with (folder / "stderr.bin").open("ab") as diagnostics:
                 diagnostics.write(result["stderr"])
         output = result["stdout"].decode("utf-8", errors="replace")
+        session = native.session(output)
         receipt = {k: v for k, v in result.items() if k not in ("stdout", "stderr")}
         receipt.update(role=invocation["role"], timeout=invocation["timeout"])
         if used := native.usage(output):
             receipt["usage"] = used
+        if silence is not None:
+            total = codex_total(session or previous) if name == "codex" else None
+            used = total if name == "codex" else receipt.get("usage")
+            fresh = fresh_tokens(used) if used and (name != "codex" or not previous or baseline) else None
+            if fresh is not None and baseline:
+                fresh = fresh - fresh_tokens(baseline)
+            receipt.update(silenceWindow=silence, frozen=result["timedOut"],
+                           freshPlusOutputTokens=fresh if fresh is None or fresh >= 0 else None)
         staging = folder / "result.tmp"
         staging.write_text(encode(receipt), encoding="utf-8")
         staging.replace(folder / "result.json")
         stderr = result["stderr"].decode("utf-8", errors="replace")
         diagnostics = output + "\n" + stderr
-        session = native.session(output)
         try:
             if result["timedOut"] or not result["cleanupVerified"]:
                 raise RuntimeError("Provider cleanup unverified" if not result["cleanupVerified"]
@@ -328,6 +392,9 @@ class Provider:
                 term in diagnostics.lower() for term in ("session not found", "no session found",
                     "thread not found", "resume is not supported", "no conversation found"))
             failure_type = ResumeUnavailable if unavailable and not paused else ProviderFailure
+            if result["timedOut"] and silence is not None:
+                raise Frozen(f"{name.title()} emitted no native events for {silence}s.",
+                             True, result["cleanupVerified"], str(folder / "result.json"), session) from error
             if result["timedOut"] and result["cleanupVerified"] and (walk or question["kind"] == "WORK"):
                 failure_type = Deadline
             raise failure_type(f"{name.title()} invocation failed: {error}; {diagnostics[-4096:]}",

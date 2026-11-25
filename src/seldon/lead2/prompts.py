@@ -73,6 +73,14 @@ def question(kind, words, current, *, qualification=None, **facts):
 
 
 def render(question):
+    if question["renderContext"].get("flatAnswer"):
+        prompt, facts = question["prompt"], labelled(question["facts"])
+        if question["kind"] == "WORK":
+            from ..desktop import WRITE_RULE
+            rule = "" if question["execution"].get("session") else WRITE_RULE
+            return "\n\n".join(filter(None, (prompt, facts, rule))), (
+                "Work here. Keep checks headless and generated files out of Git. Do not commit.")
+        return prompt + "\n\n" + facts, "Read the supplied facts and return one typed decision."
     facts = {**question["facts"]}
     prompt = "\n\n".join((facts.pop("Owner's words"), question["prompt"], labelled(facts)))
     return prompt, "Plan in the typed answer. Do not write product code or open desktop windows."

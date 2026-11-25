@@ -7,31 +7,55 @@ from dataclasses import dataclass
 from datetime import datetime
 from textwrap import shorten
 
-from ..states import TERMINAL
+from ..states import LEAD2_BUILT, LEAD2_READY, TERMINAL
+from .chunk_review import feature_status, progress, sent_feedback
 from .evidence import promise_status
 from .store import SpecStore
+from .views import delivery_name
 
 STAGE = {"NEW": 0, "ALIGN": 1, "A": 1, "L2-STACK": 2,
-         "L2-SPEC": 3, "L2-REVIEW": 4, "B": 5, "L2-READY": 5}
+         "L2-SPEC": 3, "L2-REVIEW": 4, "B": 5, LEAD2_READY: 6, LEAD2_BUILT: 6}
 ACTIVITY = ["Your idea", "Asking round {round}", "Agreeing the stack", "Writing the plan",
             "Review {review} of 3", "Preparing your approval"]
-EVENTS = ("transition", "attempt", "answer", "attempt_end", "decision_request", "user_words")
+EVENTS = ("transition", "attempt", "answer", "attempt_end", "decision_request", "user_words",
+          "lead2_chunk", "lead2_chunk_review", "lead2_return")
 HOME_STAGES = ("Your idea", "Align the idea", "Agree the stack", "Write the plan", "Review & fix",
                "You approve", "Build", "Judge walks it", "Your OK")
-BUILD_STAGES = {"BUILD": 6, "PROVE": 7, "CHECK-IN": 7, "C": 8, "ACCEPTED": 8, "SCRIPTED_C": 8}
+BUILD_STAGES = {"C": 8, "ACCEPTED": 8, "SCRIPTED_C": 8}
 INTRO = r"\b(?:I['’]m|I am|My name is) ([A-Z][\w’'-]*(?: [A-Z][\w’'-]*)*)\b"
 
 
 def _frame(state, revision, rounds, reviews, gate="", detail=""):
     stage = 2 if gate.casefold() == "stack" else STAGE[state]
-    activity = ACTIVITY[stage].format(round=rounds, review=max(1, reviews))
-    if state == "L2-READY":
-        detail = "Plan approved at B"
-    elif gate:
+    activity = ACTIVITY[stage].format(round=rounds, review=max(1, reviews)) if stage < 6 else ""
+    if gate:
         detail = {"A": f"Align · round {rounds}", "B": "Approve the plan at B"}.get(gate, gate)
     return dict(stage=stage, revision=revision, rounds=rounds, reviews=reviews,
                 activity="Waiting on you" if gate else detail or activity,
-                detail=detail if gate else "", approved=state == "L2-READY")
+                detail=detail if gate else "", approved=False)
+
+
+def _order(store, approval):
+    return [delivery_name(item) for item in store.read(approval["subject"]["plan"])["build_order"]]
+
+
+def _build_frame(state, order, chunks, sent, started):
+    features = feature_status(order, chunks, sent)
+    # Focus the first repair, then the next build, then the first outstanding review.
+    priorities = ("fixing", "failed", "building", "under review", "passed")
+    index = min(range(len(order)), key=lambda i: priorities.index(features[order[i]]), default=0)
+    complete = state == LEAD2_BUILT
+    length = len(order)
+    chunk = f"chunk {length if complete else index + 1} of {length}" if length else ""
+    status = features[order[index]] if length else "building"
+    activity = ("Build complete" if complete else "Ready to build" if not started else
+                {"fixing": "Fixing", "failed": "Review failed", "building": "Building",
+                 "under review": "Under review", "passed": "Chunks passed"}[status])
+    next_feature = (next((name for name in order if features[name] == "building"), None)
+                    if started and not complete else None)
+    features = [(name, "planned" if value == "building" and name != next_feature else value)
+                for name, value in features.items()]
+    return dict(chunk=chunk, features=features, activity=activity, built=complete)
 
 
 def _timeline(store, revisions):
@@ -39,16 +63,28 @@ def _timeline(store, revisions):
     frames = [_frame(state, revision, rounds, reviews)]
     history = deque((ref, datetime.fromisoformat(when).timestamp()) for ref, when in revisions)
     records = sorted((int(ref[1:]), kind, body) for kind in EVENTS for ref, _, body in store.records(kind))
-    finished = {body["result"]: body["finishedAt"] for _, kind, body in records if kind == "attempt_end"}
+    finished = {body["result"]: body["finishedAt"] for _, kind, body in records
+                if kind == "attempt_end" and "finishedAt" in body}
+    order, chunks, reviews_by_chunk, feedback, last = [], {}, {}, [], {}
+    started = False
 
-    for _, kind, event in records:
+    def frame(detail=""):
+        projected = _frame(state, revision, rounds, reviews, gate, detail)
+        if state in (LEAD2_READY, LEAD2_BUILT):
+            build = _build_frame(state, order, chunks, set(last.get("feedback", [])) | set(feedback), started)
+            if gate:
+                build["activity"] = projected["activity"]
+            projected.update(build)
+        return projected
+
+    for number, kind, event in records:
         detail = ""
         # A revision written by the answer belongs before the transition it caused.
         before = finished.get(event.get("cause"), event.get("startedAt", event.get("finishedAt", 0)))
         subject = event.get("subject", {}).get("lead2_revision", 0) or 0
         while history and (history[0][1] <= before or history[0][0] <= subject):
             revision, _ = history.popleft()
-            frames.append(_frame(state, revision, rounds, reviews, gate))
+            frames.append(frame())
 
         if kind == "transition" and event["unit"] is None:
             if state == "A" and event["next"] == "ALIGN":
@@ -57,6 +93,10 @@ def _timeline(store, revisions):
                 reviews = 0
             gate = ""
             state = event["next"] if event["next"] in STAGE else state
+            if state == LEAD2_READY and event["input"] == "B":
+                order = _order(store, store.read(event["cause"]))
+                frames.append({**_frame("B", revision, rounds, reviews),
+                               "activity": "Plan approved at B", "approved": True})
             if event["event"] == "trace-progress":
                 detail = f"Review {reviews} of 3 · fixing trace gaps"
         elif kind == "decision_request":
@@ -67,15 +107,31 @@ def _timeline(store, revisions):
             reviews += 1
         elif kind == "attempt" and state == "L2-REVIEW" and event["operation"] == "LEAD2-SPEC":
             detail = f"Review {reviews} of 3 · applying your choice"
-        frame = _frame(state, revision, rounds, reviews, gate, detail)
-        if frame != frames[-1]:
-            frames.append(frame)
+        elif kind == "attempt" and state == LEAD2_READY and event["operation"] == "WORK":
+            started = True
+            feedback = store.read(event["question"])["execution"].get("feedback", [])
+        elif kind == "lead2_chunk":
+            ref = f"r{number}"
+            chunks[event["feature"]] = (ref, event, None)
+            reviews_by_chunk[ref] = event["feature"]
+        elif kind == "lead2_chunk_review":
+            chunk_ref = event["chunk"]
+            feature = reviews_by_chunk[chunk_ref]
+            ref, chunk, _ = chunks[feature]
+            if ref == chunk_ref:
+                chunks[feature] = (ref, chunk, (f"r{number}", event["findings"]))
+        elif kind == "lead2_return":
+            last = event
+        projected = frame(detail)
+        if projected != frames[-1]:
+            frames.append(projected)
         if kind == "answer" and (choices := event["answer"].get("stack")):
             frames.append({**_frame("L2-STACK", revision, rounds, reviews),
                            "activity": "Stack recommendations recorded",
                            "detail": " · ".join(choice["decision"] for choice in choices)})
-    for revision, _ in history:
-        frames.append(_frame(state, revision, rounds, reviews, gate))
+    while history:
+        revision, _ = history.popleft()
+        frames.append(frame())
     return state, frames
 
 
@@ -144,7 +200,7 @@ class HomeSummary:
 
     @property
     def earlier(self):
-        return self.chip in ("Done", "Stopped", "Missing")
+        return self.chip in ("Built", "Done", "Stopped", "Missing")
 
 
 def _home_idea(words):
@@ -184,7 +240,15 @@ def summary(store, when):
         raise ValueError("Expected a Fresh Lead run")
     phase = previous or state
     stage = 2 if (gate or "").casefold() == "stack" else STAGE.get(phase, BUILD_STAGES.get(phase, 0))
-    label = "Plan approved at B" if state == "L2-READY" else HOME_STAGES[stage]
+    label = HOME_STAGES[stage]
+    build = {}
+    if phase in (LEAD2_READY, LEAD2_BUILT):
+        cursor = store.cursor()
+        last = store.read(cursor.leadReturn) if cursor.leadReturn else {}
+        build = _build_frame(phase, _order(store, store.read(cursor.B)), progress(store),
+                             sent_feedback(store, last), True)
+        if build["chunk"]:
+            label += f" · {build['chunk']}"
     if reviews:
         label += f" · {reviews} of 3"
     if state in TERMINAL:
@@ -195,6 +259,8 @@ def summary(store, when):
             label = "Done · accepted by you"
         elif state == "SCRIPTED_C":
             label = "Done · scripted acceptance"
+        elif state == LEAD2_BUILT:
+            chip = "Built"
     elif gate:
         chip = "Waiting on you"
         if gate == "B":
@@ -202,7 +268,8 @@ def summary(store, when):
     elif paused or failure:
         chip = "Paused"
     else:
-        chip = "Building" if stage >= 6 else "Planning"
+        chip = (build["activity"] if build.get("activity") in ("Fixing", "Review failed") else
+                "Building" if stage >= 6 else "Planning")
     return HomeSummary(*_home_idea(kickoff["words"].strip()), stage, label, chip, when)
 
 
@@ -227,8 +294,9 @@ def status(store):
     if revision is None:
         revision = spec.snapshot().revision if revisions else 0
     counts = frames[-1]
-    live = _frame(cursor.state if cursor.state in STAGE else state, revision,
-                  counts["rounds"], counts["reviews"], decision.get("gate", ""))
+    live = ({**counts, "revision": revision} if state in (LEAD2_READY, LEAD2_BUILT) else
+            _frame(cursor.state if cursor.state in STAGE else state, revision,
+                   counts["rounds"], counts["reviews"], decision.get("gate", "")))
     if cursor.state == "STOPPED" or not decision and (cursor.failure or (
         (pauses := store.records("lead2_pause")) and pauses[-1][2]["paused"]
     )):
@@ -239,6 +307,14 @@ def status(store):
     if frames[-1] != live:
         frames.append(live)
     words = store.read(cursor.kickoff)["words"].strip()
-    idea = _idea(words, spec.snapshot(revision).graph)
+    graph = spec.snapshot(revision).graph
+    idea = _idea(words, graph)
+    limits = {}
+    for obs in spec.observations() if cursor.B else ():
+        if obs.outcome == "not-verifiable-here" and (node := graph.nodes.get(obs.witness)):
+            cell = _cell(node, "action", "expected") if node["kind"] == "check" else (
+                _cell(node, "scenario", "interruption"))
+            limits[obs.witness] = {"label": cell["label"], "text": obs.result}
     return {"idea": idea, "frames": frames,
+            "unverified": list(limits.values()),
             "trace": {ref: _rows(spec, ref, cursor.candidate) for ref in {f["revision"] for f in frames}}}

@@ -19,9 +19,9 @@ class UncertainCleanup(RuntimeError):
     pass
 
 
-def reconcile_call(store):
+def reconcile_call(store, attempt=None):
     """Check ownership of a provider call left by a previous controller."""
-    started = store.records("call_started")
+    started = [row for row in store.records("call_started") if attempt is None or row[2]["attempt"] == attempt]
     if not started:
         return
     _, _, call = started[-1]
@@ -228,7 +228,35 @@ class _WindowsJob:
         return False
 
 
-def _run_portable_process(args, cwd, timeout, env, stdin, output_dir):
+def _quiet_watch(files, output_dir, timeout, silence_window):
+    deadline = time.monotonic() + (silence_window if silence_window is not None else timeout)
+    if silence_window is None:
+        return lambda: time.monotonic() >= deadline
+    # A separate handle leaves the provider's write offset alone. Count complete native events only.
+    stream = files.enter_context((output_dir / "stdout.bin").open("rb"))
+    tail = b""
+    poll_at = 0
+
+    def quiet():
+        nonlocal deadline, tail, poll_at
+        now = time.monotonic()
+        if now >= poll_at or now >= deadline:
+            poll_at = now + .1
+            lines = (tail + stream.read()).split(b"\n")
+            tail = lines.pop()
+            for line in lines:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and event.get("type"):
+                    deadline = now + silence_window
+        return now >= deadline
+
+    return quiet
+
+
+def _run_portable_process(args, cwd, timeout, env, stdin, output_dir, silence_window):
     import signal
 
     control = dict(
@@ -262,7 +290,7 @@ def _run_portable_process(args, cwd, timeout, env, stdin, output_dir):
 
         try:
             try:
-                deadline = time.monotonic() + timeout
+                quiet = _quiet_watch(files, output_dir, timeout, silence_window)
                 process = subprocess.Popen(args, cwd=cwd, env=env, stdin=stdin,
                     stdout=stdout, stderr=stderr, start_new_session=True)
                 control.update(
@@ -270,9 +298,9 @@ def _run_portable_process(args, cwd, timeout, env, stdin, output_dir):
                     payloadReleased=True,
                     payloadPid=process.pid,
                 )
-                while not exited() and time.monotonic() < deadline:
+                while not exited() and not quiet():
                     time.sleep(0.01)
-                timed_out = not exited() and time.monotonic() >= deadline
+                timed_out = not exited() and quiet()
             finally:
                 if process is not None:
                     control["teardownStarted"] = True
@@ -311,11 +339,11 @@ def _run_portable_process(args, cwd, timeout, env, stdin, output_dir):
             raise
 
 
-def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
+def _run_process(args, cwd, timeout, env, stdin, output_dir=None, silence_window=None):
     """The one execution contract: argv, captured bytes, bounded owned lifetime."""
     env = {**(os.environ if env is None else env), "PYTHONDONTWRITEBYTECODE": "1"}
     if sys.platform != "win32":
-        return _run_portable_process(args, cwd, timeout, env, stdin, output_dir)
+        return _run_portable_process(args, cwd, timeout, env, stdin, output_dir, silence_window)
     if sys.implementation.name != "cpython":
         raise OSError("Windows process containment requires CPython")
     import msvcrt
@@ -400,8 +428,9 @@ def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
 
         ready_started = time.monotonic()
         # Native captured-input witness: 15.172s to READY; three times, rounded up.
-        deadline = ready_started + timeout
-        ready_deadline = min(deadline, ready_started + 46)
+        if silence_window is None:
+            quiet = _quiet_watch(files, output_dir, timeout, None)
+        ready_deadline = ready_started + min(timeout if silence_window is None else 46, 46)
         while not records and time.monotonic() < ready_deadline and not pump():
             time.sleep(0.005)
         if not records or records.pop(0) != {"kind": "ready"}:
@@ -418,9 +447,11 @@ def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
             gate_transfer_started = True
             gate.write(config)
         control["payloadReleased"] = True
-        while not records and time.monotonic() < deadline and not pump():
+        if silence_window is not None:
+            quiet = _quiet_watch(files, output_dir, timeout, silence_window)
+        while not records and not quiet() and not pump():
             time.sleep(0.005)
-        timed_out = not records and time.monotonic() >= deadline
+        timed_out = not records and quiet()
         record = records[0] if records else None
         job.finish(process, control)
         stdout.seek(0)
@@ -542,7 +573,7 @@ def interrupted_streams_closed(folder):
     return True
 
 
-def execute(command, cwd, timeout=30, input_path=None, env=None, output_dir=None):
+def execute(command, cwd, timeout=30, input_path=None, env=None, output_dir=None, *, silence_window=None):
     """Return honest observations; callers stop if descendant cleanup is unverified."""
     start = time.monotonic()
     control = {}
@@ -551,7 +582,7 @@ def execute(command, cwd, timeout=30, input_path=None, env=None, output_dir=None
     with ExitStack() as inputs:
         stdin = inputs.enter_context(open(input_path, "rb")) if input_path else subprocess.DEVNULL
         try:
-            result = _run_process(command, cwd, timeout, env, stdin, output_dir)
+            result = _run_process(command, cwd, timeout, env, stdin, output_dir, silence_window)
             control = result.process_control
             stdout, stderr, code = result.stdout, result.stderr, result.returncode
         except subprocess.TimeoutExpired as error:

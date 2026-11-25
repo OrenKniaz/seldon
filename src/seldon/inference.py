@@ -1,16 +1,21 @@
 """C1/C4/C18/I10; R8/R12/R13: recorded strict calls and two bounded transport recoveries."""
 
+import json
 import time
 from dataclasses import replace
 
 from . import answers, features, questions
 from .answers import ConsumptionFailure, Mismatch, normalised, recorder
-from .providers import Deadline, ProviderFailure, ResumeUnavailable, role_for
+from .providers import Deadline, Frozen, ProviderFailure, ResumeUnavailable, lead2_call, role_for
 
 
 def call(store, provider, question, unit=None, check=lambda answer: None, retries=2, binding=None,
          consume=lambda source, answer: None, field="answer", retained=None, normalise=None):
-    setup = store.read(store.cursor().kickoff)["setup"]
+    kickoff = store.read(store.cursor().kickoff)
+    setup = kickoff["setup"]
+    if kickoff.get("mode") == "lead2":
+        question = {**question, "execution": {**question["execution"], "lead2": True}}
+    fresh = lead2_call(question)
     kind = question["kind"]
     attempt = None
     execution = question.get("execution", {})
@@ -21,25 +26,34 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
         nonlocal attempt, session
         if unit:
             current = {**current, "execution": {**current["execution"], "session": store.unit(unit).thread}}
-        previous = None
-        for recovery in range(3):
-            if lead or walk:
+        previous, resumed_frozen = None, False
+        for recovery in range(4 if fresh else 3):
+            if lead or walk or fresh:
                 current = {**current, "execution": {**current["execution"], "session": session}}
-            timeout = provider.timeout_for(kind, execution) if hasattr(provider, "timeout_for") else 30
+            started_at, begin = time.time(), time.monotonic()
+            timeout = None if fresh else provider.timeout_for(kind, execution) if hasattr(
+                provider, "timeout_for") else 30
+            quiet = provider.silence_for(current) if fresh and hasattr(provider, "silence_for") else None
             with store.transaction():
                 qref = store.record("question", current)
                 attempt = store.record("attempt", {"operation": kind, "question": qref,
                     "unit": unit, "provider": setup.get("providers", {}).get(role_for(kind, {}), {}),
-                    "deadline": time.time() + timeout, "retryOf": previous, "startedAt": time.time(),
+                    **({"deadline": started_at + timeout} if timeout is not None else {}),
+                    **({"silenceWindowSeconds": quiet} if quiet is not None else {}),
+                    "retryOf": previous, "startedAt": started_at,
                     **({"number": recovery + 1} if normalise else {})})
                 if unit:
                     store.unit(unit, replace(store.unit(unit), callAttempt=attempt))
 
-            def started(folder):
+            native_folder = None
+
+            def started(folder, attempt_ref=attempt):
+                nonlocal native_folder
+                native_folder = folder
                 if unit:
                     with store.transaction():
                         store.unit(unit, replace(store.unit(unit), callFolder=str(folder)))
-                store.record("call_started", {"attempt": attempt, "folder": str(folder)})
+                store.record("call_started", {"attempt": attempt_ref, "folder": str(folder)})
 
             try:
                 if hasattr(provider, "invoke"):
@@ -47,7 +61,7 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                     if unit and thread:
                         with store.transaction():
                             store.unit(unit, replace(store.unit(unit), thread=thread))
-                    elif (lead or walk) and thread:
+                    elif (lead or walk or fresh) and thread:
                         session = thread
                         store.record("call_session", {"attempt": attempt, "session": thread})
                     return raw
@@ -56,13 +70,27 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                 store.record("provider_failure", {"attempt": attempt, "reason": str(error),
                     "transient": error.transient, "cleanupVerified": error.cleanup_verified,
                     "receipt": error.receipt, **({"session": error.session} if walk else {})})
+                if fresh and isinstance(error, Frozen):
+                    if not error.cleanup_verified:
+                        raise
+                    session = error.session or session
+                    if session:
+                        store.record("call_session", {"attempt": attempt, "session": session})
+                    if resumed_frozen:
+                        raise
+                    resumed_frozen = True
+                    if session and kind == "WORK":
+                        current = {**current,
+                                   "prompt": "Continue from the existing files and your last step."}
+                    previous = attempt
+                    continue
                 if walk:
                     session = session or error.session
                     if not (session and recovery < 2 and isinstance(error, Deadline) and error.cleanup_verified):
                         raise
                     previous = attempt
                     continue
-                if (lead and session and features.enabled("leadBoundProof")
+                if (lead and session and not fresh and features.enabled("leadBoundProof")
                         and isinstance(error, ResumeUnavailable) and error.cleanup_verified):
                     session, previous = None, attempt
                     continue
@@ -70,9 +98,17 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                         or not error.cleanup_verified or unit and isinstance(error, Deadline)
                         or lead):
                     raise
-                if recovery == 2:
+                if recovery - resumed_frozen >= 2:
                     raise RuntimeError(f"{error}; receipt: {error.receipt}") from error
                 previous = attempt
+            finally:
+                if fresh:
+                    receipt = native_folder / "result.json" if native_folder else None
+                    measured = json.loads(receipt.read_bytes()) if receipt and receipt.is_file() else {}
+                    store.record("lead2_call_metric", {"attempt": attempt, "kind": kind,
+                        "elapsedSeconds": measured.get("seconds", time.monotonic() - begin),
+                        "freshPlusOutputTokens": measured.get("freshPlusOutputTokens"),
+                        "frozen": measured.get("frozen", False)})
 
     changes = []
 

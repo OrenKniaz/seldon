@@ -58,6 +58,14 @@ section{background:#fff;border:1px solid var(--line);border-radius:12px;padding:
 .stage.current{border-color:var(--glow);background:#fffaf0;box-shadow:0 0 0 3px #e8b23a33,0 0 22px #e8b23a55}
 .stage.current .act{display:inline-flex;align-items:center;gap:6px;margin-top:6px;font-size:10px;color:#7a5500;background:#fdf1d8;border-radius:4px;padding:2px 6px}
 .stage .act{display:none}
+.build-list{display:grid;gap:6px;list-style:none;margin:0;padding:0}
+.build-list li{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:12px;
+  border:1px solid var(--line);border-left:3px solid var(--st);border-radius:8px;padding:8px 10px}
+.build-list .tag{color:var(--st);font-weight:700;text-align:right;flex-shrink:0;max-width:38%}
+.build-list .s-passed{box-shadow:0 0 7px #e8b23a55;border-color:#e3c27a;border-left-color:var(--st)}
+.build-limits{margin-top:12px}
+.build-limits summary{cursor:pointer;color:var(--review);font-weight:700}
+.build-limits p{margin:5px 0 10px}
 /* trace */
 .cols{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:var(--muted);margin-bottom:6px}
 .trace{position:relative}.row{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:10px;align-items:center}
@@ -149,6 +157,11 @@ dialog button{border:1px solid var(--line);border-radius:6px;background:var(--so
   <div class="loop" id="loop"></div>
   <div class="story" id="story"></div>
 </section>
+<section id="buildProgress" hidden>
+  <h2>Build progress</h2>
+  <ul class="build-list" id="buildFeatures"></ul>
+  <div class="build-limits" id="buildLimits"></div>
+</section>
 <section>
   <h2>The trace · lights up as each piece is built, reviewed and proven</h2>
   <div class="trace-scroll" tabindex="0" role="region" aria-label="Plan trace">
@@ -200,8 +213,13 @@ const STATUS = {
   "proven-current": ["passed", "Passed"],
   failed: ["fix", "Failed"],
   stale: ["planned", "Needs a new check"],
-  "not-verifiable-here": ["review", "Can’t test here"],
+  "not-verifiable-here": ["review", "Can’t verify here"],
   "changed-by-person": ["planned", "Changed by you"]
+};
+const CHUNK_STATUS = {
+  planned: ["planned", "Planned"], building: ["building", "Building"],
+  "under review": ["review", "Under review"], failed: ["fix", "Review failed"],
+  fixing: ["fix", "Failed → fixing"], passed: ["passed", "Passed"]
 };
 const byId = id => document.getElementById(id);
 const loop = byId("loop"), trace = byId("trace"), timeline = byId("t"), lines = byId("lines");
@@ -258,13 +276,14 @@ function showStages(frame) {
     if (index) loop.append(element("span", "→", "arrow"));
     const selected = index === frame.stage;
     const done = (index < frame.stage && data.frames.slice(0, +timeline.value).some(f => f.stage === index))
-      || (selected && frame.approved);
+      || (selected && (frame.approved || frame.built));
     const stage = element("div", "", "stage" + (done ? " done" : "") + (selected ? " current" : ""));
     if (selected) stage.setAttribute("aria-current", "step");
     if (repeat) stage.append(element("span", "↻", "loopmark"));
     stage.append(element("b", name));
     const sub = index === 1 && frame.stage >= 1 ? `Round ${frame.rounds}` :
-      index === 4 && frame.reviews ? `${frame.reviews} of 3` : hint;
+      index === 4 && frame.reviews ? `${frame.reviews} of 3` :
+      index === 6 && frame.chunk ? frame.chunk : hint;
     stage.append(element("small", sub));
     if (selected) {
       const dot = element("span", "", "pulse");
@@ -356,6 +375,28 @@ function showTrace(rows) {
   requestAnimationFrame(drawLines);
 }
 
+function showBuild(frame, current) {
+  byId("buildProgress").hidden = !frame.features;
+  if (!frame.features) return;
+  byId("buildFeatures").replaceChildren(...frame.features.map(([name, state]) => {
+    const [style, label] = CHUNK_STATUS[frame.built && state === "fixing" ? "failed" : state];
+    const item = element("li", "", "s-" + style);
+    item.append(element("span", name), element("span", label, "tag"));
+    return item;
+  }));
+  const limits = byId("buildLimits");
+  limits.replaceChildren();
+  if (current && data.unverified.length) {
+    const details = element("details");
+    details.open = true;
+    details.append(element("summary", `Can’t verify here · ${data.unverified.length}`));
+    for (const {label, text} of data.unverified) {
+      details.append(element("strong", label), element("p", text));
+    }
+    limits.append(details);
+  }
+}
+
 function render() {
   if (!data) return;
   const index = +timeline.value, frame = data.frames[index];
@@ -369,6 +410,7 @@ function render() {
   byId("tlabel").textContent = `${index + 1} / ${data.frames.length}`;
   byId("live").hidden = following;
   showStages(frame);
+  showBuild(frame, index === data.frames.length - 1);
   showTrace(data.trace[frame.revision]);
 }
 

@@ -658,12 +658,18 @@ def ask(provider, question, record, retries=2, normalise=None):
         errors = []
         answer = None
         try:
-            decoded = json.loads(raw)
+            flat = question.get("renderContext", {}).get("flatAnswer")
+            try:
+                decoded = json.loads(raw)
+            except ValueError:
+                if not flat or normalise is None:
+                    raise
+                decoded = raw
             if normalise:
                 decoded = normalise(decoded, question["schema"])
             changes = render_constraint_values(decoded) if original["kind"] == "ALIGN" else []
             validate(decoded, question["schema"])
-            answer = decoded["answer"]
+            answer = decoded if flat else decoded["answer"]
         except (ValueError, KeyError) as error:
             errors = str(error).splitlines()
         record({"rawAnswer": raw, "errors": errors,

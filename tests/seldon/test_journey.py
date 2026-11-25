@@ -60,6 +60,57 @@ def test_provider_works_without_disturbing_desktop(tmp_path, monkeypatch, provid
     assert answer == "done"
     assert gitwork.git(product, "log", "-1", "--format=%s") == "Scripted work"
 
+
+@pytest.mark.fast
+def test_fresh_lead_native_liveness_journey(tmp_path, monkeypatch):
+    """A silent writer is recovered once while an active writer can outlive the quiet window."""
+    from seldon import inference, providers
+    from seldon.lead2 import build_brief, chat
+
+    home = tmp_path / "native"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    provider_script = home / "provider.py"
+    provider_script.write_text(
+        "import json, os, sys, time\n"
+        "from pathlib import Path\n"
+        "thread = 'cee7ba47-baef-4134-85b4-cd2358eb1de0'\n"
+        "def send(**event): print(json.dumps(event), flush=True)\n"
+        "send(type='thread.started', thread_id=thread)\n"
+        "log = Path(os.environ['CODEX_HOME']) / 'sessions' / ('rollout-' + thread + '.jsonl')\n"
+        "log.parent.mkdir(exist_ok=True)\n"
+        "def usage(fresh):\n"
+        " total = {'input_tokens': fresh + 18, 'cached_input_tokens': 20, 'output_tokens': 2}\n"
+        " log.write_text(json.dumps({'payload': {'type':'token_count', "
+        "'info':{'total_token_usage':total}}}, separators=(',', ':')) + '\\n')\n"
+        "if 'resume' not in sys.argv:\n"
+        " usage(12)\n"
+        " time.sleep(10)\n"
+        "else:\n"
+        " assert sys.argv[sys.argv.index('resume') + 1] == thread\n"
+        " assert 'Continue from the existing files' in sys.stdin.read()\n"
+        " for _ in range(7):\n"
+        "  send(type='item.completed', item={'type':'reasoning'})\n"
+        "  time.sleep(.22)\n"
+        " usage(19)\n"
+        " send(type='item.completed', item={'type':'agent_message','text':json.dumps(dict(outcome='done'))})\n"
+        " send(type='turn.completed')\n", encoding="utf-8")
+    setup = {"providers": providers.roles(), "codexCommand": [sys.executable, str(provider_script)],
+             "lead2SilenceSeconds": {"build": .9}}
+    provider = providers.Provider(tmp_path / "calls", setup, timeout=.1)
+    run = Run(tmp_path / "product", tmp_path / "workers", "Build a small tool.", setup, provider, None, mode="lead2")
+    try:
+        question = build_brief.question("WORK", build_brief.WORK, "Build the tool.")
+        question["execution"]["cwd"] = str(run.project)
+        _, answer = inference.call(run.store, provider, question, normalise=build_brief.normalise)
+        assert answer["outcome"] == "done"
+        first, second = chat.state(run.store, run.store.cursor(), run.project, False)["calls"]
+        assert first["frozen"] and not second["frozen"] and second["elapsedSeconds"] > 1.4
+        assert [first["freshPlusOutputTokens"], second["freshPlusOutputTokens"]] == [12, 7]
+    finally:
+        run.close()
+
+
 @pytest.mark.fast
 def test_quiet_bench_size_calibration_journey(tmp_path, monkeypatch):
     """ALIGN coaches effort on the recorded unstaged bench and honors the owner's size at A.
@@ -437,7 +488,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
     dream = "Let volunteers share the coat check. Keep receipts usable when the tablet restarts."
     other = "A volunteer can also hand off to the next shift while a coat is still out."
     calls = []
-    draft = {"build_order": [{"outcome": "1. Check in and recover a coat", "recommend_demo": True},
+    draft = {"build_order": [{"outcome": "1. Check in and recover a coat: restore the claim", "recommend_demo": True},
                              {"outcome": "2. Add a printed claim card", "recommend_demo": False},
                              {"outcome": "3. Share the shift handover", "recommend_demo": True}]}
     access = [{"need": "Desk tablet", "supplier": "Volunteer lead"},
@@ -800,7 +851,9 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         assert expected_result in waiting["ask"]["proposal"]
         assert waiting["ask"]["retained"][0]["label"] == "Show me this working"
         assert "### Demonstrations\n- Delivery 1" in waiting["ask"]["proposal"]
-        cursor = run.run()
+        assert run.step() == "L2-READY"
+        cursor = run.store.cursor()
+        run.close()
         assert cursor.state == "L2-READY"
         receipt = run.store.read(cursor.B)
         assert receipt["demonstrations"] == ["delivery-1", "delivery-3"]
@@ -810,7 +863,8 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
                    for n in spec.snapshot(spec.pins()["B"]).graph.nodes.values())
         assert run.store.read(receipt["userWords"])["words"] == "Approve the spec at B"
         status = frontdoor.state(product)
-        assert status["status"] == "PLANNED"
+        assert status["status"] == "PAUSED"
+        assert status["build"]["stage"] == "building"
         assert status["controller"] == "idle"
         assert status["approvedSpec"]["revision"] == spec.pins()["B"]
         assert status["approvedSpec"]["buildOrder"] == draft["build_order"]
@@ -819,7 +873,8 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
 
         pane = read_pane(run.store)
         latest = pane["frames"][-1]
-        assert latest["activity"] == "Plan approved at B"
+        assert pane["frames"][-2]["activity"] == "Plan approved at B"
+        assert latest["activity"] == "Ready to build" and latest["chunk"] == "chunk 1 of 3"
         # The revised export still appears in the approved trace after the conditional B loop.
         assert any(expected_result in row["feature"]["text"] for row in pane["trace"][latest["revision"]])
         assert gitwork.git(product, "rev-parse", "HEAD") == initial_commit
@@ -827,6 +882,168 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         if review_reply == "other":
             expected_calls.append("LEAD2-SPEC")
         assert calls == ["LEAD2-ALIGN"] * 3 + expected_calls
+        if review_reply == "button":
+            _build_coat_journey(product, dream)
+    finally:
+        run.close()
+
+
+def _build_coat_journey(product, dream):
+    """Continue over an in-flight review and carry an approved edit even after a done return."""
+    import threading
+
+    from seldon import frontdoor
+    from seldon.lead2 import SpecStore
+    from seldon.lead2.status_read import status as read_pane
+    from seldon.providers import render_question
+
+    change = "A blue tag is shown on the coat claim."
+    clarified = "Front desk opens the claim when asked."
+    review_started, builder_continued = threading.Event(), threading.Event()
+    turns = []
+    reviews = []
+
+    class Builder:
+        def invoke(self, question, _):
+            if question["kind"] == "LEAD2-STEER":
+                assert question["facts"]["Builder report"] == "Which collection desk is available for a check?"
+                return json.dumps({"direction": "The spec does not name a desk we can use.", "questions": [{
+                    "question": "Which desk is available for the receipt check?",
+                    "recommended": "Use the front desk", "recommended_means": "Exercise lookup at the front.",
+                    "alternative": "Use the side desk", "alternative_means": "Exercise lookup at the side.",
+                }]}), None
+            if question["kind"] == "LEAD2-CHUNK":
+                reviews.append(question["facts"]["Feature"])
+                assert question["facts"]["Promises"]
+                if not question["facts"]["Checks"][0]["passed"]:
+                    review_started.set()
+                    assert builder_continued.wait(10)
+                    return '{"needs_fix":true,"finding":"The draft has no working coat claim."}', None
+                if question["facts"]["Feature"] == feature:
+                    assert question["facts"]["Prior_findings"]
+                    assert question["facts"]["Unverified_for_C"] == ["The physical label printer is unavailable here."]
+                    assert len(question["facts"]["Checks"]) == 1
+                assert question["facts"]["Checks"][0]["passed"]
+                return '{"needs_fix":false,"finding":"The earlier gap is closed."}', None
+            assert question["kind"] == "WORK"
+            assert question["execution"]["session"] == ("coat-session" if turns else None)
+            turns.append(question)
+            prompt, _ = render_question(question)
+            workspace = Path(question["execution"]["cwd"])
+            coat = workspace / "coat.txt"
+            test = workspace / "check.py"
+            chunk = {"feature": "Check in and recover a coat", "promise": promise,
+                     "module": coat.name, "test": f"{test.name} exercises the persisted claim",
+                     "command": [f'"{sys.executable}" {test.name}']}
+            chunks = [chunk, {"feature": "Add a printed claim card"}]
+            if len(turns) == 1:
+                assert prompt.startswith(dream)
+                assert "Not met if — A restart loses the receipt" in prompt
+                assert "Planned code and tests" in prompt
+                assert all(ref not in prompt for ref in approved.graph.nodes)
+                assert change not in prompt
+                coat.write_text("draft")
+                test.write_text("import sys\nfrom pathlib import Path\n"
+                                "assert 'ready' in Path('coat.txt').read_text() and '--ready' in sys.argv\n")
+                return json.dumps({"outcome": "partial", "note": "Finish the coat lookup", "chunks": chunks,
+                                   "demos": ["Check in and recover a coat: restore the claim"]}), "coat-session"
+            if len(turns) == 5:
+                assert clarified in prompt and coat.read_text(encoding="utf-8") == "ready — blue tag"
+                return '{"outcome":"done","acknowledged":true}', "coat-session"
+            assert coat.read_text() == "draft"
+            if len(turns) == 2:
+                assert change in prompt
+                assert "The physical label printer is unavailable here." in prompt
+                assert prompt.startswith("Continue: Finish the coat lookup")
+                assert "Name or add the planned tests" in prompt and "Add a printed claim card" in prompt
+                assert dream not in prompt
+                assert review_started.wait(10)
+                builder_continued.set()
+                (workspace / "unrelated.txt").write_text("The claim code and its tests are unchanged.")
+                repeated = [{"feature": chunk["feature"], "promise": promise}, chunks[1]]
+                return json.dumps({"outcome": "done", "acknowledged": False, "chunks": repeated}), "coat-session"
+            if len(turns) == 3:
+                assert change in prompt
+                assert "The draft has no working coat claim." in prompt and "Check failed" in prompt
+                return json.dumps({"outcome": "partial", "acknowledged": True,
+                                   "note": "Which collection desk is available for a check?"}), "coat-session"
+            assert len(turns) == 4 and "Use the front desk" in prompt
+            assert change not in prompt
+            coat.write_text("ready — blue tag", encoding="utf-8")
+            chunk["command"] = [f'"{sys.executable}" {test.name} --ready']
+            spec.apply(dict(revision=staged.revision, mode="substantive", reason=clarified, edits=[
+                {"op": "add", "name": None, "node": {"kind": "design", "decision": clarified,
+                    "reason": "Record which desk is available.", "words": "Use the front desk"}},
+            ]), author="owner")
+            mapping = [{"promise": n["result"], "module": "./coat.txt, ./missing.txt", "test": test.name}
+                       for n in spec.snapshot().graph.nodes.values() if n["kind"] == "promise"]
+            chunks = [chunk, {**chunk, "feature": "Add a printed claim card", "test": ""},
+                      {**chunk, "feature": "Share the shift handover"}]
+            return json.dumps({"outcome": " Done ", "note": "Coat lookup and blue tag work",
+                               "acknowledged": True, "chunks": chunks, "code_map": mapping}), "coat-session"
+
+    def user(request):
+        if request["gate"] == "scope":
+            assert change in request["ask"]["proposal"]
+            group, option = "round", "approve"
+        else:
+            shown = frontdoor.state(product)["waitingFor"]
+            assert shown["gate"] == "Build question"
+            assert [o["label"] for o in shown["ask"]["groups"][0]["options"]] == [
+                "Use the front desk", "Use the side desk", "Other"]
+            group, option = "q1", "o1"
+        return {"request": request["request"], "replyId": "mara-approved",
+                "selections": [{"groupId": group, "optionId": option}]}
+
+    provider = Builder()
+    run = Run.reopen(product, provider, user)
+    try:
+        spec = SpecStore(run.store)
+        approved = spec.snapshot(spec.pins()["B"])
+        promise_ref, promise = next((ref, node["result"]) for ref, node in approved.graph.nodes.items()
+                                    if node.get("result", "").startswith("The receipt still finds it"))
+        story = next(ref for ref, node in approved.graph.nodes.items()
+                     if node["kind"] == "story" and promise_ref in approved.graph.follow(ref))
+        feature = "Check in and recover a coat: restore the claim"
+        assert run.step() == "L2-READY"
+        partial = spec.build_status()
+        assert partial["features"][feature] == "under review"
+        assert partial["demos"] == ["Check in and recover a coat: restore the claim"]
+        observed, witness = next((ref, child) for ref, n in approved.graph.nodes.items() if n["kind"] == "promise"
+                                 for child in approved.graph.follow(ref)
+                                 if approved.graph.nodes[child]["kind"] in {"check", "walk"})
+        spec.observe(approved.revision, promises=[observed], witness=witness,
+                     commit=partial["candidate"], session=partial["session"], outcome="not-verifiable-here",
+                     result="The physical label printer is unavailable here.")
+        staged = spec.apply(dict(revision=approved.revision, mode="substantive", reason=change, edits=[
+            {"op": "add", "name": "tag", "node": {"kind": "promise", "action": "Open the claim",
+                "result": change, "not_met_if": "The tag is missing"}},
+            {"op": "link", "source": story, "target": "$tag"},
+        ]), author="owner")
+        assert not staged.accepted and spec.snapshot().revision == approved.revision
+        run.close()
+        run = Run.reopen(product, provider, user)
+        spec = SpecStore(run.store)
+        assert run.run().state == "L2-BUILT"
+        status = frontdoor.state(product)["build"]
+        assert status["session"] == "coat-session"
+        assert status["unverified"][0]["outcome"] == "not-verifiable-here"
+        assert status["acceptedRevision"] == status["acknowledgedRevision"] > staged.revision
+        assert status["candidate"] != partial["candidate"]
+        assert status["features"][feature] == "passed"
+        pane = read_pane(run.store)
+        states = list(dict.fromkeys(dict(frame["features"])[feature] for frame in pane["frames"]
+                                    if "features" in frame))
+        assert states == ["planned", "building", "under review", "failed", "fixing", "passed"]
+        assert pane["frames"][-1]["activity"] == "Build complete"
+        assert pane["unverified"][0]["text"] == "The physical label printer is unavailable here."
+        assert reviews[:2] == [feature, feature]
+        assert set(reviews[2:]) == {"Add a printed claim card", "Share the shift handover"}
+        assert {row["promise"] for row in status["codeMap"]} == {
+            ref for ref, n in spec.snapshot().graph.nodes.items() if n["kind"] == "promise"}
+        assert all(row["modules"] == ["coat.txt"] and row["tests"] == ["check.py"] for row in status["codeMap"])
+        assert gitwork.git(status["workspace"], "show", f"{status['candidate']}:coat.txt") == (
+            "ready — blue tag")
     finally:
         run.close()
 

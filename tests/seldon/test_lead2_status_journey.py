@@ -192,16 +192,21 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
         assert row["status"] == "planned"
         reply()
         run.step()
-        assert read_status()["frames"][-1]["activity"] == "Plan approved at B"
+        approved, build = read_status()["frames"][-2:]
+        assert approved["activity"] == "Plan approved at B" and approved["stage"] == 5
+        assert build["activity"] == "Ready to build" and build["chunk"] == "chunk 1 of 1"
+        assert any(label.endswith(" · Building") and active == "page"
+                   for _, label, active in sidebar_links(page))
         now, earlier = read_home().split('id="earlier"', 1)
-        assert "Keep one shared door count" not in now
-        assert "Keep one shared door count" in earlier and "Plan approved at B" in earlier
+        assert "Keep one shared door count" in now and "Keep one shared door count" not in earlier
+        assert 'class="chip build">Building<' in now and "Build · chunk 1 of 1" in now
+        assert 'class="seg done" title="You approve"' in now and 'class="seg cur" title="Build"' in now
 
     (tmp_path / "other").rename(tmp_path / "moved")
     status_process()
     reopened = tool("state", run=str(product))
     assert reopened["statusPage"] == page and reopened["statusHome"] == home
-    assert read_status()["frames"][-1]["activity"] == "Plan approved at B"
+    assert read_status()["frames"][-1] == build
     earlier = read_home().split('id="earlier"', 1)[1]
     assert "Another venue" in earlier and "Missing" in earlier
     assert all("Another venue" not in label for _, label, _ in sidebar_links(page))

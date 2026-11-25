@@ -33,7 +33,7 @@ def command(setup, config, folder, worker, session, images):
         line += ["--resume", session]
     if not worker:
         line += ["--tools", "Bash,Read" if config.get("walk") else "Read" if images else ""]
-        if not config.get("walk"):
+        if not (config.get("walk") or config.get("persist")):
             line.append("--no-session-persistence")
     return line
 
