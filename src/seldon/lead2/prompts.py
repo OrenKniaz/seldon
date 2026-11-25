@@ -2,7 +2,7 @@
 
 from ..questions import labelled
 from ..schema import TEXT, array, choice, obj
-from .contracts import EDIT_FIELDS, OPTION_EDITS
+from .contracts import EDIT_FIELDS, OPTION_EDITS, SPEC_EDITS
 
 SIZES = {"micro": "Minutes of agent work.", "small": "An hour or two of agent work.",
          "medium": "Days of agent work across sessions.", "big": "Weeks or months of agent work."}
@@ -60,8 +60,12 @@ def question(kind, words, current, *, qualification=None, **facts):
         facts = {"B condition": qualification}
     else:
         extra = {"LEAD2-ALIGN": ALIGN, "REVIEW": REVIEW}.get(kind, obj())["properties"]
-        fields = {**extra, **EDIT_FIELDS, "build_order": DELIVERY, "access": ACCESS}
-        prompt = "\n\n".join((TASK[kind], OWNER_GUIDE, SPEC_GUIDE, PROMISE_GUIDE, EDIT_GUIDE))
+        edits = SPEC_EDITS if kind == "LEAD2-SPEC" else EDIT_FIELDS
+        fields = {**extra, **edits, "build_order": DELIVERY, "access": ACCESS}
+        task = TASK[kind]
+        if kind == "LEAD2-SPEC":
+            task += "\nGive a 3–8 word title per story/promise/walk; use an empty title if unavailable."
+        prompt = "\n\n".join((task, OWNER_GUIDE, SPEC_GUIDE, PROMISE_GUIDE, EDIT_GUIDE))
     return {"kind": kind, "execution": {}, "schema": obj(answer=obj(reason=TEXT, **fields)),
             "renderContext": {"lead2": True},
             "prompt": prompt,

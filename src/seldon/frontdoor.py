@@ -229,7 +229,12 @@ def server(setup=providers.setup_facts):
 
     app = MCPServer("seldon", instructions=(
         "Relay the user's dream through start. " + RELAY +
+        " Show the statusPage link when start returns it."
         " Show state and its next sentence; all decisions happen in this chat."))
+    from .lead2.status_page import StatusPages
+
+    pages = StatusPages()
+
     def tool(fn):
         @wraps(fn)
         def relay(*args, **kwargs):
@@ -254,7 +259,10 @@ def server(setup=providers.setup_facts):
         facts = {**setup(), "scriptedUser": False, "userOrigin": "user's words relayed by the provider chat",
                  "evidenceDirectory": str(root / "evidence")}
         Run(project, root / "workers", dream, facts, None, None).close()
-        return spawn(project)
+        result = spawn(project)
+        if result.get("mode") == chat.MODE:
+            result["statusPage"] = pages.add(project)
+        return result
 
     def available(run):
         value = state(run)

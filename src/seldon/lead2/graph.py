@@ -150,7 +150,8 @@ class Delta:
             elif new is None:
                 changes.append(f"Retired {old['kind']} {ref}: {_body(old)}")
             else:
-                fields = [f"{key} from {old[key]!r} to {new[key]!r}" for key in new if old[key] != new[key]]
+                fields = [f"{key} from {old.get(key)!r} to {new.get(key)!r}"
+                          for key in sorted(old.keys() | new.keys()) if old.get(key) != new.get(key)]
                 changes.append(f"Amended {new['kind']} {ref}: " + ", ".join(fields))
         for source, target in sorted(self.links):
             verb = "Linked" if (source, target) in self.after.links else "Unlinked"
@@ -160,7 +161,10 @@ class Delta:
 
     def reopens(self) -> set[str]:
         affected = set()
-        nodes, links = self.nodes, self.links
+        nodes = {ref for ref in self.nodes if
+                 {k: v for k, v in self.before.nodes.get(ref, {}).items() if k != "title"} !=
+                 {k: v for k, v in self.after.nodes.get(ref, {}).items() if k != "title"}}
+        links = self.links
         for graph in (self.before, self.after):
             changed = nodes & graph.nodes.keys()
             for link in links & set(graph.links):

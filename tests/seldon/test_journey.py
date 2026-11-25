@@ -645,6 +645,10 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
                 ]
             answer.setdefault("option_edits", [])
         response = {"answer": {"replaces": [], "access": [], **answer}}
+        if kind == "LEAD2-SPEC":
+            for field in ("story", "promise", "walk"):
+                for row in response["answer"][field]:
+                    row.setdefault("title", "")
         schema.validate(response, q["schema"])
         return json.dumps(response)
 

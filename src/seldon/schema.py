@@ -167,7 +167,8 @@ def validation_errors(value, contract, path="answer"):
         errors.append(f"{path}: expected one of {contract['enum']}")
     if kind == "object":
         fields = contract["properties"]
-        errors += [f"{path}.{key}: required field missing" for key in fields.keys() - value.keys()]
+        errors += [f"{path}.{key}: required field missing"
+                   for key in set(contract.get("required", fields)) - value.keys()]
         errors += [f"{path}.{key}: unexpected field" for key in value.keys() - fields.keys()]
         for key in fields.keys() & value.keys():
             errors += validation_errors(value[key], fields[key], f"{path}.{key}")

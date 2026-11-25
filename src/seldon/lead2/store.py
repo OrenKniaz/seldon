@@ -74,11 +74,20 @@ class Conflict(ValueError):
 
 
 class SpecStore:
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, *, readonly=False):
         self._store = store
+        if readonly:
+            return
         with store.transaction():
             for statement in (SNAPSHOTS, DECISIONS, OBSERVATIONS):
                 store.db.execute(statement)
+
+    def revisions(self) -> list[tuple[int, str]]:
+        if not self._store.db.execute(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'lead2_spec'"
+        ).fetchone():
+            return []
+        return self._store.db.execute("SELECT id, time FROM lead2_spec ORDER BY id").fetchall()
 
     def snapshot(self, revision: int | None = None) -> Snapshot:
         if revision is None:
@@ -293,7 +302,7 @@ def _presentation_only(old, new):
         return re.findall(r"\w+(?:[.,'’/-]\w+)*|[^\w\s.,;:!?()\"“”]", text.lower())
 
     return (old and new and old.get("words") == new.get("words")
-            and all(tokens(old[key]) == tokens(value) for key, value in new.items()))
+            and all(tokens(old[key]) == tokens(value) for key, value in new.items() if key != "title"))
 
 
 def _observation(ref: int, revision: int, body: dict) -> Observation:

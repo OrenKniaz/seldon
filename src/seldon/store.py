@@ -110,11 +110,15 @@ def decoded(body, model):
 
 
 class Store:
-    def __init__(self, project):
+    def __init__(self, project, *, readonly=False):
         self.root = project / ".seldon"
+        self._local = threading.local()
+        if readonly:
+            uri = (self.root / "state.sqlite3").resolve().as_uri()
+            self._local.db = sqlite3.connect(uri + "?mode=ro", uri=True)
+            return
         self.root.mkdir(exist_ok=True)
         (self.root / "artifacts").mkdir(exist_ok=True)
-        self._local = threading.local()
         self._lock = threading.RLock()
         self.integration_lock = threading.RLock()
         self.db.execute("PRAGMA journal_mode=WAL")

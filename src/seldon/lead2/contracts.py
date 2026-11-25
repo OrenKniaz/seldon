@@ -13,11 +13,16 @@ NODE_BODIES = {
     "walk": obj(scenario=TEXT, interruption=TEXT),
 }
 LINK_ROWS = array(obj(source=TEXT, targets=REFS))
+TITLED = ("story", "promise", "walk")
+TITLE = {"type": "string"}
 EDIT_FIELDS = {
     **{kind: array(obj(ref=TEXT, **body["properties"]))
        for kind, body in NODE_BODIES.items() if kind != "dream"},
     "retire": REFS, "link": LINK_ROWS, "unlink": LINK_ROWS, "replaces": LINK_ROWS,
 }
+SPEC_EDITS = {**EDIT_FIELDS, **{
+    kind: array(obj(ref=TEXT, **NODE_BODIES[kind]["properties"], title=TITLE)) for kind in TITLED
+}}
 OPTION_EDITS = array(obj(
     question=TEXT, option=choice("recommended", "alternative"),
     kind=choice(*EDIT_FIELDS), ref=TEXT, values=REFS,
@@ -42,6 +47,9 @@ def option_rows(rows):
 NODE = {"anyOf": [
     obj(kind=choice(kind), **body["properties"]) for kind, body in NODE_BODIES.items()
 ]}
+for kind, contract in zip(NODE_BODIES, NODE["anyOf"], strict=True):
+    if kind in TITLED:
+        contract["properties"]["title"] = TITLE
 
 BATCH_SCHEMA = obj(
     revision={"type": "integer", "minimum": 0},
@@ -65,6 +73,13 @@ def typed_reply(body, schema):
                   for key, field in fields.items()}
         if stack := answer.get("stack"):
             answer["design"] = [*stack, *answer["design"]]
+        for kind in TITLED:
+            if (isinstance(answer.get(kind), list)
+                    and "title" in fields.get(kind, {}).get("items", {}).get("properties", {})):
+                answer[kind] = [
+                    {**row, "title": row["title"] if isinstance(row.get("title"), str) else ""}
+                    if isinstance(row, dict) else row for row in answer[kind]
+                ]
     return {"answer": answer}
 
 
@@ -96,6 +111,9 @@ def normalise_edits(graph, answer, references, *, prefix=""):
                 continue
             seen.add(ref)
             node = {"kind": kind, **{key: row[key] for key in fields["properties"]}}
+            if kind in TITLED and (title := row.get("title", "").strip()
+                                  or graph.nodes.get(ref, {}).get("title")):
+                node["title"] = title
             edits.append(dict(op="amend", id=ref, node=node) if ref in kinds else
                          dict(op="add", name=ref, node=node))
             kinds[ref] = kind

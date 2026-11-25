@@ -120,8 +120,13 @@ def test_door_spec_proof_tracks_the_current_graph_and_candidate(tmp_path):
         assert states(spec, revision, names) == ("proven-current",) * 3
         assert states(spec, revision, names, NEXT_COMMIT) == ("stale",) * 3
 
+        promise = spec.snapshot().graph.nodes[enter]
+        titled = edit(spec, revision, "Label the inspector cell",
+                      amend(enter, **promise, title="Admit one guest safely"))
+        assert titled.accepted
+        assert states(spec, titled.revision, names) == ("proven-current",) * 3
         label = spec.snapshot().graph.nodes[handoff]
-        wording = edit(spec, revision, "Polish the check's punctuation and spacing",
+        wording = edit(spec, titled.revision, "Polish the check's punctuation and spacing",
                        amend(handoff, **{**label, "action": f"  {label['action'].upper()}! "}),
                        mode="wording-only").revision
         assert states(spec, wording, names) == ("proven-current",) * 3
