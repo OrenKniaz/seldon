@@ -2,51 +2,69 @@
 
 from ..questions import labelled
 from ..schema import TEXT, array, choice, obj
-from .contracts import EDIT_FIELDS
+from .contracts import EDIT_FIELDS, OPTION_EDITS
 
 SIZES = {"micro": "Minutes of agent work.", "small": "An hour or two of agent work.",
          "medium": "Days of agent work across sessions.", "big": "Weeks or months of agent work."}
-QUESTIONS = array(obj(question=TEXT, label=TEXT, means=TEXT))
+QUESTIONS = array(obj(question=TEXT, recommended=TEXT, recommended_means=TEXT,
+                      alternative=TEXT, alternative_means=TEXT))
 DELIVERY = array(obj(outcome=TEXT, recommend_demo={"type": "boolean"}))
-ALIGN = obj(aligned={"type": "boolean"}, size=choice(*SIZES), size_reason=TEXT, questions=QUESTIONS)
-SPEC = obj()
-REVIEW = obj(findings=TEXT, questions=QUESTIONS)
+ACCESS = array(obj(need=TEXT, supplier={"type": "string"}))
+ALIGN = obj(aligned={"type": "boolean"}, size=choice(*SIZES), size_reason=TEXT, questions=QUESTIONS,
+            stack={**EDIT_FIELDS["design"], "description": "Provisional stack choices and reasons."})
+REVIEW = obj(findings=TEXT, questions=QUESTIONS, option_edits=OPTION_EDITS)
 TASK = {
-    "LEAD2-ALIGN": """Improve the idea while keeping exact values, handoffs, races and recovery.
-Ask only consequential unresolved choices. Read prior replies, carry accepted recommendations
-into stories, and never repeat answered questions. Offer concrete choices, best first. Say whether
-the vision is ready; the owner decides. Honor their chosen size: micro minutes, small 1–2 hours,
-medium days, big weeks or months. Return changed roles and stories linked to the owner's words;
-start each story with a short title sentence. Fold a ready micro or small spec and build order here;
-otherwise leave the detailed spec arrays empty.""",
+    "LEAD2-ALIGN": """Start reason with one real job in the owner's world from start to finish.
+Use the walk to cover functions, operation (hosting, users, roles, logins, backups, offline, connections,
+cost) and appearance (device, style, key screen, language, direction, accessibility, reference).
+Preserve exact values, handoffs, races and recovery. Ask only unanswered consequential choices.
+Use the size fields, never a product question about size. Honor the chosen size and scope.
+Link changed roles and short-titled stories to owner words. The owner decides readiness.
+Fold a ready micro or small spec and build order here; otherwise leave detailed spec arrays empty.""",
     "LEAD2-SPEC": """Explain identities, state changes and design. Preserve exact owner choices.
 Walk overlap, recovery, fresh setup and stale retries. Order outcomes in one session and suggest demos.""",
-    "REVIEW": """Trace owner words to promises and back. Repair bundles, missing deliverables and
-material gaps using the existing walks first. Verify accepted defaults and design against checks
-and walks; committed retries return their original outcome. Repair without changing accepted defaults.
-Leave build_order empty unless changed. Explain findings; ask only consequential unresolved choices.""",
+    "REVIEW": """What could disappear while this still passes? Repair trace, bundles, outputs, modules,
+tests and walks from the brief and replies while preserving accepted defaults and original retry outcomes.
+In findings list each notice and setting once. Quote the walk step where the recipient opens the notice
+(including reminders after restart) or another person sees the changed setting take effect. Add missing steps.
+Ask only for unresolved material product outcomes. Resolve implementation and proof using your judgment.
+Give each outcome option_edits marked with the exact question and recommended or alternative.
+Put complete node values in regular field order. For link/unlink/replaces use ref for source and
+values for targets; retire has no values. Keep distinct questions on separate nodes and keep options
+out of common edits. Leave build_order and access empty unless changed.""",
 }
-EDIT_GUIDE = """Use one row per changed node, in its kind's array. Use a short new ref to add
-or a shown ref to amend. Retire only superseded nodes. Group link and unlink targets by source.
-For splits, replaces.source is the old promise and targets inherit its proof links; unlink to opt out.
-Link brief and reply refs and roles to stories, stories to promises, promises to design and proof.
-Leave unused arrays empty. List options separately, recommendation first, label matching meaning."""
-PROMISE_GUIDE = """One promise per independently verifiable output or workflow, with its action,
-result and failure. Split each separately named resource view, administration editor and report format.
-Split board updates from notices and hosting from migrations. Requested artifacts such as automated
-integration/E2E tests per workflow are promises, distinct from checks within the plan.
-Walk user handoffs with the receiving role observing the result and setting changes through their
-effect in the affected workflow. A direct check suffices for a standalone artifact such as a sample.
-Use terse B results: output name, exact filters, labels and distinguishing conditions, including
-qualified replies. Name sibling formats 'Report name screen — ...', 'Report name print — ...',
-and 'Report name CSV — ...'. Start their results with identical shared conditions."""
+OWNER_GUIDE = """Use business questions for plain or unclear owners. In first ALIGN fill stack with
+each recommended choice and a plain one-line reason they can override. Show unresolved stack choices
+to technical owners with defaults. Link stack decisions to relevant promises when present."""
+SPEC_GUIDE = """Link each promise to planned code modules (design rows) and named tests with observable
+results (check rows). List build and judge access with suppliers; empty supplier means can't test here.
+Derive access from the walks, including printer and paper for print and the channel for each notice.
+Leave access empty to keep a prior list or give the full revised list."""
+EDIT_GUIDE = """Use a short new ref to add or a shown ref to amend, one row per changed node.
+Retire only superseded nodes. Group links by source; replacements inherit old proof unless unlinked.
+Link words and roles to stories, stories to promises, promises to design and proof.
+Leave unused arrays empty. Each question names two concrete options; code adds Other."""
+PROMISE_GUIDE = """Give each output its own action, result and failure, including portal views, admin
+functions, board updates, notices, hosting, migrations, and report formats. Promised workflow tests
+are distinct from planning checks. Walk recipient and setting effects; standalone artifacts can use
+direct checks. Keep B results terse with exact distinguishing conditions and owner qualifications.
+Name sibling results 'Report name screen — ...', 'Report name print — ...' and 'Report name CSV — ...',
+starting each with identical shared conditions."""
 
 
-def question(kind, words, current, **facts):
-    fields = {"LEAD2-ALIGN": ALIGN, "LEAD2-SPEC": SPEC, "REVIEW": REVIEW}[kind]["properties"]
-    schema = obj(answer=obj(reason=TEXT, **fields, **EDIT_FIELDS, build_order=DELIVERY))
-    return {"kind": kind, "execution": {}, "schema": schema, "renderContext": {"lead2": True},
-            "prompt": "\n\n".join((TASK[kind], PROMISE_GUIDE, EDIT_GUIDE)),
+def question(kind, words, current, *, qualification=None, **facts):
+    if qualification:
+        fields = dict(amendments=array(obj(ref=TEXT, result=TEXT, not_met_if=TEXT)))
+        prompt = ("Amend only existing promises explicitly named by the B condition. Keep every other "
+                  "clause verbatim. Put the condition in the promise result and failure condition.")
+        facts = {"B condition": qualification}
+    else:
+        extra = {"LEAD2-ALIGN": ALIGN, "REVIEW": REVIEW}.get(kind, obj())["properties"]
+        fields = {**extra, **EDIT_FIELDS, "build_order": DELIVERY, "access": ACCESS}
+        prompt = "\n\n".join((TASK[kind], OWNER_GUIDE, SPEC_GUIDE, PROMISE_GUIDE, EDIT_GUIDE))
+    return {"kind": kind, "execution": {}, "schema": obj(answer=obj(reason=TEXT, **fields)),
+            "renderContext": {"lead2": True},
+            "prompt": prompt,
             "facts": {"Owner's words": words, "Current proposal": current, **facts}}
 
 

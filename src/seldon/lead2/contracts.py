@@ -18,6 +18,26 @@ EDIT_FIELDS = {
        for kind, body in NODE_BODIES.items() if kind != "dream"},
     "retire": REFS, "link": LINK_ROWS, "unlink": LINK_ROWS, "replaces": LINK_ROWS,
 }
+OPTION_EDITS = array(obj(
+    question=TEXT, option=choice("recommended", "alternative"),
+    kind=choice(*EDIT_FIELDS), ref=TEXT, values=REFS,
+))
+
+
+def option_rows(rows):
+    """Compile one option's flat rows into the same edit tables used by SPEC."""
+    answer = {kind: [] for kind in EDIT_FIELDS}
+    for row in rows:
+        kind, ref, values = row["kind"], row["ref"], row["values"]
+        if kind == "retire":
+            answer[kind].append(ref)
+        elif kind in NODE_BODIES:
+            fields = NODE_BODIES[kind]["properties"]
+            if len(values) == len(fields):
+                answer[kind].append({"ref": ref, **dict(zip(fields, values, strict=True))})
+        else:
+            answer[kind].append({"source": ref, "targets": values})
+    return answer
 
 NODE = {"anyOf": [
     obj(kind=choice(kind), **body["properties"]) for kind, body in NODE_BODIES.items()
@@ -43,16 +63,25 @@ def typed_reply(body, schema):
         fields = schema["properties"]["answer"]["properties"]
         answer = {key: answer.get(key, []) if field.get("type") == "array" else answer.get(key)
                   for key, field in fields.items()}
+        if stack := answer.get("stack"):
+            answer["design"] = [*stack, *answer["design"]]
     return {"answer": answer}
 
 
-def normalise_edits(graph, answer, references):
+def normalise_edits(graph, answer, references, *, prefix=""):
     """Resolve shown references and omit unsupported relations."""
     from .graph import CONTEXT, LINEAGE, PROOF
 
     def resolve(label):
         name = label.strip().lstrip("$")
-        return references.get(name, "$" + name)
+        return references.get(name, "$" + prefix + name) if name else "$"
+
+    if "amendments" in answer:
+        rows = {resolve(row["ref"]): row for row in answer["amendments"]}
+        edits = [dict(op="amend", id=ref,
+                      node={**graph.nodes[ref], "result": row["result"], "not_met_if": row["not_met_if"]})
+                 for ref, row in rows.items() if graph.nodes.get(ref, {}).get("kind") == "promise"]
+        return edits, len(answer["amendments"]) - len(edits)
 
     kinds = {ref: node["kind"] for ref, node in graph.nodes.items()}
     fixed = {ref for ref, node in graph.nodes.items()

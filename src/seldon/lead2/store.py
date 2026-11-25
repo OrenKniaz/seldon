@@ -155,7 +155,7 @@ class SpecStore:
         with self._store.transaction():
             if approval and self.decision(gate, revision) == approval:
                 return
-            request = self._check_approval(gate, revision, approval)
+            request, _ = self._check_approval(gate, revision, approval)
             if self._store.db.execute(
                 "SELECT 1 FROM lead2_spec_decision WHERE gate = ? AND approval = ?", (gate, approval),
             ).fetchone():
@@ -182,6 +182,25 @@ class SpecStore:
             "SELECT approval FROM lead2_spec_decision WHERE gate = ? AND revision = ?",
             (gate, revision)).fetchone()
         return row[0] if row else None
+
+    def apply_review_options(self, revision, approval):
+        """The displayed choice authorizes exactly its saved patch on the offered revision."""
+        with self._store.transaction():
+            request, words = self._check_approval("Review choices", revision, approval)
+            saved = self._record("lead2_review_options", request["subject"]["options"])
+            picks = {pick["group"]: pick["optionId"] for pick in request["ask"]["retained"]}
+            picks.update((pick["groupId"], pick["optionId"]) for pick in words.get("selections", []))
+            edits = [edit for group, options in saved["patches"].items()
+                     for edit in options.get(picks.get(group), [])]
+            if not edits:
+                return revision
+            edits.append({"op": "add", "name": None, "node": {"kind": "dream", "words": words["words"]}})
+            result = self.apply(dict(revision=revision, mode="substantive", edits=edits,
+                                     reason=f"Apply the owner's review choices ({approval})"), author="owner")
+            if not result.accepted:
+                self._store.db.execute("INSERT INTO lead2_spec_decision VALUES (?, ?, ?)",
+                                       ("scope", result.revision, approval))
+            return result.revision
 
     def observe(self, revision: int, *, promises: list[str], witness: str, commit: str,
                 session: str, outcome: str, result: str) -> Observation:
@@ -240,7 +259,7 @@ class SpecStore:
                 or words.get("request") != receipt["request"] or words.get("origin") != request.get("origin")
                 or not words.get("words")):
             raise ValueError(f"Use the person's approval bound to {gate} revision {revision}.")
-        return request
+        return request, words
 
     def _record(self, kind: str, ref: str | None) -> dict:
         if isinstance(ref, str) and ref.startswith("r") and ref[1:].isascii() and ref[1:].isdigit():

@@ -419,12 +419,14 @@ def test_grow_align_receipt_and_lock_journey(tmp_path, monkeypatch):
 
 
 @pytest.mark.fast
-@pytest.mark.parametrize("loose_answer", [False, True])
-def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
+@pytest.mark.parametrize(("loose_answer", "review_reply"),
+                         [(False, "button"), (False, "other"), (True, None)])
+def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, review_reply):
     """A stale reply cannot approve a new vision or undo a review repair before B.
 
     The graph-only journey bypasses kickoff, the provider, displayed options and bind-on-reopen.
     It cannot catch early approval, lost option context, or a trace gap stalling B.
+    A review button applies its own edit before B, while Other spends one planner call.
     """
     import asyncio
 
@@ -435,8 +437,14 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
     dream = "Let volunteers share the coat check. Keep receipts usable when the tablet restarts."
     other = "A volunteer can also hand off to the next shift while a coat is still out."
     calls = []
-    draft = {"build_order": [{"outcome": "Check in and recover a coat", "recommend_demo": True}]}
+    draft = {"build_order": [{"outcome": "1. Check in and recover a coat", "recommend_demo": True},
+                             {"outcome": "2. Add a printed claim card", "recommend_demo": False},
+                             {"outcome": "3. Share the shift handover", "recommend_demo": True}]}
+    access = [{"need": "Desk tablet", "supplier": "Volunteer lead"},
+              {"need": "Spare receipt printer", "supplier": ""}]
     qualification = "Approve, only if the CSV includes each correction reason."
+    review_question = "Where can people claim their coat?"
+    counter = "Offer a printed claim lookup beside the existing desk."
 
     def add(name, kind, **body):
         return {"op": "add", "name": name, "node": {"kind": kind, **body}}
@@ -461,17 +469,18 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
         return fields
 
     def material_question(question, label):
-        return [{"question": question, "label": label, "means": "Show the same record"},
-                {"question": question, "label": "Use a separate list", "means": "Keep a local log"}]
+        return dict(question=question, recommended=label, recommended_means="Show the same record",
+                    alternative="Use a separate list", alternative_means="Keep a local log")
 
     def fill(story):
         return [
             add("receipt", "promise", action="Claim a coat after restart",
                 result="The receipt still finds it", not_met_if="A restart loses the receipt"),
-            add("storage", "design", decision="Save the claim before showing the receipt",
+            add("storage", "design",
+                decision="Claim storage module: save the claim before showing the receipt",
                 reason="Durability", words=other),
             add("claims", "interface", contract="Claim identity persists across shifts and restarts."),
-            add("restart", "check", action="Restart after allocating a claim",
+            add("restart", "check", action="Claim restart test: restart after allocating a claim",
                 expected="Claim is retrievable"),
             add("handoff", "walk", scenario="Two volunteers see an outstanding claim",
                 interruption="The first shift signs out before return"),
@@ -490,6 +499,9 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
             if "items" in field:
                 pending.append(field["items"])
         proposal = facts["Current proposal"]
+        if "B condition" not in facts:
+            assert facts["Owner's technical preference"] == (
+                "Yes, show me the technical choices" if loose_answer else "No, keep it in business terms")
         prompt, _ = render_question(q)
         assert facts["Owner's words"] == dream and prompt.startswith(dream)
         words = SpecStore(run.store).snapshot().graph.nodes
@@ -498,10 +510,13 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
                       if '"kind":"story"' in line and "Two shifts share" in line), None)
         if kind == "LEAD2-ALIGN":
             count = calls.count(kind)
-            edits, role_refs, sources = [], ["desk"], ["brief"]
+            edits, stack, role_refs, sources = [], [], ["desk"], ["brief"]
             if count == 1:
                 edits = [add("desk", "person", role="Volunteer"),
                          add("shift", "person", role="Incoming shift")]
+                if not loose_answer:
+                    stack.append(dict(ref="database", decision="Keep claims in a local database",
+                                      reason="The desk can reopen claims without internet.", words=dream))
                 edits.append(add("handoff", "story", story="Two shifts share and recover outstanding claims"))
                 story = "handoff"
                 if loose_answer:
@@ -510,7 +525,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
                 owner_reply = "Share a live list" if count == 2 else other
                 assert facts["Owner's chosen size"] == "small"
                 assert owner_reply in facts["Earlier replies"]
-                assert any(row["label"] == "Use a separate list"
+                assert any(row["alternative"] == "Use a separate list"
                            for row in facts["Previous questions and options"])
                 sources += [block.splitlines()[0] for block in facts["Earlier replies"].split("\n\n")]
                 role_refs = []
@@ -523,46 +538,62 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
             folded = count == 3 and not loose_answer
             if folded:
                 edits.extend(fill(story) + [link("$receipt", "$handoff")])
-            answer = dict(reason="Propose the shared handoff", **flat(edits),
+            offered = [questions[count - 1]]
+            if loose_answer and count == 1:
+                offered.append(material_question("Which database should we use?", "SQLite"))
+            answer = dict(reason="A volunteer checks in a coat, hands off the claim, then retrieves it.",
+                          **flat(edits),
                           build_order=draft["build_order"] if folded else [],
-                          questions=questions[count - 1],
+                          access=access if folded else [],
+                          questions=offered, stack=stack,
                           aligned=count != 2, size="micro", size_reason="One coat desk")
             if count == 1 and loose_answer:
                 return json.dumps({**answer, "plan": draft})
         elif kind == "LEAD2-SPEC":
             assert "accepted default" in proposal and "Show the outstanding claim" in proposal
             assert "Use a separate list" not in proposal
-            if calls.count(kind) == 1:
+            if condition := facts.get("B condition"):
+                assert condition == qualification
+                assert "build_order" not in q["schema"]["properties"]["answer"]["properties"]
+                export = next(line.split("]")[0][1:] for line in proposal.splitlines()
+                              if "An export lists each outstanding claim" in line)
+                patch = dict(ref=export,
+                             result="An export lists each outstanding claim and correction reason",
+                             not_met_if="The CSV omits any correction reason.")
+                return json.dumps({"answer": dict(reason="Preserve the correction reason",
+                                                   amendments=[patch], retire=[story], build_order=[])})
+            if resolving := facts.get("Resolve only this review reply"):
+                assert resolving == counter and counter in facts["Earlier replies"]
+                edits = [add("counter", "design", decision=counter,
+                             reason="Owner chose paper", words=counter)]
+            else:
                 edits = fill(story)
                 role = next(line.split("]")[0][1:] for line in proposal.splitlines() if "Volunteer" in line)
                 edits.extend([add("setup", "story", story="A replacement tablet can recover an open claim"),
                               link("brief", "setup"), link(role, "setup"), link("setup", "$receipt"),
                               add("queue", "story", story="An incoming volunteer sees the pickup queue"),
-                              link("brief", "queue"), link(role, "queue")])
-            else:
-                assert qualification in facts["Earlier replies"]
-                promise = next(line for line in proposal.splitlines() if "Claim a coat after restart" in line)
-                ref, body = promise.split("] ", 1)
-                edits = [{"op": "amend", "id": ref[1:], "node": {
-                    **json.loads(body),
-                    "action": "Claim a coat after restart and export records",
-                    "result": "The next shift finds the same outstanding coat after restart",
-                    "not_met_if": ("A restart loses the receipt. The CSV omits any correction reason or "
-                                   "an outstanding claim appears as 'No claim recorded'."),
-                }}]
-            answer = dict(reason="Specify the complete handoff", **flat(edits), **draft)
+                              link("brief", "queue"), link(role, "queue"),
+                              add("handover", "story",
+                                  story="An incoming volunteer can find the handover note"),
+                              link("brief", "handover"), link(role, "handover"),
+                              add("lost", "story", story="A volunteer can look for a lost claim"),
+                              link("brief", "lost"), link(role, "lost")])
+            answer = dict(reason="Specify the complete handoff", **flat(edits), **draft,
+                          access=access if calls.count(kind) == 1 else [])
         else:
             assert kind == "REVIEW" and facts["Proposed build order"] == draft["build_order"]
+            assert facts["Proposed access needs"] == access
             assert other in facts["Earlier replies"] and "A restart loses the receipt" in proposal
             if calls.count(kind) == 2:
                 gaps = facts["Missing proof links"]
-                assert len(gaps) == 1 and "pickup queue" in gaps[0]
+                assert len(gaps) > 1 and any("pickup queue" in gap for gap in gaps)
                 assert "An export lists each outstanding claim" in proposal
-                return json.dumps({"answer": dict(reason="Report the remaining gap", findings=gaps[0])})
-            if calls.count(kind) == 3:
-                assert qualification in facts["Earlier replies"] and "omits any correction reason" in proposal
-                answer = dict(reason="Confirm the new offer", findings="The CSV lists reasons.")
-                return json.dumps({"answer": answer})
+                queue = next(line.split("]")[0][1:] for line in proposal.splitlines()
+                             if "pickup queue" in line)
+                export = next(line.split("]")[0][1:] for line in proposal.splitlines()
+                              if "An export lists each outstanding claim" in line)
+                return json.dumps({"answer": dict(reason="Link the queue", findings="One story gap remains.",
+                                                   link=[dict(source=queue, targets=[export])])})
             walk = next(line.split("]")[0][1:] for line in proposal.splitlines() if '"kind":"walk"' in line)
             edits = [{"op": "amend", "id": walk, "node": {
                 "kind": "walk", "scenario": "Two volunteers recover a claim and return the coat",
@@ -572,12 +603,13 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
             ref, body = promise.split("] ", 1)
             node = json.loads(body)
             design = next(line.split("]")[0][1:] for line in proposal.splitlines()
-                          if "Save the claim before showing the receipt" in line)
+                          if "Claim storage module" in line)
             if loose_answer:
                 node["result"] = "The next shift finds the same outstanding coat after restart"
                 edits.append({"op": "amend", "id": ref[1:], "node": node})
                 edits.extend([add("export", "promise", action="Export outstanding claims",
-                                  result="An export lists each outstanding claim", not_met_if="A claim is absent"),
+                                  result="An export lists each outstanding claim",
+                                  not_met_if="A claim is absent"),
                               link(story, "export"), link(design, walk)])
             else:
                 node["result"] = "The receipt still finds it after a restart"
@@ -599,7 +631,20 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
                           replaces=[{"source": ref[1:], "targets": ["export"] if loose_answer
                                      else ["export", "screen", "csv"]}],
                           **flat(edits))
-        response = {"answer": {"replaces": [], **answer}}
+            if review_reply:
+                answer["questions"] = [dict(question=review_question, recommended="Original desk",
+                                            recommended_means="Keep claims at their original desk.",
+                                            alternative="Either desk",
+                                            alternative_means="Let both desks claim coats.")]
+                options = (("recommended", "at the original desk"), ("alternative", "at either desk"))
+                answer["option_edits"] = [
+                    dict(question=review_question, option=option, ref=ref[1:], kind="promise",
+                         values=[node["action"], f"The receipt still finds it {place} after a restart",
+                                 node["not_met_if"]])
+                    for option, place in options
+                ]
+            answer.setdefault("option_edits", [])
+        response = {"answer": {"replaces": [], "access": [], **answer}}
         schema.validate(response, q["schema"])
         return json.dumps(response)
 
@@ -630,17 +675,33 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
                 run.user = lambda _: envelope
             return displayed
 
+        assert run.step() == "ALIGN" and not calls
+        kickoff = reply("kickoff", ("technical", "technical" if loose_answer else "plain", {}))
+        assert kickoff["ask"]["groups"][0]["question"] == "Are you technical?"
+        assert kickoff["ask"]["groups"][0]["options"][-1]["id"] == "other"
+        assert run.step() == "ALIGN" and not calls
         assert run.step() == "A"
         spec = SpecStore(run.store)
         assert not spec.pins()  # Planner recommended alignment in the first round.
         first = reply("list", ("q1", "o1", {}), ("size", "small", {}), words="Share a live list")
         assert first["ask"]["groups"][0]["options"][-1]["label"] == "Other"
+        assert [o["label"] for o in first["ask"]["groups"][0]["options"]] == [
+            "Share a live list", "Use a separate list", "Other"]
+        assert first["ask"]["delta"].startswith("A volunteer checks in a coat")
+        assert first["ask"]["groups"][-1]["question"] == "Anything else we missed that you'd like to include?"
+        assert sum(g["id"] == "size" for g in first["ask"]["groups"]) == 1
+        if loose_answer:
+            assert first["ask"]["groups"][1]["options"][0]["label"] == "SQLite"
+        else:
+            assert "Keep claims in a local database — The desk can reopen claims" in first["ask"]["proposal"]
         assert "plan" not in run.store.read(run.store.cursor().vision)["answer"]
         if loose_answer:
             assert run.store.records("lead2_normalisation")[-1][2]["ignoredEdits"] == 1
         assert run.step() == "ALIGN"
         assert run.step() == "A"
-        reply("handoff", ("q1", "other", {"text": other}), ("round", "approve", {}))
+        second = reply("handoff", ("anything-else", "other", {"text": other}), ("round", "approve", {}))
+        assert second["ask"]["groups"][-1]["id"] == "anything-else"
+        assert all(g["id"] != "size" for g in second["ask"]["groups"])
         stale_user = run.user
         assert run.step() == "ALIGN"  # The simultaneous request for a change must be folded first.
         assert other in render_person(spec)
@@ -654,6 +715,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
             run.step()
         assert not spec.pins()
         a = reply("vision lock", ("round", "approve", {}))
+        assert a["ask"]["groups"][-1]["id"] == "anything-else"
         assert a["subject"]["size"] == "small"  # The scripted planner kept recommending micro.
         assert run.step() == ("L2-SPEC" if loose_answer else "L2-REVIEW")
         if loose_answer:
@@ -672,29 +734,58 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
             proposal = scope["ask"]["proposal"]
             assert "Claims print — pickup time and claim ID" in proposal
             assert "An outstanding claim is omitted" in proposal
-        assert run.step() == "B"
+            assert run.step() == "L2-REVIEW"
+            if review_reply == "button":
+                choice = reply("where", ("q1", "o2", {}))
+                assert choice["ask"]["groups"][0]["options"][1]["label"] == "Either desk"
+                assert "at either desk" in choice["ask"]["groups"][0]["options"][1]["means"]
+                assert run.step() == "B"
+                assert "The receipt still finds it at either desk" in render_person(spec)
+                assert "at the original desk" not in render_person(spec)
+            else:
+                reply("where", ("q1", "other", {"text": counter}))
+                assert run.step() == "L2-REVIEW"
+                assert run.step() == "B"
+                assert counter in render_person(spec, detailed=True)
+        else:
+            assert run.step() == "B"
         assert run.step() == "B"
         offered = frontdoor.state(product)["waitingFor"]["ask"]["proposal"]
+        assert "1. Check in and recover a coat" in offered and "1. 1." not in offered
+        assert "### Demonstrations\n- Delivery 1\n- Delivery 3" in offered
+        assert "Desk tablet — Volunteer lead" in offered
+        assert "Spare receipt printer — Can't test here" in offered
         if not loose_answer:
             assert ("- **Claims** · pickup time and claim ID,\n"
                     "  - CSV · CSV rows\n  - print · print rows\n  - screen · screen rows") in offered
         assert "### Trace gaps" in offered
         assert ("Story has no promise linked yet" if loose_answer else "Promise has no design yet") in offered
         if loose_answer:
+            original_graph = spec.snapshot().graph
             original = reply("condition", ("round", "approve", {}), words=qualification)
             assert run.step() == "L2-SPEC" and "B" not in spec.pins()
-            assert run.step() == "L2-REVIEW" and run.step() == "B" and run.step() == "B"
+            assert run.step() == "B" and run.step() == "B"
             revised = frontdoor.state(product)["waitingFor"]
             assert revised["request"] != original["request"]
             summary = revised["ask"]["proposal"]
+            assert "### Changes since the last offer" in summary and qualification in summary
             assert "The CSV omits any correction reason" in summary
-            assert "an outstanding claim appears as 'No claim recorded'." in frontdoor.state(
-                product, full_spec=True,
-            )["spec"]
+            assert "Desk tablet — Volunteer lead" in summary
+            assert "Spare receipt printer — Can't test here" in summary
+            assert "Story has no promise linked yet: A volunteer can look for a lost claim" in summary
+            updated = spec.snapshot().graph
+            changed = [ref for ref, node in original_graph.nodes.items() if node != updated.nodes[ref]]
+            assert len(changed) == 1
+            assert "An export lists each outstanding claim" in updated.nodes[changed[0]]["result"]
+            assert original_graph.links == updated.links
         b = reply("demo", ("delivery-1", "show", {}))
+        groups = {g["id"]: g for g in b["ask"]["groups"]}
+        assert groups["delivery-1"]["default"] == "show" and groups["delivery-2"]["default"] == "skip"
+        assert "1. Check in" not in groups["delivery-1"]["question"]
         assert "Restart the tablet before the second shift scans the receipt" not in b["ask"]["proposal"]
         full = frontdoor.state(product, full_spec=True)
         assert "Restart the tablet before the second shift scans the receipt" in full["spec"]
+        assert "Claim storage module" in full["spec"] and "Claim restart test" in full["spec"]
         assert full["buildOrder"] == draft["build_order"]
         expected_result = "omits any correction reason" if loose_answer else "The receipt still finds it"
         assert expected_result in b["ask"]["proposal"]
@@ -708,7 +799,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
         cursor = run.run()
         assert cursor.state == "L2-READY"
         receipt = run.store.read(cursor.B)
-        assert receipt["demonstrations"] == ["delivery-1"]
+        assert receipt["demonstrations"] == ["delivery-1", "delivery-3"]
         assert receipt["scripted"] is True and receipt["request"] == waiting["request"]
         assert spec.pins()["B"] == b["subject"]["lead2_revision"] > spec.pins()["A"]
         assert any(n.get("reason") == "accepted default" and "Show the outstanding claim" in n["decision"]
@@ -719,8 +810,11 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer):
         assert status["controller"] == "idle"
         assert status["approvedSpec"]["revision"] == spec.pins()["B"]
         assert status["approvedSpec"]["buildOrder"] == draft["build_order"]
+        assert status["approvedSpec"]["accessNeeds"] == access
         assert gitwork.git(product, "rev-parse", "HEAD") == initial_commit
-        expected_calls = ["LEAD2-SPEC", "REVIEW", "REVIEW", "LEAD2-SPEC", "REVIEW"] if loose_answer else ["REVIEW"]
+        expected_calls = ["LEAD2-SPEC", "REVIEW", "REVIEW", "LEAD2-SPEC"] if loose_answer else ["REVIEW"]
+        if review_reply == "other":
+            expected_calls.append("LEAD2-SPEC")
         assert calls == ["LEAD2-ALIGN"] * 3 + expected_calls
     finally:
         run.close()
@@ -775,6 +869,12 @@ def test_fresh_lead_attempt_and_pause_journey(tmp_path, monkeypatch):
     planner = Planner()
     run = Run(product, tmp_path / "workers", "Show a shared shelf.", {}, planner, waiting, mode="lead2")
     try:
+        assert run.step() == "ALIGN"
+        run.user = lambda item: {"request": item["request"], "replyId": "kickoff",
+                                "selections": [{"groupId": "technical", "optionId": "other",
+                                                "text": "Business terms, please."}]}
+        assert run.step() == "ALIGN" and planner.calls == 0
+        run.user = waiting
         assert run.run().state == "ALIGN" and planner.calls == 2
         assert len(run.store.records("lead2_unusable_answer")) == 1
         assert "Describe at least one story" in frontdoor.state(product)["reason"]

@@ -13,10 +13,12 @@ from .views import render_person
 
 ROUND = "round"
 SIZE = "size"
+TECHNICAL = "technical"
+ANYTHING_ELSE = "Anything else we missed that you'd like to include?"
 APPROVE = "approve"
 REVISE = "revise"
-RELAY = ("Show the proposal and options. Relay the person's choices and exact words with a fresh replyId. "
-         "Reuse it on transport retry. Relay unqualified approval as the Approve selection alone.")
+RELAY = ("Show the proposal and options. Relay exact choices and words with a fresh replyId reused on retry. "
+         "Relay approval as Approve, with the exact condition if qualified.")
 
 
 def manually_paused(store):
@@ -31,16 +33,17 @@ def set_paused(store, value):
 
 
 def state(store, cursor, run, active, submitted=False, full_spec=False):
-    reason = cursor.failure.partition(";")[0].split("\n", 1)[0]
-    result = {"mode": MODE, "reason": reason, "run": str(Path(run).resolve()),
+    result = {"mode": MODE, "reason": cursor.failure.partition(";")[0].split("\n", 1)[0],
+              "run": str(Path(run).resolve()), "status": "RUNNING" if active else "PAUSED",
               "state": cursor.state, "controller": "running" if active else "idle",
               "units": {}, "outcome": None, "waitingFor": None}
     if cursor.state == READY:
         approval = store.read(cursor.B)
         subject = approval["subject"]
+        plan = store.read(subject["plan"])
         result.update(status="PLANNED", next="The spec and build order are approved at B.", approvedSpec={
             "revision": subject["lead2_revision"], "approval": cursor.B, "scripted": approval["scripted"],
-            "buildOrder": store.read(subject["plan"])["build_order"],
+            "buildOrder": plan["build_order"], "accessNeeds": plan.get("access", []),
             "demonstrations": approval["demonstrations"],
         })
     elif cursor.state == "STOPPED":
@@ -54,12 +57,11 @@ def state(store, cursor, run, active, submitted=False, full_spec=False):
         groups = [{**group, "options": [*group["options"], other]} for group in ask["groups"]]
         result["waitingFor"] = {"request": cursor.decision, "gate": item["gate"], "subject": item["subject"],
                                 "ask": {**ask, "groups": groups}}
-        status = "RUNNING" if active else "PAUSED" if manually_paused(store) else "WAITING"
         more = (" Use state with full_spec=true for the full spec." if item["gate"] in {"scope", "B"} else "")
-        result.update(status=status,
-                      next=f"{RELAY} Use answer with request {cursor.decision}.{more}")
+        if not active and not manually_paused(store):
+            result["status"] = "WAITING"
+        result["next"] = f"{RELAY} Use answer with request {cursor.decision}.{more}"
     else:
-        result.update(status="RUNNING" if active else "PAUSED")
         if active:
             _show_attempt(store, cursor, result)
             result["next"] = "Use pause to pause this run."
@@ -78,16 +80,16 @@ def state(store, cursor, run, active, submitted=False, full_spec=False):
 
 
 def _show_attempt(store, cursor, result):
-    actor = "reviewer" if cursor.state == "L2-REVIEW" else "planner"
+    actor = "reviewer" if cursor.state == "L2-REVIEW" and not cursor.requestedChange else "planner"
     if cursor.state in ("ALIGN", "A"):
         round_number = 1 + sum(r["gate"] == "A" for _, _, r in store.records("decision_request"))
         result["reason"] = f"The planner is working on round {round_number}."
     else:
         result["reason"] = f"The {actor} is working."
-    attempts = store.records("attempt")
-    if not attempts:
+    row = next(reversed(store.records("attempt")), None)
+    if not row:
         return
-    ref, _, attempt = attempts[-1]
+    ref, _, attempt = row
     if any(end["attempt"] == ref for _, _, end in store.records("attempt_end")):
         return
     elapsed = max(0, int(time.time() - attempt["startedAt"]))
@@ -105,31 +107,44 @@ def answer(request, words, reply_id, selections, refusal):
             **({"selections": selections} if selections else {})}
 
 
-def group(ref, question, options, *, default=None):
-    return {"id": ref, "question": question, "options": options,
-            "default": default or options[0]["id"]}
+def group(ref, question, options):
+    return {"id": ref, "question": question, "options": options, "default": options[0]["id"]}
 
 
 def options(*items):
     return [{"id": ref, "label": label, "means": means} for ref, label, means in items]
 
 
+def ask_technical(store):
+    choices = options(("plain", "No, keep it in business terms", "Recommend and explain the stack."),
+                      ("technical", "Yes, show me the technical choices",
+                       "Offer stack choices with defaults."))
+    request(store, "Kickoff", 0, [group(TECHNICAL, "Are you technical?", choices)],
+            proposal="", summary="")
+
+
 def product_groups(questions):
     grouped = {}
     for row in questions:
-        label = row["label"].strip()
-        if label and label.casefold() != "other":
-            picks = grouped.setdefault(row["question"].strip(), {})
-            picks.setdefault(label.casefold(), (label, row["means"]))
+        for role in ("recommended", "alternative"):
+            label, means = row[role].strip(), row[f"{role}_means"]
+            if label and label.casefold() != "other":
+                picks = grouped.setdefault(row["question"].strip(), {})
+                picks.setdefault(label.casefold(), (label, means))
     return [group(f"q{i}", question, options(*((f"o{j}", *option)
              for j, option in enumerate(picks.values(), 1))))
             for i, (question, picks) in enumerate(grouped.items(), 1)]
 
 
+def closing_group():
+    return group("anything-else", ANYTHING_ELSE, options(("nothing", "Nothing else", "Continue.")))
+
+
 def gate_group(gate, *, recommend=True):
     approved = {
         "A": ("Lock this vision at A", "Accept the displayed vision and any unanswered defaults."),
-        "B": ("Approve the spec at B", "Accept the displayed spec, build order and chosen demonstrations."),
+        "B": ("Approve the spec at B",
+              "Accept the spec, build order, chosen demonstrations and any displayed testing limits."),
         "scope": ("Accept this change", "Update the agreed scope as shown."),
     }
     approved_label, approved_means = approved[gate]
@@ -177,5 +192,4 @@ def read_reply(store, user, ref, item):
                         "label": option["label"] if option else "Other",
                         "meaning": option["means"] if option else selection["text"]})
     material = [c for c in choices if c["group"] != ROUND or c["optionId"] == "other"]
-    selected_words = "\n".join(c["text"] or c["label"] for c in (material or choices))
-    return reply, words or selected_words, choices
+    return reply, words or "\n".join(c["text"] or c["label"] for c in (material or choices)), choices
