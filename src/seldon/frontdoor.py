@@ -229,11 +229,9 @@ def server(setup=providers.setup_facts):
 
     app = MCPServer("seldon", instructions=(
         "Relay the user's dream through start. " + RELAY +
-        " Show the statusPage link when start returns it."
+        " Show the statusPage and statusHome links when returned."
         " Show state and its next sentence; all decisions happen in this chat."))
-    from .lead2.status_page import StatusPages
-
-    pages = StatusPages()
+    from .lead2.status_page import links
 
     def tool(fn):
         @wraps(fn)
@@ -244,7 +242,17 @@ def server(setup=providers.setup_facts):
                 raise ToolError(str(error)) from error
         return app.tool()(relay)
 
-    tool(state)
+    @app.tool(name="state")
+    def show_state(run: str, full_spec: bool = False):
+        """Read the current run, its pending decision and its status page."""
+        try:
+            result = state(run, full_spec)
+        except Refusal as error:
+            raise ToolError(str(error)) from error
+        if result.get("mode") == chat.MODE:
+            result.update(links(Path(result["run"])))
+        return result
+
     tool(pause)
 
     @tool
@@ -261,7 +269,7 @@ def server(setup=providers.setup_facts):
         Run(project, root / "workers", dream, facts, None, None).close()
         result = spawn(project)
         if result.get("mode") == chat.MODE:
-            result["statusPage"] = pages.add(project)
+            result.update(links(project))
         return result
 
     def available(run):

@@ -815,6 +815,13 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         assert status["approvedSpec"]["revision"] == spec.pins()["B"]
         assert status["approvedSpec"]["buildOrder"] == draft["build_order"]
         assert status["approvedSpec"]["accessNeeds"] == access
+        from seldon.lead2.status_read import status as read_pane
+
+        pane = read_pane(run.store)
+        latest = pane["frames"][-1]
+        assert latest["activity"] == "Plan approved at B"
+        # The revised export still appears in the approved trace after the conditional B loop.
+        assert any(expected_result in row["feature"]["text"] for row in pane["trace"][latest["revision"]])
         assert gitwork.git(product, "rev-parse", "HEAD") == initial_commit
         expected_calls = ["LEAD2-SPEC", "REVIEW", "REVIEW", "LEAD2-SPEC"] if loose_answer else ["REVIEW"]
         if review_reply == "other":

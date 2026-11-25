@@ -1,20 +1,56 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Seldon · Planner status</title>
+<!-- theme script -->
 <style>
 :root{--ink:#243b32;--muted:#5e6a61;--paper:#f7f8f3;--line:#dfe4da;--green:#286246;--soft:#edf3e8;
 --q:#846018;--planned:#56697b;--building:#285db0;--review:#8a5a00;--fix:#a43d36;--passed:#21756e;--accepted:#174c35;--glow:#e8b23a}
+:root[data-theme=dark]{--ink:#e9eee6;--muted:#a2ada3;--paper:#0f1a17;--line:#2a3a34;--green:#6fbf8f;--soft:#1d3029;--glow:#f0bf4c}
+:root[data-theme=dark] header,:root[data-theme=dark] section,:root[data-theme=dark] .node,:root[data-theme=dark] .vision,:root[data-theme=dark] aside{background:#16231f}
+:root[data-theme=dark] .stage{background:#13201c}:root[data-theme=dark] .stage.done{background:var(--soft)}:root[data-theme=dark] .stage.current{background:#2a2412}
+:root[data-theme=dark] .node .tag{background:#22302b}:root[data-theme=dark] .s-fix{background:#2b1a18}
+:root[data-theme=dark]{--planned:#8ea3b6;--building:#8fb3ef;--review:#e6b85c;--fix:#e0796f;--passed:#6fd0c4;--accepted:#6fbf8f}
+:root[data-theme=dark] body{background:var(--paper)}
+:root[data-theme=dark] h1,:root[data-theme=dark] h2,:root[data-theme=dark] .vision h3{color:var(--ink)}
+:root[data-theme=dark] .stage{border-color:var(--line);color:var(--ink)}
+:root[data-theme=dark] .stage.done{border-color:#2f5a44}
+:root[data-theme=dark] .stage.current{border-color:var(--glow);box-shadow:0 0 0 3px #f0bf4c33,0 0 24px #f0bf4c44}
+:root[data-theme=dark] .stage.current .act{background:#3a3014;color:var(--glow)}
+:root[data-theme=dark] .node{border-color:var(--line);color:var(--ink)}
+:root[data-theme=dark] .node.empty{background:transparent}
+:root[data-theme=dark] .s-passed,:root[data-theme=dark] .s-accepted{border-color:#8a7330;box-shadow:0 0 0 2px #f0bf4c33,0 0 16px #f0bf4c55}
+:root[data-theme=dark] .vision{border-color:#2f5a44}
+:root[data-theme=dark] svg.lines path{stroke:#33463e}
+:root[data-theme=dark] svg.lines path.lit{stroke:#f0bf4c}
+:root[data-theme=dark] svg.lines path.bad{stroke:#e0796f}
+:root[data-theme=dark] .plan:hover,:root[data-theme=dark] .plan.active{background:#1d3029}
+:root[data-theme=dark] .replay input{accent-color:var(--green)}
+:root[data-theme=dark] .replay button{background:#2f6e4f}
+section h2{font:400 21px/1.2 Georgia,serif;letter-spacing:-.2px;margin-bottom:12px}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.5 'DM Sans',system-ui,sans-serif}
+.theme{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:20px;padding:4px 10px;cursor:pointer;font:inherit;font-size:12px}
+.shell{display:flex;min-height:calc(100vh - 57px)}
+aside{width:236px;flex-shrink:0;border-right:1px solid var(--line);background:#fff;padding:14px 12px;transition:width .2s}
+aside.collapsed{width:52px}aside.collapsed .nav-label,aside.collapsed .plan-name,aside.collapsed .plan-sub,aside.collapsed .showmore{display:none}
+.navhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.nav-label{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:600}
+.collapse{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:6px;width:26px;height:26px;cursor:pointer}
+.plan{display:flex;gap:9px;align-items:center;padding:8px 6px;border-radius:8px;text-decoration:none;color:inherit;margin-bottom:2px}
+.plan:hover{background:var(--soft)}.plan.active{background:var(--soft);font-weight:600}
+.pdot{width:9px;height:9px;border-radius:50%;flex-shrink:0;background:var(--line)}.pdot.wait{background:var(--glow);box-shadow:0 0 6px var(--glow)}.pdot.build{background:#285db0}.pdot.fix{background:#a43d36}.pdot.done{background:var(--green)}
+.plan-name{font-size:12.5px;line-height:1.2}.plan-sub{font-size:10.5px;color:var(--muted);display:block}
+.showmore{display:block;font-size:11.5px;color:var(--green);margin:8px 6px;text-decoration:none}
+.shell main{flex:1;min-width:0}
 h1{font:400 32px/1.15 Georgia,serif;margin:0}h2{font-size:15px;margin:0 0 10px}small,.muted{color:var(--muted)}
 header{display:flex;justify-content:space-between;align-items:center;padding:14px 26px;border-bottom:1px solid var(--line);background:#fff}
 .brand{display:flex;gap:9px;align-items:center;font-weight:600;font-size:18px}.mark{width:26px;height:28px;border-radius:8px 8px 12px 8px;background:var(--green);color:#fff;display:grid;place-items:center;font-family:Georgia}
 .now{display:flex;align-items:center;gap:10px;font-size:13px}.pulse{width:10px;height:10px;border-radius:50%;background:var(--glow);box-shadow:0 0 0 0 #e8b23a99;animation:p 1.6s infinite}
 @keyframes p{0%{box-shadow:0 0 0 0 #e8b23a99}70%{box-shadow:0 0 0 10px #e8b23a00}100%{box-shadow:0 0 0 0 #e8b23a00}}
-main{padding:22px 26px;max-width:1300px;margin:auto}
+main{padding:22px 26px;max-width:1300px;margin:0 auto}
 section{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:18px}
 /* loop strip */
 .loop{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:6px 2px 4px}
-.stage{min-width:96px;flex:1;border:1px solid var(--line);border-radius:10px;padding:10px 11px;background:#fbfcf8;position:relative;transition:.4s}
+.stage{min-width:118px;flex:1;border:1px solid var(--line);border-radius:10px;padding:10px 11px;background:#fbfcf8;position:relative;transition:.4s}
 .arrow{align-self:center;color:#9fb094;padding:0 6px;font-size:18px}
 .stage b{display:block;font-size:12px}.stage small{display:block;font-size:10px;margin-top:3px}
 .stage .loopmark{position:absolute;top:6px;right:8px;font-size:11px;color:var(--muted)}
@@ -32,7 +68,7 @@ section{background:#fff;border:1px solid var(--line);border-radius:12px;padding:
 .s-passed{--st:var(--passed)}.s-accepted{--st:var(--accepted)}
 .s-passed,.s-accepted{box-shadow:0 0 0 2px #e8b23a40,0 0 16px #e8b23a66;border-color:#e3c27a}
 .vision{align-self:stretch;display:flex;flex-direction:column;justify-content:center;border:1px solid #bdcbb6;border-radius:11px;padding:14px;background:#fff}
-.idea-title{font:400 22px/1.1 Georgia,serif;margin:6px 0}
+.vision h3,.vision .idea-title{font:400 22px/1.1 Georgia,serif;margin:6px 0}
 svg.lines{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0}.row,.vision{position:relative;z-index:1}
 svg.lines path{fill:none;stroke:#c3d0ba;stroke-width:1.4}svg.lines path.lit{stroke:#e2a92b;stroke-width:2.2;filter:drop-shadow(0 0 4px #e8b23a)}
 svg.lines path.bad{stroke:var(--fix);stroke-width:2}
@@ -42,54 +78,71 @@ svg.lines path.bad{stroke:var(--fix);stroke-width:2}
 .story{font-size:12px;color:var(--muted);margin-top:8px;min-height:18px}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
-.cols,.row{grid-template-columns:repeat(5,minmax(0,1fr))}
-.cols{margin-left:calc((100% + 10px) / 6)}
-.trace{min-height:80px}
-.trace-wrap{position:relative;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
-.trace-wrap .trace{grid-column:span 5}
-.vision{justify-content:start}
-.stage b{padding-right:8px}
-.story:empty{display:none}
-.node,.vision{font-family:inherit;color:inherit;text-align:left}
-.node{overflow-wrap:anywhere;align-self:stretch}
+.brand,.now{min-width:0}
+.brand-link{color:inherit;text-decoration:none;display:flex;gap:9px;align-items:center}
+.all-plans,#identity{font-weight:400;margin-left:14px}
+.all-plans{font-size:12px;color:var(--green);white-space:nowrap}
+#identity,.plan-name,.plan-sub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plan > span:last-child{min-width:0}.plan-name{display:inline-block;max-width:100%;vertical-align:middle}
+.now > .pulse,.now > .theme{flex:none}.now > .theme{margin-left:12px}
+.stage .pulse{width:7px;height:7px;flex:none}
+.cols,.row,.trace-preview{grid-template-columns:repeat(6,minmax(0,1fr))}
+.trace-wrap{position:relative}
+.row:not(.with-vision)::before{content:""}
+.trace-preview{display:grid;gap:10px}
+.trace-preview > .muted{grid-column:span 5;margin:8px 0}
+.vision{width:100%;min-width:0}
+.node,.vision{font-family:inherit;color:inherit;text-align:left;overflow-wrap:anywhere}
+.node .label{display:block}
 .node:not(.empty),button.vision{cursor:pointer}
-.node:not(.empty):hover,.vision:hover{border-color:var(--green);background:var(--soft)}
+.node:not(.empty):hover,.vision:hover{border-color:var(--green)}
 .node:focus-visible,.vision:focus-visible{outline:2px solid var(--green);outline-offset:2px}
-.node .label{display:block;font-weight:600}
-.node .cell-label{display:none}
-.vision{align-self:start;width:100%;min-width:0}
-#idea{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .feature-group + .feature-group{border-top:1px solid var(--line);padding-top:10px}
 dialog{width:min(440px,calc(100% - 24px));max-height:70dvh;overflow:auto;padding:16px;
-       border:1px solid var(--line);border-radius:12px;color:var(--ink)}
+       border:1px solid var(--line);border-radius:12px;color:var(--ink);background:#fff}
+:root[data-theme=dark] dialog{background:#16231f}
 dialog::backdrop{background:#243b3260}
 dialog form{display:flex;justify-content:space-between;align-items:start;gap:8px}
 dialog button{border:1px solid var(--line);border-radius:6px;background:var(--soft);padding:4px 10px;
               color:inherit;cursor:pointer}
 #inspectorBody p{white-space:pre-wrap;overflow-wrap:anywhere}
 #inspectorBody ul{padding-left:20px}
-.replay input{min-width:0}
-.replay button{flex:none}
-.replay{position:sticky;bottom:8px;z-index:2}
+.replay input{min-width:0}.replay button{flex:none}
 #live{border-radius:6px;width:auto;padding:0 12px}
-.pulse{flex:none}
-@media(max-width:760px){
-  header{padding:12px 14px;gap:12px}
-  main{padding:12px}
-  section{padding:12px}
-  .stage{min-width:118px}
-  .cols{display:none}
-  .trace-wrap{display:block}
-  .trace{margin-top:12px}
-  .row{grid-template-columns:1fr 1fr;align-items:stretch;padding-bottom:10px;
-       border-bottom:1px solid var(--line)}
-  .node:first-child{grid-column:1/-1}
-  .node .cell-label{display:block;margin-bottom:4px}
-  svg.lines{display:none}
+.trace-scroll{overflow-x:auto;padding:2px;margin:-2px}
+.trace-content{min-width:660px}
+@media (max-width:700px){
+  header{padding:14px 16px;gap:10px}
+  .brand{flex:1;flex-wrap:wrap;row-gap:2px}
+  #nowText{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:29vw}
+  #identity{flex-basis:100%;margin:0}.all-plans,.now > .theme{margin-left:0}
+  .trace-content{min-width:720px}
+  .cols,.row,.trace-preview{grid-template-columns:136px repeat(5,minmax(0,1fr))}
+  .vision{padding:12px}
+  .shell aside:not(.expanded){width:52px}
+  .shell aside:not(.expanded) :is(.nav-label,.plan-name,.plan-sub,.showmore){display:none}
+  aside.expanded{width:min(236px,58vw)}
 }
 </style></head><body>
-<header><div class="brand"><div class="mark">S</div>seldon</div>
-<div class="now"><span class="pulse" aria-hidden="true"></span><span id="nowText" role="status">Loading…</span></div></header>
+<header>
+  <div class="brand">
+    <a class="brand-link" href="../"><span class="mark" aria-hidden="true">S</span>seldon</a>
+    <a class="all-plans" href="../">← All plans</a><small id="identity"></small>
+  </div>
+  <div class="now">
+    <span class="pulse" aria-hidden="true"></span><span id="nowText" role="status">Loading…</span>
+    <button type="button" class="theme" id="theme">Dark</button>
+  </div>
+</header>
+<div class="shell">
+  <aside id="side" aria-label="Recent plans">
+    <div class="navhead">
+      <span class="nav-label">Recent plans</span>
+      <button type="button" class="collapse" id="collapse" aria-controls="recent" aria-expanded="true"
+              aria-label="Collapse sidebar" title="Collapse sidebar">‹</button>
+    </div>
+    <div id="recent"><!-- recent plans --><a class="showmore" href="../">Show more →</a></div>
+  </aside>
 <main>
 <section>
   <h2>Where Seldon is</h2>
@@ -97,22 +150,39 @@ dialog button{border:1px solid var(--line);border-radius:6px;background:var(--so
   <div class="story" id="story"></div>
 </section>
 <section>
-  <h2>The trace</h2>
-  <div class="cols" aria-hidden="true"><div>Features</div><div>User stories</div><div>Checks &amp; walks</div><div>Code chunk</div><div>Review / judge</div></div>
-  <div class="trace-wrap">
-    <button type="button" class="vision" id="ideaCell"><small>YOUR IDEA</small>
-      <span id="idea" class="idea-title"></span><small id="owner"></small></button>
-    <div class="trace" id="trace"></div>
-    <svg class="lines" id="lines" aria-hidden="true"></svg>
+  <h2>The trace · lights up as each piece is built, reviewed and proven</h2>
+  <div class="trace-scroll" tabindex="0" role="region" aria-label="Plan trace">
+    <div class="trace-content">
+      <div class="cols" aria-hidden="true">
+        <div>Your idea</div><div>Features</div><div>User stories</div><div>Checks &amp; walks</div>
+        <div>Code chunk</div><div>Review / judge</div>
+      </div>
+      <div class="trace-wrap">
+        <svg class="lines" id="lines" aria-hidden="true"></svg>
+        <div class="trace" id="trace">
+          <button type="button" class="vision" id="ideaCell"><small>YOUR IDEA</small>
+            <span class="idea-title" id="idea"></span><small id="owner"></small></button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="legend">
+    <span><i style="background:var(--planned)"></i>Planned</span>
+    <span><i style="background:var(--building)"></i>Building</span>
+    <span><i style="background:var(--review)"></i>Under review</span>
+    <span><i style="background:var(--fix)"></i>Review failed → fixing</span>
+    <span><i style="background:var(--passed)"></i>Passed (glows)</span>
+    <span><i style="background:var(--accepted)"></i>Accepted by you</span>
   </div>
 </section>
 <section class="replay" aria-label="Replay">
   <button type="button" id="play" aria-label="Play replay">▶</button>
   <input type="range" id="t" min="0" max="0" value="0" aria-label="Replay position">
   <small id="tlabel"></small>
-  <button type="button" id="live">Live</button>
+  <button type="button" id="live" hidden>Live</button>
 </section>
 </main>
+</div>
 <dialog id="inspector" aria-labelledby="inspectorTitle">
   <form method="dialog"><h2 id="inspectorTitle"></h2><button autofocus>Close</button></form>
   <div id="inspectorBody"></div>
@@ -135,7 +205,24 @@ const STATUS = {
 };
 const byId = id => document.getElementById(id);
 const loop = byId("loop"), trace = byId("trace"), timeline = byId("t"), lines = byId("lines");
-let data, following = true, timer, shown, shownTrace, reachable = true;
+const vision = byId("ideaCell");
+
+const side = byId("side"), collapse = byId("collapse");
+const phone = matchMedia("(max-width:700px)");
+function setSidebar(collapsed) {
+  side.classList.toggle("collapsed", collapsed);
+  side.classList.toggle("expanded", !collapsed);
+  collapse.textContent = collapsed ? "›" : "‹";
+  const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
+  collapse.setAttribute("aria-label", label);
+  collapse.setAttribute("aria-expanded", String(!collapsed));
+  collapse.title = label;
+}
+setSidebar(phone.matches);
+phone.addEventListener("change", () => setSidebar(phone.matches));
+collapse.onclick = () => setSidebar(!side.classList.contains("collapsed"));
+
+let data, revision, following = true, timer, shown, shownTrace, reachable = true;
 
 function element(tag, text, css) {
   const node = document.createElement(tag);
@@ -145,17 +232,15 @@ function element(tag, text, css) {
 }
 
 function drawLines() {
-  if (window.innerWidth <= 760) return;
   lines.replaceChildren();
   const bounds = lines.getBoundingClientRect();
   const middle = node => {
     const box = node.getBoundingClientRect();
     return [box.left - bounds.left, box.right - bounds.left, box.top - bounds.top + box.height / 2];
   };
-  const vision = document.querySelector(".vision");
   for (const row of trace.querySelectorAll(".row")) {
     let from = vision;
-    for (const to of row.children) {
+    for (const to of row.querySelectorAll(".node")) {
       const [, x1, y1] = middle(from), [x2, , y2] = middle(to);
       const center = (x1 + x2) / 2;
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
@@ -180,13 +265,23 @@ function showStages(frame) {
     stage.append(element("b", name));
     const sub = index === 1 && frame.stage >= 1 ? `Round ${frame.rounds}` :
       index === 4 && frame.reviews ? `${frame.reviews} of 3` : hint;
-    if (sub) stage.append(element("small", sub));
-    if (selected) stage.append(element("span", frame.activity, "act"));
+    stage.append(element("small", sub));
+    if (selected) {
+      const dot = element("span", "", "pulse");
+      dot.setAttribute("aria-hidden", "true");
+      const activity = element("span", "", "act");
+      activity.append(dot, frame.activity);
+      stage.append(activity);
+    }
     loop.append(stage);
   });
   if (frame.stage !== shown) {
     const current = loop.querySelector(".current");
-    loop.scrollLeft = current.offsetLeft - loop.offsetLeft - 8;
+    if (current) {
+      const view = loop.getBoundingClientRect(), step = current.getBoundingClientRect();
+      if (step.right > view.right - 4) loop.scrollLeft += step.right - view.right + 4;
+      if (step.left < view.left + 4) loop.scrollLeft += step.left - view.left - 4;
+    }
     shown = frame.stage;
   }
 }
@@ -211,12 +306,13 @@ function inspect(heading, entries) {
 const count = (items, noun, plural = noun + "s") =>
   items.length ? `${items.length} ${items.length === 1 ? noun : plural}` : "";
 
-function traceCell(values, category, style, label) {
+function traceCell(values, category, style, label, status) {
   const cell = element(values.length ? "button" : "div", "", "node s-" + style + (values.length ? "" : " empty"));
-  cell.append(element("small", category, "cell-label"), element("span", label || "—", "label"));
+  cell.append(element("span", label || "…", "label"));
   if (values.length) {
     cell.type = "button";
-    cell.setAttribute("aria-label", `${category}: ${label}`);
+    cell.append(element("span", status, "tag"));
+    cell.setAttribute("aria-label", `${category}: ${category === LABELS[4] ? status : label}`);
     cell.onclick = () => inspect(values.length === 1 ? values[0].label : category, values);
   }
   return cell;
@@ -227,7 +323,11 @@ function showTrace(rows) {
   if (signature === shownTrace) return;
   shownTrace = signature;
   trace.replaceChildren();
-  if (!rows.length) trace.append(element("p", "Promises will appear as the plan takes shape.", "muted"));
+  if (!rows.length) {
+    const preview = element("div", "", "trace-preview");
+    preview.append(vision, element("p", "Promises will appear as the plan takes shape.", "muted"));
+    trace.append(preview);
+  }
   const groups = new Map();
   for (const item of rows) {
     if (!groups.has(item.group)) {
@@ -238,15 +338,19 @@ function showTrace(rows) {
       trace.append(group);
     }
     const row = element("div", "", "row");
+    if (item === rows[0]) {
+      row.classList.add("with-vision");
+      row.append(vision);
+    }
     const [style, label] = STATUS[item.status];
     row.dataset.line = style === "passed" ? "lit" : style === "fix" ? "bad" : "";
     const proof = [...item.checks, ...item.walks];
     const proofLabel = [count(item.checks, "check"), count(item.walks, "walk")].filter(Boolean).join(" · ");
     const cells = [[item.feature], item.stories, proof, item.modules, [{label, text:label}]];
     const summaries = ["", count(item.stories, "story", "stories"), proofLabel,
-      count(item.modules, "module"), label];
+      count(item.modules, "module"), "—"];
     cells.forEach((values, i) => row.append(traceCell(values, LABELS[i], style,
-      values.length === 1 ? values[0].label : summaries[i])));
+      i === 4 || values.length !== 1 ? summaries[i] : values[0].label, label)));
     groups.get(item.group).append(row);
   }
   requestAnimationFrame(drawLines);
@@ -259,8 +363,11 @@ function render() {
   byId("story").textContent = frame.detail;
   byId("idea").textContent = data.idea.label;
   byId("owner").textContent = data.idea.owner;
-  byId("tlabel").textContent = `${index + 1} / ${data.frames.length} · ${following ? "Live" : "Replay"}`;
-  byId("live").disabled = following;
+  const owner = data.idea.owner.split(/ · |, /)[0];
+  const identity = owner === "Dream owner" ? data.idea.label : data.idea.label + " · " + owner;
+  byId("identity").textContent = byId("identity").title = identity;
+  byId("tlabel").textContent = `${index + 1} / ${data.frames.length}`;
+  byId("live").hidden = following;
   showStages(frame);
   showTrace(data.trace[frame.revision]);
 }
@@ -296,12 +403,20 @@ byId("play").onclick = () => {
 
 async function poll() {
   try {
+    const check = await fetch("revision");
+    if (!check.ok) throw new Error(check.status);
+    if (await check.text() === revision) {
+      if (!reachable) {
+        reachable = true;
+        byId("nowText").textContent = data.frames[+timeline.value].activity;
+      }
+      return;
+    }
     const response = await fetch("state.json");
     if (!response.ok) throw new Error(response.status);
-    const next = await response.json();
-    if (reachable && JSON.stringify(next) === JSON.stringify(data)) return;
+    data = await response.json();
+    revision = response.headers.get("X-Seldon-Revision");
     reachable = true;
-    data = next;
     timeline.max = data.frames.length - 1;
     if (following) timeline.value = timeline.max;
     render();
@@ -312,7 +427,7 @@ async function poll() {
     setTimeout(poll, 2000);
   }
 }
-window.addEventListener("resize", drawLines);
-byId("ideaCell").onclick = () => { if (data) inspect(data.idea.label, [data.idea]); };
+new ResizeObserver(drawLines).observe(document.querySelector(".trace-wrap"));
+vision.onclick = () => { if (data) inspect(data.idea.label, [data.idea]); };
 poll();
 </script></body></html>

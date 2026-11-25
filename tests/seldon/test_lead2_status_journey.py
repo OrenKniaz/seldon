@@ -2,19 +2,53 @@
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 from contextlib import closing
+from html.parser import HTMLParser
+from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
 import pytest
 
 from seldon import frontdoor
+from seldon.lead2 import status_page
 from seldon.run import Run
 
 pytestmark = pytest.mark.fast
 
 
-def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch):
+@pytest.fixture
+def status_process(tmp_path, monkeypatch):
+    monkeypatch.setenv("SELDON_HOME", str(tmp_path / "home"))
+    root = Path(frontdoor.__file__).resolve().parents[1]
+    monkeypatch.setenv("PYTHONPATH", str(root))
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    children = []
+
+    def launch(registry):
+        # Run the interpreter directly so the fixture owns the listening PID even on Windows.
+        child = subprocess.Popen([sys._base_executable, "-m", "seldon.lead2.status_server", str(registry)],
+                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        children.append(child)
+        return child
+
+    def stop():
+        child = children[-1]
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=5)
+
+    monkeypatch.setattr(status_page, "_launch", launch)
+    yield stop
+    if children:
+        stop()
+
+
+def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch, status_process):
     """The same URL shows the revisions through B without exposing a chat mutation route.
 
     The chat journey alone misses a severed kickoff URL, trace rows on the wrong revision,
@@ -58,16 +92,52 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch)
 
     launched = tool("start", dream=idea, folder=str(product))
     page = launched["statusPage"]
+    home = launched["statusHome"]
+    second = frontdoor.server(lambda: {})
+    result = asyncio.run(second.call_tool("start", {
+        "dream": "# Another venue\n\n# Venue note\n\nI'm Jo, a venue manager. Keep its door count separate.",
+        "folder": str(tmp_path / "other"),
+    }))
+    opened = json.loads(result.content[0].text)
+    assert opened["statusHome"] == home
+    assert opened["statusPage"] != page
+
+    def read_home():
+        with urlopen(home, timeout=5) as response:
+            return response.read().decode()
+
+    def sidebar_links(url):
+        class Sidebar(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "a" and "plan" in attrs.get("class", "").split():
+                    links.append((attrs["href"], attrs["aria-label"], attrs.get("aria-current")))
+
+        links = []
+        with urlopen(url, timeout=5) as response:
+            Sidebar().feed(response.read().decode())
+        return links
+
+    listing = read_home()
+    assert "Another venue" in listing and "Keep one shared door count" in listing
+    assert "Jo · venue manager" in listing and "Keep its door count separate." in listing
     with urlopen(page, timeout=5) as response:
         assert "Where Seldon is" in response.read().decode()
     endpoint = page + "state.json"
     with pytest.raises(HTTPError) as error:
         urlopen(Request(endpoint, data=b"approve"), timeout=5)
     assert error.value.code == 501
+    with pytest.raises(HTTPError) as error:
+        urlopen(Request(home, headers={"Host": "other.example"}), timeout=5)
+    assert error.value.code == 404
 
     def read_status():
         with urlopen(endpoint, timeout=5) as response:
             return json.load(response)
+
+    def revision():
+        with urlopen(page + "revision", timeout=5) as response:
+            return response.read()
 
     def reply(group="round", option="approve"):
         decision = tool("state", run=str(product))["waitingFor"]
@@ -79,13 +149,26 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch)
     ))) as run:
         assert read_status()["idea"]["text"] == idea
         assert read_status()["idea"]["label"] == "Keep one shared door count while the door"
+        initial = revision()
+        assert revision() == initial
         run.step()
         reply("technical", "plain")
         run.step()
         run.step()
         align = read_status()
+        assert revision() != initial
         assert align["frames"][-1]["activity"] == "Waiting on you"
         assert align["trace"][str(align["frames"][-1]["revision"])] == []
+        now = read_home().split('id="now"', 1)[1].split('id="earlier"', 1)[0]
+        assert now.index("Keep one shared door count") < now.index("Another venue")
+        assert "Waiting on you" in now and "Align the idea" in now
+        current, other = sidebar_links(page)
+        assert current == (f'../{page.rstrip("/").split("/")[-1]}/',
+                           "Keep one shared door count while the door · Waiting on you", "page")
+        assert other[1:] == ("Another venue · Planning", None)
+        linked = urljoin(page, other[0])
+        assert linked == opened["statusPage"]
+        assert sidebar_links(linked)[1] == (*other[:2], "page")
         reply()
         run.step()
         run.step()
@@ -110,3 +193,15 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch)
         reply()
         run.step()
         assert read_status()["frames"][-1]["activity"] == "Plan approved at B"
+        now, earlier = read_home().split('id="earlier"', 1)
+        assert "Keep one shared door count" not in now
+        assert "Keep one shared door count" in earlier and "Plan approved at B" in earlier
+
+    (tmp_path / "other").rename(tmp_path / "moved")
+    status_process()
+    reopened = tool("state", run=str(product))
+    assert reopened["statusPage"] == page and reopened["statusHome"] == home
+    assert read_status()["frames"][-1]["activity"] == "Plan approved at B"
+    earlier = read_home().split('id="earlier"', 1)[1]
+    assert "Another venue" in earlier and "Missing" in earlier
+    assert all("Another venue" not in label for _, label, _ in sidebar_links(page))

@@ -1,58 +1,72 @@
-"""C20: serve the Fresh Lead pane on loopback for the lifetime of the chat server."""
+"""C20: register chats with the independent, loopback-only status server."""
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import os
+import sqlite3
+import subprocess
+import sys
+import time
+from contextlib import closing
 from pathlib import Path
-from secrets import token_urlsafe
-from threading import Lock, Thread
-
-from ..store import encode
-from .status_read import status
+from urllib.request import ProxyHandler, Request, build_opener
 
 
-class StatusPages:
-    def __init__(self):
-        self.runs = {}
-        self.server = None
-        self.lock = Lock()
+def registry_path():
+    home = Path(os.environ.get("SELDON_HOME", Path.home() / ".seldon"))
+    return home.resolve() / "lead2-status.sqlite3"
 
-    def add(self, project):
-        with self.lock:
-            if self.server is None:
-                self.server = ThreadingHTTPServer(("127.0.0.1", 0), self.handler())
-                Thread(target=self.server.serve_forever, daemon=True).start()
-            key = token_urlsafe(18)
-            self.runs[key] = project
-            return f"http://127.0.0.1:{self.server.server_port}/{key}/"
 
-    def handler(self):
-        html = Path(__file__).with_name("status_page.html").read_bytes()
-        runs = self.runs
+def _register(project, registry):
+    if not registry.is_file():
+        return None
+    with closing(sqlite3.connect(registry, timeout=1)) as db:
+        try:
+            port, key = db.execute("SELECT port, secret FROM server").fetchone()
+        except (TypeError, sqlite3.OperationalError):
+            return None  # First start has yet to publish its address.
+    base = f"http://127.0.0.1:{port}"
+    request = Request(f"{base}/register", os.fsencode(project), {"X-Seldon-Key": key})
+    try:
+        with build_opener(ProxyHandler({})).open(request, timeout=1) as response:
+            run = int(response.read())
+    except OSError:
+        return None
+    home = f"{base}/{key}/"
+    return {"statusHome": home, "statusPage": f"{home}{run}/"}
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                key, _, name = self.path.lstrip("/").partition("/")
-                project = runs.get(key)
-                if project is None or self.headers.get("Host") != f"127.0.0.1:{self.server.server_port}":
-                    self.send_error(404)
-                elif not name and self.path.endswith("/"):
-                    self.send_body("text/html", html)
-                elif name == "state.json":
-                    self.send_body("application/json", encode(status(project)).encode())
-                elif name == "favicon.ico":
-                    self.send_response(204)
-                    self.end_headers()
-                else:
-                    self.send_error(404)
 
-            def send_body(self, kind, body):
-                self.send_response(200)
-                self.send_header("Content-Type", f"{kind}; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(body)
+def _launch(registry):
+    args = ["-B", "-m", "seldon.lead2.status_server", str(registry)]
+    streams = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.name != "nt":
+        subprocess.Popen([sys.executable, *args], start_new_session=True, **streams)
+        return
+    # A chat's Windows Job ends with its transport. The local process service owns the listener.
+    interpreter = Path(sys._base_executable).with_name("pythonw.exe")
+    command = subprocess.list2cmdline([str(interpreter), *args])
+    source = str(Path(__file__).resolve().parents[2])
+    subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+         "$ErrorActionPreference='Stop'; "
+         "$process = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments "
+         "@{CommandLine=$env:SELDON_STATUS_COMMAND; CurrentDirectory=$env:SELDON_STATUS_SOURCE}; "
+         "exit $process.ReturnValue"],
+        env={**os.environ, "SELDON_STATUS_COMMAND": command, "SELDON_STATUS_SOURCE": source},
+        creationflags=subprocess.CREATE_NO_WINDOW, check=True, timeout=5, **streams,
+    )
 
-            def log_message(self, *_):
-                pass  # The MCP transport owns the console.
 
-        return Handler
+def links(project):
+    registry = registry_path()
+    if result := _register(project, registry):
+        return result
+    unavailable = {"statusError": "Could not open the Seldon status server. Ask for state to try again."}
+    try:
+        _launch(registry)
+    except (OSError, subprocess.SubprocessError):
+        return unavailable
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if result := _register(project, registry):
+            return result
+        time.sleep(.05)
+    return unavailable
