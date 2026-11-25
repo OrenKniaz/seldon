@@ -5,13 +5,17 @@ from dataclasses import replace
 LEAD2_MODE = "lead2"
 LEAD2_READY = "L2-READY"
 LEAD2_BUILT = "L2-BUILT"
+LEAD2_WALK = "L2-WALK"
 LEAD2_RUN = {
     "ALIGN": {"aligned": "A"},
-    "A": {"revise": "ALIGN", "approve": "L2-SPEC", "approve-spec": "L2-REVIEW"},
+    "A": {"revise": "ALIGN", "approve": "L2-STACK"},
+    "L2-STACK": {"revise": "L2-STACK", "approve": "L2-SPEC"},
     "L2-SPEC": {"planned": "L2-REVIEW", "revise": "L2-SPEC", "resolved": "B"},
-    "L2-REVIEW": {"reviewed": "B", "trace-progress": "L2-REVIEW", "revise": "L2-SPEC"},
+    "L2-REVIEW": {"reviewed": "B", "focus": "L2-REVIEW", "revise": "L2-SPEC"},
     "B": {"revise": "L2-SPEC", "approve": LEAD2_READY},
-    LEAD2_READY: {"built": LEAD2_BUILT},
+    LEAD2_READY: {"walk": LEAD2_WALK},
+    LEAD2_WALK: {"repair": LEAD2_READY, "continue": LEAD2_READY, "proved": "C"},
+    "C": {"approve": "ACCEPTED", "scripted": "SCRIPTED_C", "repair": LEAD2_WALK},
     LEAD2_BUILT: {},
 }
 TERMINAL = {"ACCEPTED", "SCRIPTED_C", "STOPPED", LEAD2_BUILT}

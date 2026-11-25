@@ -2,54 +2,57 @@
 
 from ..questions import labelled
 from ..schema import TEXT, array, choice, obj
-from .contracts import EDIT_FIELDS, OPTION_EDITS, SPEC_EDITS
+from .contracts import OPTION_FIELDS, SPEC_EDITS
 
 SIZES = {"micro": "Minutes of agent work.", "small": "An hour or two of agent work.",
          "medium": "Days of agent work across sessions.", "big": "Weeks or months of agent work."}
-QUESTIONS = array(obj(question=TEXT, recommended=TEXT, recommended_means=TEXT,
-                      alternative=TEXT, alternative_means=TEXT))
+QUESTION_FIELDS = dict(question=TEXT, recommended=TEXT, recommended_means=TEXT,
+                       alternative=TEXT, alternative_means=TEXT)
+QUESTIONS = array(obj(**QUESTION_FIELDS))
+MOCKUPS = array(obj(id=TEXT, label=TEXT, means=TEXT))
 DELIVERY = array(obj(outcome=TEXT, recommend_demo={"type": "boolean"}))
 ACCESS = array(obj(need=TEXT, supplier={"type": "string"}))
 ALIGN = obj(aligned={"type": "boolean"}, size=choice(*SIZES), size_reason=TEXT, questions=QUESTIONS,
-            stack={**EDIT_FIELDS["design"], "description": "Provisional stack choices and reasons."})
-REVIEW = obj(findings=TEXT, questions=QUESTIONS, option_edits=OPTION_EDITS)
+            **{kind: SPEC_EDITS[kind] for kind in ("person", "story", "retire", "link", "unlink")})
+STACK = obj(stack=SPEC_EDITS["design"], questions=QUESTIONS)
+REVIEW = obj(findings=TEXT, unresolved_issue={"type": "string"},
+             questions=array(obj(id=TEXT, recommended_id=TEXT, alternative_id=TEXT, **QUESTION_FIELDS)),
+             **OPTION_FIELDS)
 TASK = {
     "LEAD2-ALIGN": """Start reason with one real job in the owner's world from start to finish.
 Use the walk to cover functions, operation (hosting, users, roles, logins, backups, offline, connections,
 cost) and appearance (device, style, key screen, language, direction, accessibility, reference).
 Preserve exact values, handoffs, races and recovery. Ask only unanswered consequential choices.
 Use the size fields, never a product question about size. Honor the chosen size and scope.
-Link changed roles and short-titled stories to owner words. The owner decides readiness.
-Fold a ready micro or small spec and build order here; otherwise leave detailed spec arrays empty.""",
-    "LEAD2-SPEC": """Explain identities, state changes and design. Preserve exact owner choices.
-Walk overlap, recovery, fresh setup and stale retries. Order outcomes in one session and suggest demos.""",
-    "REVIEW": """What could disappear while this still passes? Repair trace, bundles, outputs, modules,
-tests and walks from the brief and replies while preserving accepted defaults and original retry outcomes.
-In findings list each notice and setting once. Quote the walk step where the recipient opens the notice
-(including reminders after restart) or another person sees the changed setting take effect. Add missing steps.
-Ask only for unresolved material product outcomes. Resolve implementation and proof using your judgment.
-Give each outcome option_edits marked with the exact question and recommended or alternative.
-Put complete node values in regular field order. For link/unlink/replaces use ref for source and
-values for targets; retire has no values. Keep distinct questions on separate nodes and keep options
+Link brief and relevant earlier reply refs to each short-titled story. Link people to their stories.
+The owner decides readiness.""",
+    "LEAD2-STACK": """Recommend the stack for the accepted vision. Give each choice a plain one-line reason
+and cite the need that drove it in words. For a technical owner offer concrete alternatives with defaults.
+For a plain owner explain the recommendation in business language. Incorporate the owner's latest reply.""",
+    "LEAD2-SPEC": """Explain identities, state changes and design. Respect the approved stack and link it to
+the promises it serves. Order outcomes and suggest demos. For a product with a user interface, give a few
+quick visual directions for the key screens in mockups: describe layout, interaction and appearance so
+the owner can pick or mix them. Use an empty list when there is no visual choice to make.""",
+    "REVIEW": """What could disappear while this still passes? Fix missing behaviour and proof from the
+brief and owner replies. If given a concrete unresolved issue, focus on that issue. Leave unresolved_issue
+empty when no further independent review is needed. Otherwise name one concrete gap still to resolve.
+Ask only for unresolved material product choices. Give each question and each option a distinct ID.
+Put ordinary named edits for each option in the option_* rows using its option_id. Keep those edits
 out of common edits. Leave build_order and access empty unless changed.""",
 }
-OWNER_GUIDE = """Use business questions for plain or unclear owners. In first ALIGN fill stack with
-each recommended choice and a plain one-line reason they can override. Show unresolved stack choices
-to technical owners with defaults. Link stack decisions to relevant promises when present."""
 SPEC_GUIDE = """Link each promise to planned code modules (design rows) and named tests with observable
 results (check rows). List build and judge access with suppliers; empty supplier means can't test here.
-Derive access from the walks, including printer and paper for print and the channel for each notice.
+Derive access from the planned walk.
 Leave access empty to keep a prior list or give the full revised list."""
 EDIT_GUIDE = """Use a short new ref to add or a shown ref to amend, one row per changed node.
 Retire only superseded nodes. Group links by source; replacements inherit old proof unless unlinked.
-Link words and roles to stories, stories to promises, promises to design and proof.
+Link brief, relevant earlier replies and roles to stories.
+Link stories to promises and promises to design and proof.
 Leave unused arrays empty. Each question names two concrete options; code adds Other."""
-PROMISE_GUIDE = """Give each output its own action, result and failure, including portal views, admin
-functions, board updates, notices, hosting, migrations, and report formats. Promised workflow tests
-are distinct from planning checks. Walk recipient and setting effects; standalone artifacts can use
-direct checks. Keep B results terse with exact distinguishing conditions and owner qualifications.
-Name sibling results 'Report name screen — ...', 'Report name print — ...' and 'Report name CSV — ...',
-starting each with identical shared conditions."""
+PROMISE_GUIDE = """Give each promised outcome its own action, result and failure condition. Preserve exact
+owner choices. Plan concrete walks that show what each affected person can see and do through relevant
+interruptions and recovery. Exercise separately usable outputs individually. When one person changes a
+setting, have the affected person verify what changes downstream."""
 
 
 def question(kind, words, current, *, qualification=None, **facts):
@@ -58,14 +61,21 @@ def question(kind, words, current, *, qualification=None, **facts):
         prompt = ("Amend only existing promises explicitly named by the B condition. Keep every other "
                   "clause verbatim. Put the condition in the promise result and failure condition.")
         facts = {"B condition": qualification}
+    elif "Resolve only this review reply" in facts:
+        fields = SPEC_EDITS
+        prompt = ("Apply only the owner's review reply to the current spec. Preserve recorded choices "
+                  "and unrelated nodes and links.\n\n" + EDIT_GUIDE)
     else:
-        extra = {"LEAD2-ALIGN": ALIGN, "REVIEW": REVIEW}.get(kind, obj())["properties"]
-        edits = SPEC_EDITS if kind == "LEAD2-SPEC" else EDIT_FIELDS
-        fields = {**extra, **edits, "build_order": DELIVERY, "access": ACCESS}
-        task = TASK[kind]
-        if kind == "LEAD2-SPEC":
-            task += "\nGive a 3–8 word title per story/promise/walk; use an empty title if unavailable."
-        prompt = "\n\n".join((task, OWNER_GUIDE, SPEC_GUIDE, PROMISE_GUIDE, EDIT_GUIDE))
+        prompt = TASK[kind]
+        if kind == "LEAD2-STACK":
+            fields = STACK["properties"]
+        elif kind == "LEAD2-ALIGN":
+            fields = ALIGN["properties"]
+            prompt += "\nUse short refs for new rows, shown refs for changes and links, and business terms."
+        else:
+            extra = REVIEW["properties"] if kind == "REVIEW" else {"mockups": MOCKUPS}
+            fields = {**extra, **SPEC_EDITS, "build_order": DELIVERY, "access": ACCESS}
+            prompt = "\n\n".join((prompt, SPEC_GUIDE, PROMISE_GUIDE, EDIT_GUIDE))
     return {"kind": kind, "execution": {}, "schema": obj(answer=obj(reason=TEXT, **fields)),
             "renderContext": {"lead2": True},
             "prompt": prompt,
@@ -80,6 +90,10 @@ def render(question):
             rule = "" if question["execution"].get("session") else WRITE_RULE
             return "\n\n".join(filter(None, (prompt, facts, rule))), (
                 "Work here. Keep checks headless and generated files out of Git. Do not commit.")
+        if question["kind"] == "LEAD2-WALK":
+            return prompt + "\n\n" + facts, (
+                "Walk the real product headlessly and return the typed verdict. "
+                "Use the disposable checkout. Never modify product source, open a visible window or commit.")
         return prompt + "\n\n" + facts, "Read the supplied facts and return one typed decision."
     facts = {**question["facts"]}
     prompt = "\n\n".join((facts.pop("Owner's words"), question["prompt"], labelled(facts)))

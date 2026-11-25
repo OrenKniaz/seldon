@@ -10,6 +10,7 @@ from ..providers import role_for
 from ..states import LEAD2_BUILT as BUILT
 from ..states import LEAD2_MODE as MODE
 from ..states import LEAD2_READY as READY
+from ..states import LEAD2_WALK as WALK
 from .store import SpecStore
 from .views import render_person
 
@@ -21,6 +22,11 @@ APPROVE = "approve"
 REVISE = "revise"
 RELAY = ("Show the proposal and options. Relay exact choices and words with a fresh replyId reused on retry. "
          "Relay approval as Approve, with the exact condition if qualified.")
+
+
+def visible_groups(groups):
+    return [{**group, "options": [{k: v for k, v in option.items() if k != "edits"}
+                                  for option in group["options"]]} for group in groups]
 
 
 def manually_paused(store):
@@ -43,7 +49,7 @@ def state(store, cursor, run, active, submitted=False, full_spec=False):
     result["calls"] = [metrics.get(ref, {"attempt": ref, "kind": row["operation"],
                                        "elapsedSeconds": None, "freshPlusOutputTokens": None})
                        for ref, _, row in store.records("attempt")]
-    if cursor.state in (READY, BUILT):
+    if cursor.B:
         approval = store.read(cursor.B)
         subject = approval["subject"]
         plan = store.read(subject["plan"])
@@ -58,6 +64,9 @@ def state(store, cursor, run, active, submitted=False, full_spec=False):
                                          if obs.outcome == "not-verifiable-here"]
     if cursor.state == BUILT:
         result.update(status="BUILT", next="The builder returned the candidate and its code map.")
+    elif cursor.state in ("ACCEPTED", "SCRIPTED_C"):
+        result.update(status=cursor.state, next="Acceptance recorded.",
+                      outcome={"acceptedByPerson": cursor.state == "ACCEPTED"})
     elif cursor.state == "STOPPED":
         outcomes = store.records("outcome")
         result.update(status="STOPPED", next="Use start with a new folder for your next dream.",
@@ -66,8 +75,11 @@ def state(store, cursor, run, active, submitted=False, full_spec=False):
         item = store.read(cursor.decision)
         ask = item["ask"]
         other = {"id": "other", "label": "Other", "means": "Your own words"}
-        groups = [{**group, "options": [*group["options"], other]} for group in ask["groups"]]
-        result["waitingFor"] = {"request": cursor.decision, "gate": item["gate"], "subject": item["subject"],
+        groups = visible_groups(ask["groups"])
+        for group in groups:
+            group["options"].append(other)
+        subject = {k: v for k, v in item["subject"].items() if k != "review_groups"}
+        result["waitingFor"] = {"request": cursor.decision, "gate": item["gate"], "subject": subject,
                                 "ask": {**ask, "groups": groups}}
         more = (" Use state with full_spec=true for the full spec." if item["gate"] in {"scope", "B"} else "")
         if not active and not manually_paused(store):
@@ -92,7 +104,7 @@ def state(store, cursor, run, active, submitted=False, full_spec=False):
 
 
 def _show_attempt(store, cursor, result):
-    actor = ("builder" if cursor.state == READY else
+    actor = ("builder" if cursor.state == READY else "walker" if cursor.state == WALK else
              "reviewer" if cursor.state == "L2-REVIEW" and not cursor.requestedChange else "planner")
     if cursor.state in ("ALIGN", "A"):
         round_number = 1 + sum(r["gate"] == "A" for _, _, r in store.records("decision_request"))
@@ -161,6 +173,7 @@ def closing_group():
 def gate_group(gate, *, recommend=True):
     approved = {
         "A": ("Lock this vision at A", "Accept the displayed vision and any unanswered defaults."),
+        "Stack": ("Approve this stack", "Use these tools and deployment choices in the spec."),
         "B": ("Approve the spec at B",
               "Accept the spec, build order, chosen demonstrations and any displayed testing limits."),
         "scope": ("Accept this change", "Update the agreed scope as shown."),

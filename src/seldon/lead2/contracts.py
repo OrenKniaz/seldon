@@ -15,34 +15,16 @@ NODE_BODIES = {
 LINK_ROWS = array(obj(source=TEXT, targets=REFS))
 TITLED = ("story", "promise", "walk")
 TITLE = {"type": "string"}
-EDIT_FIELDS = {
-    **{kind: array(obj(ref=TEXT, **body["properties"]))
+SPEC_EDITS = {
+    **{kind: array(obj(ref=TEXT, **body["properties"], **({"title": TITLE} if kind in TITLED else {})))
        for kind, body in NODE_BODIES.items() if kind != "dream"},
     "retire": REFS, "link": LINK_ROWS, "unlink": LINK_ROWS, "replaces": LINK_ROWS,
 }
-SPEC_EDITS = {**EDIT_FIELDS, **{
-    kind: array(obj(ref=TEXT, **NODE_BODIES[kind]["properties"], title=TITLE)) for kind in TITLED
-}}
-OPTION_EDITS = array(obj(
-    question=TEXT, option=choice("recommended", "alternative"),
-    kind=choice(*EDIT_FIELDS), ref=TEXT, values=REFS,
-))
-
-
-def option_rows(rows):
-    """Compile one option's flat rows into the same edit tables used by SPEC."""
-    answer = {kind: [] for kind in EDIT_FIELDS}
-    for row in rows:
-        kind, ref, values = row["kind"], row["ref"], row["values"]
-        if kind == "retire":
-            answer[kind].append(ref)
-        elif kind in NODE_BODIES:
-            fields = NODE_BODIES[kind]["properties"]
-            if len(values) == len(fields):
-                answer[kind].append({"ref": ref, **dict(zip(fields, values, strict=True))})
-        else:
-            answer[kind].append({"source": ref, "targets": values})
-    return answer
+OPTION_FIELDS = {
+    f"option_{kind}": array(obj(option_id=TEXT, **(
+        {"ref": TEXT} if kind == "retire" else field["items"]["properties"])))
+    for kind, field in SPEC_EDITS.items()
+}
 
 NODE = {"anyOf": [
     obj(kind=choice(kind), **body["properties"]) for kind, body in NODE_BODIES.items()
@@ -71,9 +53,9 @@ def typed_reply(body, schema):
         fields = schema["properties"]["answer"]["properties"]
         answer = {key: answer.get(key, []) if field.get("type") == "array" else answer.get(key)
                   for key, field in fields.items()}
-        if stack := answer.get("stack"):
-            answer["design"] = [*stack, *answer["design"]]
-        for kind in TITLED:
+        if "unresolved_issue" in fields and answer["unresolved_issue"] is None:
+            answer["unresolved_issue"] = ""
+        for kind in (*TITLED, *(f"option_{kind}" for kind in TITLED)):
             if (isinstance(answer.get(kind), list)
                     and "title" in fields.get(kind, {}).get("items", {}).get("properties", {})):
                 answer[kind] = [
@@ -117,14 +99,14 @@ def normalise_edits(graph, answer, references, *, prefix=""):
             edits.append(dict(op="amend", id=ref, node=node) if ref in kinds else
                          dict(op="add", name=ref, node=node))
             kinds[ref] = kind
-    for label in answer["retire"]:
+    for label in answer.get("retire", ()):
         ref = resolve(label)
         if ref in kinds and ref not in fixed:
             edits.append(dict(op="retire", id=ref))
             del kinds[ref]
         else:
             ignored += 1
-    for row in answer["replaces"]:
+    for row in answer.get("replaces", ()):
         original = resolve(row["source"])
         if graph.nodes.get(original, {}).get("kind") != "promise":
             continue
@@ -136,7 +118,7 @@ def normalise_edits(graph, answer, references, *, prefix=""):
                              and graph.kinds((source, target)) in PROOF)
     allowed = LINEAGE | CONTEXT
     for op in ("unlink", "link"):
-        for row in answer[op]:
+        for row in answer.get(op, ()):
             source = resolve(row["source"])
             for label in row["targets"]:
                 target = resolve(label)

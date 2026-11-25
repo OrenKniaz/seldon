@@ -1,10 +1,12 @@
 """Fresh Lead chat-to-browser journey through the actual kickoff URL and run database."""
 
 import asyncio
+import io
 import json
 import os
 import subprocess
 import sys
+import zipfile
 from contextlib import closing
 from html.parser import HTMLParser
 from pathlib import Path
@@ -73,6 +75,9 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
                           story=[{"ref": "handoff", "story": "Take over the live count"}],
                           link=[{"source": "brief", "targets": ["handoff"]},
                                 {"source": "lead", "targets": ["handoff"]}])
+        elif question["kind"] == "LEAD2-STACK":
+            answer["stack"] = [{"ref": "local", "decision": "Host on the venue laptop",
+                                "reason": "Keep the handoff available on the private Wi-Fi", "words": idea}]
         elif question["kind"] == "LEAD2-SPEC":
             answer.update(
                 promise=[{"ref": "count", "title": "Keep the door count", "action": "Take over the door",
@@ -147,6 +152,10 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
     with closing(Run.reopen(product, provider, lambda _: frontdoor.read_answer(
         frontdoor.side(product) / "answer.json",
     ))) as run:
+        with urlopen(page, timeout=5) as response:
+            assert 'href="walk"' in response.read().decode()
+        with urlopen(urljoin(page, "walk"), timeout=5) as response:
+            assert "The independent walk has yet to finish." in response.read().decode()
         assert read_status()["idea"]["text"] == idea
         assert read_status()["idea"]["label"] == "Keep one shared door count while the door"
         initial = revision()
@@ -169,6 +178,11 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
         linked = urljoin(page, other[0])
         assert linked == opened["statusPage"]
         assert sidebar_links(linked)[1] == (*other[:2], "page")
+        reply()
+        run.step()
+        run.step()
+        stack = read_status()["frames"][-1]
+        assert stack["stage"] == 2 and stack["activity"] == "Waiting on you" and stack["detail"] == "Stack"
         reply()
         run.step()
         run.step()
@@ -210,3 +224,136 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
     earlier = read_home().split('id="earlier"', 1)[1]
     assert "Another venue" in earlier and "Missing" in earlier
     assert all("Another venue" not in label for _, label, _ in sidebar_links(page))
+
+    from seldon.lead2 import SpecStore
+
+    builds = walks = 0
+    added_words = "Both doors should see the shared count without asking the lead."
+
+    def build_and_walk(question):
+        nonlocal builds, walks
+        if question["kind"] == "WORK":
+            builds += 1
+            workspace = Path(question["execution"]["cwd"])
+            (workspace / "index.html").write_text("<h1>15 places</h1>", encoding="utf-8")
+            (workspace / "ledger.py").write_text(
+                "import sys\nfrom http.server import HTTPServer, SimpleHTTPRequestHandler\n"
+                "HTTPServer((sys.argv[1], int(sys.argv[2])), SimpleHTTPRequestHandler).serve_forever()\n",
+                encoding="utf-8")
+            if builds == 2:
+                (workspace / "OWNER WALK.md").write_text(
+                    "## Open the count\n\n1. Run `ledger.py` on 127.0.0.1.\n"
+                    "2. Read the **places left**.\n", encoding="utf-8")
+            graph = SpecStore(run.store).snapshot().graph
+            promise = next(ref for ref, node in graph.nodes.items() if node["kind"] == "promise")
+            return json.dumps(dict(outcome="done", acknowledged=True,
+                                   code_map=[dict(promise=promise, modules=["index.html"], tests=["ledger.py"])]))
+        if question["kind"] == "LEAD2-WALK-STEER":
+            spec = SpecStore(run.store)
+            spec.apply(dict(revision=spec.snapshot().revision, mode="substantive", reason="Record the owner note",
+                            edits=[dict(op="add", name="context", node=dict(kind="dream", words=added_words))]),
+                       author="owner")
+            return json.dumps(dict(direction="Complete the owner guide and verification evidence."))
+        walks += 1
+        facts = question["facts"]
+        evidence = facts["Evidence directory"]
+        workspace = question["execution"]["walk"]
+        check = '''
+const serve = require('./checks/kit/serve.cjs');
+const browser = require('./checks/kit/browser.cjs');
+serve([process.argv[1], 'ledger.py', '127.0.0.1', '{port}'], url => browser(url.url,
+  async ({page, shot}) => {
+    const staff = await page.context().browser().newPage({viewport:{width:1280,height:900}});
+    await staff.goto(url.url);
+    await page.getByText('15 places').waitFor();
+    await staff.getByText('15 places').waitFor();
+    await shot('jo', page);
+    await shot('ben', staff);
+  }, {viewports:[{width:390,height:844}], silence:10000}), {preview:true})
+  .catch(error => {console.error(error);process.exitCode=1;});
+'''
+        subprocess.run(["node", "-e", check, sys._base_executable], cwd=workspace, check=True,
+                       env={**os.environ, "SELDON_EVIDENCE_DIR": evidence})
+        story = next(iter(facts["Stories to walk"]))
+        promise = next(iter(facts["Promises to judge"]))
+        action = "Compare both door counts"
+        if builds == 2:
+            spec = SpecStore(run.store)
+            head = spec.snapshot()
+            words = next(ref for ref, node in head.graph.nodes.items() if node.get("words") == added_words)
+            spec.apply(dict(revision=head.revision, mode="substantive", reason="Link the owner note to the story",
+                            edits=[dict(op="link", source=words, target=story)]), author="planner")
+        return json.dumps(dict(
+            steps=[dict(story="" if builds == 2 else story, role=role, action=action,
+                        expected="See 15", actual="Saw 15", outcome="works", screenshot=filename)
+                   for role, filename in (("Jo", "jo-390.png"), ("Ben", "ben-1280.png"))],
+            promises=[dict(promise=promise, outcome="works", reason="Both browsers saw 15")],
+            limits=[dict(story=story, reason="Venue Wi-Fi was unavailable.")],
+            findings=([dict(story=story, owner="Browser verification",
+                            finding=f"The verification failed in {evidence}/walk.cjs.")] if builds == 1 else []),
+            guide="works", guide_path="OWNER WALK.md", code_map="works",
+            quality="broken" if builds == 1 else "works",
+            sample_job=f"Open two browser views in {evidence}."))
+
+    from seldon.decisions import Waiting
+
+    def wait(item):
+        if item["gate"] == "Walk decision" and "limits" in item["subject"]:
+            return {"request": item["request"], "replyId": "venue-limit",
+                    "selections": [{"groupId": "limits", "optionId": "allow"}]}
+        raise Waiting()
+
+    with closing(Run.reopen(product, build_and_walk, wait)) as run:
+        for _ in range(4):
+            run.step()
+        with urlopen(urljoin(page, "walk"), timeout=5) as response:
+            fixing = response.read().decode()
+        assert "✗ Verification failed" in fixing and "Sent to the builder" in fixing
+        assert str(run.store.cursor().scratch) not in fixing
+        candidate = run.store.cursor().candidate
+        with urlopen(urljoin(page, "walk-build/" + candidate), timeout=5) as response:
+            with zipfile.ZipFile(io.BytesIO(response.read())) as archive:
+                assert "ledger.py" in archive.namelist()
+                assert "OWNER WALK.md" not in archive.namelist()
+        assert run.run().state == "C"
+        assert builds == walks == 2
+    browser = Path(frontdoor.__file__).with_name("kit") / "browser.cjs"
+    check = '''
+const assert = require('node:assert/strict');
+const browser = require(process.argv[1]);
+browser(process.argv[2], async ({page}) => {
+  for (const [role, width] of [['Jo', 390], ['Ben', 1280]]) {
+    const image = page.getByRole('img', {name: role + ': Compare both door counts'});
+    await image.waitFor();
+    assert.equal(await image.evaluate(async img => { await img.decode(); return img.naturalWidth; }), width);
+    assert.ok((await page.request.get(new URL(await image.getAttribute('src'), page.url()).href)).ok());
+  }
+  assert.match(await page.locator('.score').textContent(), /1 couldn’t test here/);
+  assert.ok(!(await page.locator('#build').evaluate(details => details.open)));
+  await page.getByRole('link', {name:/How to try it yourself/}).click();
+  assert.ok(await page.locator('#build').evaluate(details => details.open));
+  assert.equal(await page.locator('#build ol li').count(), 2);
+  assert.match(await page.locator('#build').textContent(), /places left/);
+  for (const theme of ['light', 'dark']) {
+    if (await page.locator('html').getAttribute('data-theme') !== theme)
+      await page.getByRole('button', {name: 'Switch to ' + theme + ' theme'}).click();
+    assert.equal(await page.locator('html').getAttribute('data-theme'), theme);
+    const link = await page.getByRole('link', {name: 'Download a clean copy'}).getAttribute('href');
+    const zip = await page.request.get(new URL(link, page.url()).href);
+    assert.ok(zip.ok());
+    assert.equal((await zip.body()).subarray(0, 2).toString(), 'PK');
+    const [opened] = await Promise.all([
+      page.waitForResponse(response => response.request().method() === 'POST'),
+      page.getByRole('button', {name:'Open this build'}).click()
+    ]);
+    assert.equal(opened.status(), 303, await opened.text().catch(() => ''));
+    const frame = page.frameLocator('iframe[title="Running build"]');
+    await frame.getByText('15 places').waitFor();
+    const running = await page.getByRole('link', {name:'Open in a new tab'}).getAttribute('href');
+    await page.getByRole('button', {name:'Stop preview'}).click();
+    await page.getByRole('button', {name:'Open this build'}).waitFor();
+    await assert.rejects(fetch(running));
+  }
+}).catch(error => {console.error(error);process.exitCode=1;});
+'''
+    subprocess.run(["node", "-e", check, str(browser), urljoin(page, "walk")], check=True)

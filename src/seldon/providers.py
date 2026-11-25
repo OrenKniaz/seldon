@@ -45,6 +45,7 @@ class ProviderFailure(RuntimeError):
 
 def role_for(kind, context):
     return {"REVIEW": "reviewer", "LEAD2-CHUNK": "reviewer", "WORK": "build", "JUDGE": "judge",
+            "LEAD2-WALK": "judge",
             "RECEIPT": "judge", "FLOW": "demo", "PRODUCT": "demo",
             "DECIDE": "decider"}.get(kind, "planner")
 
@@ -348,6 +349,10 @@ class Provider:
         if walk:
             temp["SELDON_EVIDENCE_DIR"] = str(Path(walk).parent / "evidence")
         silence = invocation.get("silenceWindow")
+        if question["kind"] == "LEAD2-WALK" and (evidence := question["execution"].get("evidence")):
+            temp.update(SELDON_EVIDENCE_DIR=evidence, SELDON_WALK_ACTIVITY=str(Path(evidence) / "activity"),
+                        SELDON_WALK_SILENCE_MS=str(int(silence * 1000)))
+            temp.update({key: evidence for key in ("TMP", "TEMP", "TMPDIR")})
         previous = question["execution"].get("session")
         baseline = codex_total(previous) if silence is not None and name == "codex" else None
         result = execute(invocation["command"], invocation["cwd"], invocation["timeout"],
@@ -382,6 +387,11 @@ class Provider:
             raw = native.answer(output)
         except RuntimeError as error:
             failures = "\n".join(native.errors(output)).lower()
+            if any(term in failures for term in ("content filter", "possible cybersecurity risk",
+                                                 "content policy", "safety policy")):
+                raise ProviderFailure(
+                    "Provider paused this request under its safety policy.", False,
+                    result["cleanupVerified"], str(folder / "result.json"), session) from error
             if (name == "codex" and result["cleanupVerified"] and not result["timedOut"]
                     and '"input_error_code":"input_too_large"' in stderr.replace(" ", "")):
                 # The fresh thread ID in the native stream is receipt data, not a new failure.

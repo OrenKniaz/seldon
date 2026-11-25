@@ -161,18 +161,25 @@ class Delta:
             changes.append(f"{verb} {left} → {right}")
         return tuple(changes)
 
-    def reopens(self) -> set[str]:
+    def reopens(self, *, behavior_only: bool = False, ignore_scenarios: bool = False) -> set[str]:
         affected = set()
         nodes = {ref for ref in self.nodes if
                  {k: v for k, v in self.before.nodes.get(ref, {}).items() if k != "title"} !=
                  {k: v for k, v in self.after.nodes.get(ref, {}).items() if k != "title"}}
         links = self.links
         for graph in (self.before, self.after):
-            changed = nodes & graph.nodes.keys()
+            changed = {ref for ref in nodes & graph.nodes.keys()
+                       if not behavior_only or graph.nodes[ref]["kind"] != "dream"}
+            if ignore_scenarios:
+                changed = {ref for ref in changed if graph.nodes[ref]["kind"] != "walk"}
             for link in links & set(graph.links):
                 # A changed relation reopens only the branch whose dependencies changed.
                 source, target = link
                 kinds = graph.kinds(link)
+                if behavior_only and kinds == ("dream", "story"):
+                    continue
+                if ignore_scenarios and "walk" in kinds:
+                    continue
                 changed.add(source if kinds in PROOF or kinds == ("design", "person") else target)
             for ref in changed:
                 kind = graph.nodes[ref]["kind"]

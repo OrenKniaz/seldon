@@ -45,7 +45,8 @@ def _plan(store, spec, provider, cursor):
     if not snapshot.revision:
         _add_words(spec, snapshot.revision, kickoff, "Record the initial brief")
         snapshot = spec.snapshot()
-    kind = {"ALIGN": "LEAD2-ALIGN", "L2-SPEC": "LEAD2-SPEC", "L2-REVIEW": "REVIEW"}[cursor.state]
+    kind = {"ALIGN": "LEAD2-ALIGN", "L2-STACK": "LEAD2-STACK",
+            "L2-SPEC": "LEAD2-SPEC", "L2-REVIEW": "REVIEW"}[cursor.state]
     requested = cursor.requestedChange
     if requested:
         kind = "LEAD2-SPEC"
@@ -62,13 +63,17 @@ def _plan(store, spec, provider, cursor):
         facts["Proposed access needs"] = plan.get("access")
     if kind == "REVIEW":
         facts["Missing proof links"] = review_issues(snapshot.graph)
+        if cursor.review:
+            last_review = store.read(cursor.review)["answer"]
+            facts["Focus on this unresolved issue"] = last_review.get("unresolved_issue")
     if requested:
         reply = store.read(store.read(requested)["userWords"])
         if cursor.state == "L2-SPEC":
             facts["qualification"] = reply["words"]
         else:
             facts["Resolve only this review reply"] = reply["words"]
-            facts["Review choices offered"] = store.read(reply["request"])["ask"]["groups"]
+            offered = store.read(reply["request"])["ask"]["groups"]
+            facts["Review choices offered"] = chat.visible_groups(offered)
     question = prompts.question(kind, kickoff, proposal, **{k: v for k, v in facts.items() if v})
     try:
         inference.call(store, provider, question, normalise=typed_reply,
@@ -88,6 +93,12 @@ def _add_words(spec, revision, words, reason):
 
 def _propose(store, spec, snapshot, answer_ref, answer, size, references):
     cursor = store.cursor()
+    if cursor.state == "L2-STACK":
+        proposal = "\n".join(f"- {row['decision']} — {row['reason']}" for row in answer["stack"])
+        groups = [*chat.product_groups(answer["questions"]), chat.gate_group("Stack"), chat.closing_group()]
+        chat.request(store, "Stack", snapshot.revision, groups, proposal=proposal or answer["reason"],
+                     summary=answer["reason"], stack=answer_ref)
+        return
     reviewing = cursor.state == "L2-REVIEW" and not cursor.requestedChange
     edits, ignored = normalise_edits(snapshot.graph, answer, references)
     if ignored:
@@ -99,51 +110,71 @@ def _propose(store, spec, snapshot, answer_ref, answer, size, references):
         result = spec.apply(batch, author="reviewer" if reviewing else "planner")
         references = {**references, **{name.lstrip("$"): ref for name, ref in result.names.items()}}
         updated = spec.snapshot(result.revision)
-    plan_ref = cursor.leadPlan if cursor.state != "ALIGN" else None
+    if cursor.state == "ALIGN":
+        _offer_a(store, updated, answer_ref, answer, size)
+        return
+    plan_ref = cursor.leadPlan
     previous = store.read(plan_ref) if plan_ref else {}
     plan = {key: answer.get(key) or previous.get(key, []) for key in ("build_order", "access")}
     if plan["build_order"] and any(value != previous.get(key, []) for key, value in plan.items()):
         plan_ref = store.record("lead2_plan", {**plan, "source": answer_ref})
     store.cursor(replace(cursor, leadPlan=plan_ref, failure=""))
-    options = review_options.offer(store, updated, answer, references) if reviewing else None
-    if cursor.state == "ALIGN":
-        _offer_a(store, updated, answer_ref, answer, size)
-    elif not updated.accepted:
-        pending = {"review": answer_ref, "options": options} if reviewing else {}
+    groups = review_options.offer(updated, answer, references) if reviewing else []
+    if not updated.accepted:
+        pending = ({"review": answer_ref, "review_groups": groups} if reviewing
+                   else {"plan_answer": answer_ref})
         chat.request(store, "scope", updated.revision, [chat.gate_group("scope")],
                      proposal="\n".join(changed_promises(snapshot.graph, updated.graph, detailed=True)),
                      summary="Changes to the agreed scope", **pending)
     elif reviewing:
-        _finish_review(store, snapshot.graph, updated, answer_ref, options)
+        _finish_review(store, updated.revision, answer_ref, groups)
     else:
-        _finish_plan(store, answer_ref)
+        _finish_plan(store, updated.revision, answer_ref)
 
 
-def _finish_plan(store, source):
+def _finish_plan(store, revision, source, answer_ref=None):
     cursor = store.cursor()
-    event = ("reviewed" if cursor.state == "L2-REVIEW" else
-             "resolved" if cursor.requestedChange else "planned")
-    advance(store, event, source, requestedChange=None)
-
-
-def _finish_review(store, before, updated, answer_ref, options, groups=None):
-    if options:
-        chat.request(store, "Review choices", updated.revision, groups or store.read(options)["groups"],
-                     proposal="", summary=store.read(answer_ref)["answer"]["findings"],
-                     review=answer_ref, options=options)
+    if cursor.state == "L2-REVIEW":
+        _finish_review(store, revision, cursor.review, source=source)
         return
-    gaps = review_issues(updated.graph)
-    if not store.cursor().leadPlan:
-        raise ValueError("The plan is missing its build order.")
-    used_extra = any(row["event"] == "trace-progress" for _, _, row in store.records("transition"))
-    progress = not used_extra and gaps and len(gaps) < len(review_issues(before))
-    advance(store, "trace-progress" if progress else "reviewed", answer_ref, review=answer_ref)
+    if cursor.requestedChange:
+        advance(store, "resolved", source, requestedChange=None)
+        return
+    if not cursor.leadPlan:
+        advance(store, "revise", source)
+        return
+    answer = store.read(answer_ref or source).get("answer", {})
+    mockups = {row["id"].strip(): row for row in answer.get("mockups", [])
+               if row["id"].strip() not in {"", "other", "unclear"}
+               and row["label"].strip().casefold() not in {"", "other"}}
+    if mockups:
+        options = chat.options(*((ref, row["label"], row["means"]) for ref, row in mockups.items()))
+        chat.request(store, "Mockups", revision,
+                     [chat.group("mockup", "Which visual direction should the product use?", options)],
+                     proposal="Pick a direction or use Other to mix options or share a design.",
+                     summary=answer["reason"])
+    else:
+        advance(store, "planned", source, review=None)
+
+
+def _finish_review(store, revision, answer_ref, groups=(), *, source=None):
+    answer = store.read(answer_ref)["answer"]
+    if groups:
+        chat.request(store, "Review choices", revision, groups, proposal="", summary=answer["findings"],
+                     review=answer_ref)
+        return
+    focused = 0
+    for _, _, row in reversed(store.records("transition")):
+        if row["event"] == "planned" and row["next"] == "L2-REVIEW":
+            break
+        focused += row["event"] == "focus"
+    more = (answer.get("unresolved_issue") or "").strip() and focused < 2
+    advance(store, "focus" if more else "reviewed", source or answer_ref,
+            review=answer_ref, requestedChange=None)
 
 
 def _offer_a(store, snapshot, source, answer, chosen_size):
     proposal = planning_view(snapshot.graph)
-    if not proposal:
-        raise ValueError("Describe at least one story before asking the owner to lock the vision.")
     size = chosen_size or answer["size"]
     groups = chat.product_groups(answer["questions"])
     if chosen_size is None:
@@ -152,7 +183,7 @@ def _offer_a(store, snapshot, source, answer, chosen_size):
                                  chat.options((size, size.capitalize(), answer["size_reason"]), *others)))
     groups.extend((chat.gate_group("A", recommend=answer["aligned"]), chat.closing_group()))
     advance(store, "aligned", source, vision=source)
-    chat.request(store, "A", snapshot.revision, groups, proposal=proposal,
+    chat.request(store, "A", snapshot.revision, groups, proposal=proposal or answer["reason"],
                  summary=answer["reason"], planner_aligned=answer["aligned"], size=size)
 
 
@@ -168,9 +199,10 @@ def _offer_b(store, spec, cursor):
     prior = next((r["subject"] for _, _, r in offers if r["gate"] == "B"), None)
     changes = b_changes(spec.snapshot(prior["lead2_revision"]), snapshot,
                         store.read(prior["plan"]), plan) if prior else ""
+    review = store.read(cursor.review)["answer"] if cursor.review else {}
     chat.request(store, "B", snapshot.revision, [*groups, chat.gate_group("B")],
                  proposal=b_summary(snapshot.graph, plan, groups, {}, changes=changes),
-                 summary=changes or "Reviewed spec",
+                 summary=changes or review.get("unresolved_issue") or "Reviewed spec",
                  plan=cursor.leadPlan, review=cursor.review)
 
 
@@ -182,11 +214,17 @@ def _answer(store, spec, user, cursor):
     revision = subject["lead2_revision"]
     picked = {c["group"]: c for c in [*ask["retained"], *choices]}
     explicit = picked.get(chat.ROUND, {}).get("optionId") == chat.APPROVE
-    review = subject.get("options") and gate == "Review choices"
+    review = gate == "Review choices"
     notes = list(dict.fromkeys(filter(None, [reply.get("words"), *(c["text"] for c in choices)])))
-    if not review:
+    if review and not subject.get("options"):
+        notes.extend(f"{group['question']} {option['label']} — {option['means']}"
+                     for group in ask["groups"] for option in group["options"]
+                     if not option["edits"] and picked.get(group["id"], {}).get("optionId") == option["id"])
+    elif not review:
+        defaults = {g["id"]: g["default"] for g in ask["groups"]} if gate == "Stack" else {}
         notes.extend(f"{c['question']} {c['label']} — {c['meaning']}" for c in choices
-                     if c["group"].startswith("q") and not c["text"])
+                     if c["group"].startswith("q") and not c["text"]
+                     and defaults.get(c["group"]) != c["optionId"])
     size = picked.get(chat.SIZE, {}).get("optionId")
     changes = bool(notes) or size in prompts.SIZES and size != subject.get("size")
     approve = explicit and not changes
@@ -220,32 +258,60 @@ def _answer(store, spec, user, cursor):
                                          if picked.get(g["id"], {}).get("optionId", g["default"]) == "show"]
         approval = store.record("approval", receipt)
         if review:
-            revision = spec.apply_review_options(revision, approval)
+            if subject.get("options"):
+                revision = spec.apply_review_options(revision, approval)
+            else:
+                selected = review_options.apply(spec, revision, approval, ask["groups"], picked, words)
+                if not selected.accepted:
+                    chat.request(store, "scope", selected.revision, [chat.gate_group("scope")],
+                                 proposal="\n".join(changed_promises(spec.snapshot(revision).graph,
+                                                                      selected.graph, detailed=True)),
+                                 summary="Changes to the agreed scope", review=subject["review"])
+                    return
+                revision = selected.revision
             if notes:
                 _add_words(spec, revision, "\n".join(notes), "Record the owner's review reply")
                 store.cursor(replace(store.cursor(), requestedChange=approval, review=subject["review"]))
             else:
-                advance(store, "reviewed", approval, review=subject["review"])
+                _finish_review(store, revision, subject["review"], source=approval)
+        elif gate == "Mockups":
+            selection = picked.get("mockup", {})
+            label = selection.get("label") if selection.get("optionId") != "other" else None
+            design = " — ".join(filter(None, (label, selection.get("meaning") if label else None, *notes)))
+            node = dict(kind="design", decision=design or words, reason="Visual direction", words=words)
+            spec.apply(dict(revision=revision, reason=f"Record the owner's mockup choice ({approval})",
+                            mode="substantive", edits=[dict(op="add", name=None, node=node)]), author="owner")
+            advance(store, "planned", approval, review=None)
+        elif gate == "Stack" and approve:
+            stack = store.read(subject["stack"])["answer"]["stack"]
+            _, _, references = planning_facts(spec.snapshot().graph, store.read(cursor.kickoff)["words"])
+            edits, _ = normalise_edits(spec.snapshot().graph, {"design": stack}, references)
+            if edits:
+                spec.apply({"revision": revision, "reason": f"Approve the stack ({approval})",
+                            "mode": "substantive", "edits": edits}, author="owner")
+            advance(store, "approve", approval)
         elif approve:
             spec.bind_decision(gate, revision, approval)
             if gate == "scope":
                 if reviewed := subject.get("review"):
-                    _finish_review(store, spec.snapshot(expected).graph, spec.snapshot(revision),
-                                   reviewed, subject.get("options"), subject.get("review_groups"))
+                    groups = subject.get("review_groups", [])
+                    if options := subject.get("options"):
+                        chat.request(store, "Review choices", revision, store.read(options)["groups"],
+                                     proposal="", summary=store.read(reviewed)["answer"]["findings"],
+                                     review=reviewed, options=options)
+                    else:
+                        _finish_review(store, revision, reviewed, groups)
                 else:
-                    _finish_plan(store, approval)
+                    _finish_plan(store, revision, approval, subject.get("plan_answer"))
             elif gate == "A":
-                folded = (receipt["size"] in {"micro", "small"} and cursor.leadPlan
-                          and not review_issues(spec.snapshot().graph))
-                advance(store, "approve-spec" if folded else "approve", approval, A=approval,
-                        leadPlan=cursor.leadPlan if folded else None)
+                advance(store, "approve", approval, A=approval, leadPlan=None)
             else:
                 advance(store, "approve", approval, B=approval)
         else:
             if notes:
                 _add_words(spec, expected, "\n".join(notes), "Record the owner's reply")
             if gate == "scope" and cursor.requestedChange:
-                _finish_plan(store, approval)
+                _finish_plan(store, expected, approval)
             else:
                 requested = approval if gate == "B" and explicit else None
                 advance(store, "revise", approval, requestedChange=requested)

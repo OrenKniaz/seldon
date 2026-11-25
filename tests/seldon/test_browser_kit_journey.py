@@ -46,6 +46,20 @@ async function journey() {
     }, {deadline: 10_000}), error => error.message.includes('Browser deadline') && error.message.includes(broken)
       && error.message.includes('check callback') && error.message.includes('Editor failed to initialize'));
     assert.equal(instance.isConnected(), false);
+
+    const active = await run(async page => {
+      const context = await page.context().browser().newContext();
+      const staff = await context.newPage();
+      await staff.goto(url);
+      await staff.evaluate(() => { window.progress = setInterval(() => console.log('Count updated'), 250); });
+      await new Promise(resolve => setTimeout(resolve, 5700));
+      await staff.evaluate(() => clearInterval(window.progress));
+      return staff.getByRole('button', {name: 'Save'}).textContent();
+    }, {deadline: 5000, silence: 5500});
+    assert.equal(active, 'Save');
+    await assert.rejects(run(page => page.getByRole('button', {name: 'Publish'}).click(),
+      {deadline: 50, silence: 5500}), error => error.message.includes('Browser silent for 5500 ms'));
+    assert.equal(instance.isConnected(), false);
   } finally {
     server.close();
   }

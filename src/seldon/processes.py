@@ -21,7 +21,8 @@ class UncertainCleanup(RuntimeError):
 
 def reconcile_call(store, attempt=None):
     """Check ownership of a provider call left by a previous controller."""
-    started = [row for row in store.records("call_started") if attempt is None or row[2]["attempt"] == attempt]
+    started = [row for row in store.records("call_started")
+               if attempt is None or row[2]["attempt"] == attempt]
     if not started:
         return
     _, _, call = started[-1]
@@ -228,7 +229,7 @@ class _WindowsJob:
         return False
 
 
-def _quiet_watch(files, output_dir, timeout, silence_window):
+def _quiet_watch(files, output_dir, timeout, silence_window, env=None):
     deadline = time.monotonic() + (silence_window if silence_window is not None else timeout)
     if silence_window is None:
         return lambda: time.monotonic() >= deadline
@@ -236,12 +237,21 @@ def _quiet_watch(files, output_dir, timeout, silence_window):
     stream = files.enter_context((output_dir / "stdout.bin").open("rb"))
     tail = b""
     poll_at = 0
+    activity = (env or {}).get("SELDON_WALK_ACTIVITY")
+    last_signal = None
 
     def quiet():
-        nonlocal deadline, tail, poll_at
+        nonlocal deadline, tail, poll_at, last_signal
         now = time.monotonic()
         if now >= poll_at or now >= deadline:
             poll_at = now + .1
+            if activity:
+                try:
+                    stamp = os.stat(activity).st_mtime_ns
+                except FileNotFoundError:
+                    stamp = None
+                if stamp is not None and stamp != last_signal:
+                    deadline, last_signal = now + silence_window, stamp
             lines = (tail + stream.read()).split(b"\n")
             tail = lines.pop()
             for line in lines:
@@ -290,7 +300,7 @@ def _run_portable_process(args, cwd, timeout, env, stdin, output_dir, silence_wi
 
         try:
             try:
-                quiet = _quiet_watch(files, output_dir, timeout, silence_window)
+                quiet = _quiet_watch(files, output_dir, timeout, silence_window, env)
                 process = subprocess.Popen(args, cwd=cwd, env=env, stdin=stdin,
                     stdout=stdout, stderr=stderr, start_new_session=True)
                 control.update(
@@ -448,7 +458,7 @@ def _run_process(args, cwd, timeout, env, stdin, output_dir=None, silence_window
             gate.write(config)
         control["payloadReleased"] = True
         if silence_window is not None:
-            quiet = _quiet_watch(files, output_dir, timeout, silence_window)
+            quiet = _quiet_watch(files, output_dir, timeout, silence_window, env)
         while not records and not quiet() and not pump():
             time.sleep(0.005)
         timed_out = not records and quiet()

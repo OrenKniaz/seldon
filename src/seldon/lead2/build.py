@@ -1,7 +1,6 @@
 """C1/C16/C18/C23: run one plain builder from B to a captured candidate."""
 
 import re
-import shlex
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,6 +11,8 @@ from ..states import LEAD2_RUN, advance
 from . import build_brief, chat, chunk_review
 from .graph import Delta
 from .views import changed_promises, delivery_name
+
+DELIVERY_REF = re.compile(r"\bdelivery-[0-9]+\b", re.IGNORECASE)
 
 
 def step(store, spec, provider, user, pool, pending):
@@ -29,41 +30,44 @@ def step(store, spec, provider, user, pool, pending):
     if recovered:
         return
     _reviews(store, provider, pool, pending)
-    if last.get("outcome") == "done":
-        for future in pending.values():
-            future.result()
     before = spec.snapshot(last.get("acknowledged") or approval["subject"]["lead2_revision"])
-    snapshot = spec.snapshot() if session else before
+    snapshot = spec.snapshot()
     feedback = _feedback(store, last)
+    repairs = {ref: row["direction"] for ref, _, row in store.records("lead2_walk_repair")
+               if ref not in last.get("feedback", [])}
+    feedback.update(repairs)
+    offered = {row["demo"] for _, _, row in store.records("lead2_walk_target")}
+    demo = next((ref for ref, _, _ in store.records("lead2_demo_point") if ref not in offered), None)
+    if demo and not pending and not feedback:
+        delivery = store.read(demo)
+        ref = next((ref for ref, _, row in reversed(store.records("lead2_return"))
+                    if row["code_map"] and row["candidate"] == delivery["candidate"]
+                    and row["revision"] == delivery["revision"]),
+                   cursor.leadReturn)
+        return _walk(store, ref, demo)
     limits = [obs.result for obs in spec.observations() if obs.outcome == "not-verifiable-here"]
-    done = last.get("outcome") == "done"
-    if done:
-        order, _ = _deliveries(store, approval)
-        reviewed = {name for name, (_, _, verdict) in chunk_review.progress(store).items() if verdict}
-        missing = [delivery_name(item) for item in order if delivery_name(item) not in reviewed]
-        if missing:
-            feedback["remaining-features"] = "Report chunk test paths and argv for: " + "; ".join(missing)
-        mapped = {row["promise"] for row in spec._build_map(snapshot, last)}
-        if omitted := [n["result"] for ref, n in snapshot.graph.nodes.items()
-                       if n["kind"] == "promise" and ref not in mapped]:
-            feedback["remaining-map"] = "Complete the actual code map for: " + "; ".join(omitted)
+    if last.get("outcome") == "done" and not feedback and pending:
+        next(iter(pending.values())).result()
+        return
     with store.transaction():
-        if (done and snapshot.revision == before.revision
+        if (last.get("outcome") == "done" and snapshot.revision == before.revision
                 and spec.snapshot().revision == snapshot.revision and not feedback):
             if not _scope_question(store, spec):
-                advance(store, "built", cursor.leadReturn, transitions=LEAD2_RUN)
+                _walk(store, cursor.leadReturn, demo)
             return
     task = _task(store, provider, last, snapshot, feedback, limits)
     if task is None:
         return
-    prompt = f"Continue: {task}" if session else build_brief.brief(
-        before.graph, *_deliveries(store, approval), store.read(cursor.kickoff)["words"])
-    facts = {}
+    order, demos = _deliveries(store, approval)
+    prompt = (f"Continue: {task}" if session else
+              build_brief.brief(snapshot.graph, order, demos, store.read(cursor.kickoff)["words"]))
+    facts = {"Delivery references": order, "Chosen demo references": demos,
+             "Delivery": "Return done when the implementation and locally runnable checks are complete."}
     if snapshot.revision != before.revision:
         facts["Accepted changes since your last acknowledgement"] = Delta(
-            before.graph, snapshot.graph).describe(references=False) or ["Apply the owner's current wording."]
+            before.graph, snapshot.graph).describe(references=True) or ["Apply the owner's current wording."]
     if feedback:
-        facts["Chunk follow-up"] = list(feedback.values())
+        facts["Review follow-up"] = list(feedback.values())
     if limits:
         facts["Owner direction for acceptance"] = [
             "Keep building. Return done once the implementation and locally runnable checks are complete.",
@@ -87,10 +91,16 @@ def step(store, spec, provider, user, pool, pending):
             store.record("attempt_end", {"attempt": attempt, "result": source})
 
 
+def _walk(store, delivery, demo):
+    with store.transaction():
+        target = store.record("lead2_walk_target", {"delivery": delivery, "demo": demo})
+        advance(store, "walk", target, transitions=LEAD2_RUN)
+
+
 def _deliveries(store, approval):
     order = store.read(approval["subject"]["plan"])["build_order"]
-    demos = [delivery_name(item) for i, item in enumerate(order, 1)
-             if f"delivery-{i}" in approval["demonstrations"]]
+    order = {f"delivery-{i}": delivery_name(item) for i, item in enumerate(order, 1)}
+    demos = [ref for ref in order if ref in approval["demonstrations"]]
     return order, demos
 
 
@@ -99,17 +109,18 @@ def _reviews(store, provider, pool, pending):
         if future.done():
             pending.pop(ref).result()
     for ref, chunk, verdict in chunk_review.progress(store).values():
-        if chunk.get("version") and not chunk["missing"] and verdict is None and ref not in pending:
+        if chunk.get("delivery") and verdict is None and ref not in pending:
             pending[ref] = pool.submit(chunk_review.review, store, provider, ref, chunk)
 
 
 def _feedback(store, last):
     sent = set(last.get("feedback", []))
     feedback = {}
-    for feature, (ref, chunk, verdict) in chunk_review.progress(store).items():
-        key, findings = verdict or (ref, chunk.get("missing", []))
-        if findings and key not in sent:
-            feedback[key] = feature + "\n" + "\n".join(findings)
+    for _, chunk, verdict in chunk_review.progress(store).values():
+        if verdict:
+            key, assessment = verdict
+            if assessment["findings"] and key not in sent:
+                feedback[key] = chunk["feature"] + "\n" + "\n".join(assessment["findings"])
     return feedback
 
 
@@ -204,19 +215,23 @@ def _returned(store, spec, source, answer, session):
     acknowledged = (revision if answer["acknowledged"] else
                     last.get("acknowledged") or spec.pins()["B"])
     order, demos = _deliveries(store, store.read(cursor.B))
-    shown = {row["outcome"] for _, _, row in store.records("lead2_demo_point")}
-    new_demos = [n for n in demos if n not in shown and n.casefold() in map(str.casefold, answer["demos"])]
-    for name in new_demos:
-        store.record("lead2_demo_point", {"outcome": name, "candidate": candidate, "revision": revision})
-    entries = {name: header for header, name in
-               (entry.decode().split("\t", 1) for entry in gitwork.tree_entries(workspace, candidate))}
+    shown = {row.get("delivery", row["outcome"]) for _, _, row in store.records("lead2_demo_point")}
+    reported_demos = {ref for value in answer["demos"] for ref in _delivery_refs(value)}
+    new_demos = [ref for ref in demos
+                 if ref not in shown and order[ref] not in shown and ref in reported_demos]
+    for ref in new_demos:
+        store.record("lead2_demo_point", {"delivery": ref, "outcome": order[ref],
+                                        "candidate": candidate, "revision": revision})
+    entries = {entry.decode().split("\t", 1)[1] for entry in gitwork.tree_entries(workspace, candidate)
+               if entry.startswith((b"100644 blob ", b"100755 blob "))}
     code_map = _code_map(graph, entries, answer["code_map"])
-    _chunks(store, graph, answer["chunks"], order, new_demos, entries, revision, candidate)
+    _chunks(store, answer["chunks"], order, revision, candidate)
     delivered = [] if store.read(source).get("interrupted") else execution["feedback"]
     body = {"candidate": candidate, "session": session, "revision": revision,
             "acknowledged": acknowledged, "outcome": answer["outcome"], "note": answer["note"],
             "unchanged": bool(last and execution["session"]) and cursor.candidate == candidate,
-            "code_map": code_map, "feedback": sorted(set(last.get("feedback", []) + delivered))}
+            "code_map": code_map,
+            "feedback": sorted(set(last.get("feedback", []) + delivered))}
     ref = store.record("lead2_return", body)
     store.cursor(replace(cursor, leadReturn=ref, candidate=candidate, failure=""))
 
@@ -232,75 +247,32 @@ def _capture(workspace):
     return candidate
 
 
-def _paths(value, files):
-    value = value.replace("\\", "/")
-    for part in [value] if value in files else re.split(r"[,;\n]| [—–] ", value):
-        text = part.strip().strip("`").removeprefix("./") + " "
-        if path := max((name for name in files if text.startswith(name + " ")), key=len, default=""):
-            yield path
-
-
-def _commands(args, files):
-    if not args:
-        return []
-    if " " not in args[0] or args[0] in files or Path(args[0]).is_file():
-        return [args]
-    try:
-        return [[word.strip('"') for word in shlex.split(line, posix=False)] for line in args]
-    except ValueError:
-        return []
-
-
 def _code_map(graph, files, rows):
-    names = {node["result"].casefold(): ref for ref, node in graph.nodes.items() if node["kind"] == "promise"}
     entries = {}
     for row in rows:
-        if ref := names.get(row["promise"].casefold()):
-            entry = entries.setdefault(ref, {"promise": ref, "modules": [], "tests": []})
-            for key in ("module", "test"):
-                entry[key + "s"] = list(dict.fromkeys([*entry[key + "s"], *_paths(row[key], files)]))
+        ref = row["promise"]
+        if graph.nodes.get(ref, {}).get("kind") != "promise":
+            continue
+        entry = entries.setdefault(ref, {"promise": ref, "modules": [], "tests": []})
+        for key in ("modules", "tests"):
+            paths = (path.replace("\\", "/").removeprefix("./") for path in row[key])
+            entry[key] = list(dict.fromkeys([*entry[key], *(path for path in paths if path in files)]))
     return [entry for entry in entries.values() if entry["modules"] or entry["tests"]]
 
 
-def _feature(features, label):
-    key = label.casefold()
-    if key in features:
-        return features[key]
-    matches = [feat for name, feat in features.items()
-               if name.startswith(key) and re.match(r"\s*[:—.–-]", name[len(key):])]
-    return matches[0] if len(matches) == 1 else None
+def _delivery_refs(value):
+    return DELIVERY_REF.findall(value.partition(":")[0].casefold())
 
 
-def _chunks(store, graph, chunks, order, demos, entries, revision, candidate):
-    names = {delivery_name(item).casefold(): delivery_name(item) for item in order}
-    rows = {name: [] for name in demos}
+def _chunks(store, chunks, order, revision, candidate):
+    completed = {}
     for row in chunks:
-        if feature := _feature(names, row["feature"]):
-            rows.setdefault(feature, []).append(row)
+        for ref in _delivery_refs(row["delivery"]):
+            if ref in order and row["command"] and row["command"] not in completed.setdefault(ref, []):
+                completed[ref].append(row["command"])
     seen = chunk_review.progress(store)
-    promises = {n["result"].casefold(): n for n in graph.nodes.values() if n["kind"] == "promise"}
-    for feature, checks in rows.items():
-        prior = seen.get(feature, (None, {}, None))[1]
-        tests = sorted({path for row in checks for path in _paths(row["test"], entries)})
-        modules = {path for row in checks for path in _paths(row["module"], entries)}
-        commands = [argv for row in checks for argv in _commands(row["command"], entries) if argv]
-        tests = tests or sorted(set(prior.get("tests", [])) & entries.keys())
-        modules = modules or (set(prior.get("version", {})) - set(prior.get("tests", []))) & entries.keys()
-        commands = commands or prior.get("commands", [])
-        args = {arg.replace("\\", "/").removeprefix("./").rstrip("/")
-                for argv in commands for arg in argv[1:]}
-        tests = sorted(set(tests) | (args & entries.keys()))
-        missing = ([] if tests and commands else ["Name or add the planned tests with paths and commands."])
-        if not modules and not missing:
-            missing = ["Name the implemented code paths for the feature."]
-        watched = modules | set(tests)
-        version = {path: entries[path] for path in sorted(watched & entries.keys())}
-        if missing and missing == prior.get("missing"):
-            continue
-        if not missing and not prior.get("missing") and candidate == prior.get("candidate"):
-            continue
-        if (version, missing) != (prior.get("version"), prior.get("missing")):
-            results = dict.fromkeys(row["promise"].casefold() for row in checks)
-            store.record("lead2_chunk", {"feature": feature, "revision": revision, "candidate": candidate,
-                "promises": [promises[p] for p in results if p in promises],
-                "commands": commands, "tests": tests, "version": version, "missing": missing})
+    for ref, commands in completed.items():
+        prior = seen.get(ref, (None, {}, None))[1]
+        if candidate != prior.get("candidate") or commands != prior.get("commands"):
+            store.record("lead2_chunk", {"delivery": ref, "feature": order[ref], "revision": revision,
+                                         "candidate": candidate, "commands": commands})

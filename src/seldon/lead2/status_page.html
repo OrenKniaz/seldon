@@ -152,6 +152,10 @@ dialog button{border:1px solid var(--line);border-radius:6px;background:var(--so
     <div id="recent"><!-- recent plans --><a class="showmore" href="../">Show more →</a></div>
   </aside>
 <main>
+<nav aria-label="Plan views" style="display:flex;gap:22px;border-bottom:1px solid var(--line);margin-bottom:18px;font-size:13px">
+  <a href="./" aria-current="page" style="padding:10px 0;text-decoration:none;color:var(--green);border-bottom:2px solid var(--green);font-weight:600">Where Seldon is</a>
+  <a href="walk" style="padding:10px 0;text-decoration:none;color:var(--muted)">The walk</a>
+</nav>
 <section>
   <h2>Where Seldon is</h2>
   <div class="loop" id="loop"></div>
@@ -211,7 +215,10 @@ const STATUS = {
   planned: ["planned", "Planned"],
   built: ["building", "Built"],
   "proven-current": ["passed", "Passed"],
+  accepted: ["accepted", "Accepted by you"],
   failed: ["fix", "Failed"],
+  fixing: ["fix", "Failed → fixing"],
+  "under review": ["review", "Under review"],
   stale: ["planned", "Needs a new check"],
   "not-verifiable-here": ["review", "Can’t verify here"],
   "changed-by-person": ["planned", "Changed by you"]
@@ -219,8 +226,10 @@ const STATUS = {
 const CHUNK_STATUS = {
   planned: ["planned", "Planned"], building: ["building", "Building"],
   "under review": ["review", "Under review"], failed: ["fix", "Review failed"],
-  fixing: ["fix", "Failed → fixing"], passed: ["passed", "Passed"]
+  fixing: ["fix", "Failed → fixing"], passed: ["passed", "Passed"],
+  "not-verifiable-here": ["planned", "Couldn’t test here"]
 };
+const EMPTY = ["No feature yet", "No story yet", "No check or walk yet", "No code planned yet", "No review yet"];
 const byId = id => document.getElementById(id);
 const loop = byId("loop"), trace = byId("trace"), timeline = byId("t"), lines = byId("lines");
 const vision = byId("ideaCell");
@@ -327,7 +336,7 @@ const count = (items, noun, plural = noun + "s") =>
 
 function traceCell(values, category, style, label, status) {
   const cell = element(values.length ? "button" : "div", "", "node s-" + style + (values.length ? "" : " empty"));
-  cell.append(element("span", label || "…", "label"));
+  cell.append(element("span", label, "label"));
   if (values.length) {
     cell.type = "button";
     cell.append(element("span", status, "tag"));
@@ -362,14 +371,14 @@ function showTrace(rows) {
       row.append(vision);
     }
     const [style, label] = STATUS[item.status];
-    row.dataset.line = style === "passed" ? "lit" : style === "fix" ? "bad" : "";
+    row.dataset.line = ["passed", "accepted"].includes(style) ? "lit" : style === "fix" ? "bad" : "";
     const proof = [...item.checks, ...item.walks];
     const proofLabel = [count(item.checks, "check"), count(item.walks, "walk")].filter(Boolean).join(" · ");
     const cells = [[item.feature], item.stories, proof, item.modules, [{label, text:label}]];
     const summaries = ["", count(item.stories, "story", "stories"), proofLabel,
-      count(item.modules, "module"), "—"];
+      count(item.modules, "module"), label];
     cells.forEach((values, i) => row.append(traceCell(values, LABELS[i], style,
-      i === 4 || values.length !== 1 ? summaries[i] : values[0].label, label)));
+      (i === 4 || values.length !== 1 ? summaries[i] : values[0].label) || EMPTY[i], label)));
     groups.get(item.group).append(row);
   }
   requestAnimationFrame(drawLines);
@@ -411,7 +420,9 @@ function render() {
   byId("live").hidden = following;
   showStages(frame);
   showBuild(frame, index === data.frames.length - 1);
-  showTrace(data.trace[frame.revision]);
+  const judge = frame.judgment || {};
+  showTrace(data.trace[frame.revision].map(row =>
+    ({...row, status: judge[row.promise] || judge["*"] || row.status})));
 }
 
 function stopReplay() {

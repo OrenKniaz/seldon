@@ -160,10 +160,9 @@ class SpecStore:
     def build_status(self) -> dict:
         from pathlib import Path
 
-        from ..states import LEAD2_BUILT
+        from ..states import LEAD2_BUILT, LEAD2_WALK
         from .build import _deliveries
         from .chunk_review import feature_status, progress, sent_feedback
-        from .views import delivery_name
 
         store = self._store
         cursor = store.cursor()
@@ -171,34 +170,16 @@ class SpecStore:
             return {}
         order, _ = _deliveries(store, store.read(cursor.B))
         last = store.read(cursor.leadReturn) if cursor.leadReturn else {}
-        features = feature_status(map(delivery_name, order), progress(store), sent_feedback(store, last))
+        features = feature_status(order, progress(store), sent_feedback(store, last))
         head, workspace = self.snapshot(), Path(cursor.scratch) / "builder"
         demos = [row["outcome"] for _, _, row in store.records("lead2_demo_point")]
-        return {"stage": {LEAD2_BUILT: "built", "STOPPED": "stopped"}.get(cursor.state, "building"),
+        stages = {LEAD2_BUILT: "built", LEAD2_WALK: "walking", "C": "awaiting acceptance",
+                  "ACCEPTED": "accepted", "SCRIPTED_C": "scripted acceptance", "STOPPED": "stopped"}
+        return {"stage": stages.get(cursor.state, "building"),
                 "features": features, **{key: last.get(key) for key in ("candidate", "session", "note")},
                 "acceptedRevision": head.revision, "acknowledgedRevision": last.get("acknowledged"),
-                "demos": demos, "codeMap": self._build_map(head, last),
+                "demos": demos, "codeMap": last.get("code_map", []),
                 "workspace": str(workspace) if workspace.is_dir() else None}
-
-    def _build_map(self, head, last):
-        from ..gitwork import paths
-
-        entries = {}
-        if not last:
-            return []
-        files = set(paths(self._store.root.parent, last["candidate"]))
-        for _, _, row in self._store.records("lead2_return"):
-            if not row["code_map"]:
-                continue
-            nodes = self.snapshot(row["revision"]).graph.nodes
-            for entry in row["code_map"]:
-                ref = entry["promise"]
-                if ref not in head.graph.nodes or nodes.get(ref) != head.graph.nodes[ref]:
-                    continue
-                entries[ref] = {"promise": ref, **{
-                    f"{key}s": [path for path in entry.get(f"{key}s", [entry.get(key)]) if path in files]
-                    for key in ("module", "test")}}
-        return [entry for entry in entries.values() if entry["modules"] or entry["tests"]]
 
     def bind_decision(self, gate: str, revision: int, approval: str) -> None:
         """Bind the displayed revision and materialize A's accepted defaults in the same transaction."""

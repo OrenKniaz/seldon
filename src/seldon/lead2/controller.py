@@ -7,8 +7,8 @@ from ..decisions import Waiting
 from ..processes import UncertainCleanup
 from ..providers import Frozen, ProviderFailure
 from ..run import Run
-from ..states import LEAD2_READY, TERMINAL
-from . import build, chat, planning
+from ..states import LEAD2_READY, LEAD2_WALK, TERMINAL
+from . import build, chat, planning, walk
 from .store import SpecStore
 
 
@@ -17,6 +17,9 @@ class FreshRun(Run):
         """The selected phase reconciles its own provider work."""
 
     def step(self):
+        if self.store.cursor().state in (LEAD2_WALK, "C"):
+            walk.step(self.store, SpecStore(self.store), self.provider, self.user)
+            return self.store.cursor().state
         if self.store.cursor().state == LEAD2_READY:
             if not hasattr(self, "_chunk_pool"):
                 self._chunk_pool = ThreadPoolExecutor(max_workers=1)
@@ -60,7 +63,7 @@ def _reason(error, building):
             or isinstance(cause, ProviderFailure) and not cause.cleanup_verified):
         return "Waiting for provider process cleanup to be verified."
     if isinstance(cause, ProviderFailure):
-        if isinstance(cause, Frozen):
+        if isinstance(cause, Frozen) or str(cause) == "Provider paused this request under its safety policy.":
             return str(cause)
         actor = "Provider" if building else "The planner"
         return actor + (" timed out." if "timed out" in str(cause).lower() else " could not answer.")
