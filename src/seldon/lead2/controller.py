@@ -19,18 +19,10 @@ class FreshRun(Run):
         return planning.step(self.store, self.provider, self.user)
 
     def run(self, wait=None):
-        rejected = False
         try:
             chat.set_paused(self.store, False)
             while self.store.cursor().state not in TERMINAL:
-                try:
-                    self.step()
-                except planning.UnusableAnswer:
-                    if rejected:
-                        raise
-                    rejected = True
-                else:
-                    rejected = False
+                self.step()
         except Waiting:
             pass
         except Exception as error:

@@ -1,28 +1,6 @@
 """C4/I3: compact provider answers compiled into strict spec edits."""
 
-import json
-
-from ..schema import TEXT, array, choice, obj
-
-STRING = {"type": "string"}
-EDIT_ROWS = array(obj(op=choice("add", "amend", "retire", "link", "unlink"),
-                      ref_or_source=TEXT, target=STRING, node_json=STRING))
-
-
-def answer_schema(**fields):
-    """All provider-facing Lead2 contracts use plain fields and rows, with no unions."""
-    pending = list(fields.values())
-    while pending:
-        field = pending.pop()
-        if field.get("type") == "array":
-            pending.append(field["items"])
-        elif field.get("type") == "object":
-            pending.extend(field["properties"].values())
-        elif field.get("type") not in {"string", "boolean", "integer"}:
-            raise ValueError("Use plain fields and rows in Lead2 answers.")
-        if {"anyOf", "oneOf", "allOf", "$ref"} & field.keys():
-            raise ValueError("Use plain fields and rows in Lead2 answers.")
-    return obj(answer=obj(**fields))
+from ..schema import REFS, TEXT, array, choice, obj
 
 NODE_BODIES = {
     "dream": obj(words=TEXT),
@@ -33,6 +11,12 @@ NODE_BODIES = {
     "interface": obj(contract=TEXT),
     "check": obj(action=TEXT, expected=TEXT),
     "walk": obj(scenario=TEXT, interruption=TEXT),
+}
+LINK_ROWS = array(obj(source=TEXT, targets=REFS))
+EDIT_FIELDS = {
+    **{kind: array(obj(ref=TEXT, **body["properties"]))
+       for kind, body in NODE_BODIES.items() if kind != "dream"},
+    "retire": REFS, "link": LINK_ROWS, "unlink": LINK_ROWS, "replaces": LINK_ROWS,
 }
 
 NODE = {"anyOf": [
@@ -62,65 +46,56 @@ def typed_reply(body, schema):
     return {"answer": answer}
 
 
-def spec_edits(rows):
-    edits = []
-    for row in rows:
-        op, ref = row["op"], row["ref_or_source"]
-        if op in {"add", "amend"}:
-            node = json.loads(row["node_json"])
-            if not isinstance(node, dict):
-                raise ValueError("Each changed node must be an object.")
-            edit = {"op": op, "name" if op == "add" else "id": ref, "node": node}
-        elif op == "retire":
-            edit = {"op": op, "id": ref}
-        else:
-            edit = {"op": op, "source": ref, "target": row["target"]}
-        edits.append(edit)
-    return edits
-
-
-def vision_edits(graph, answer, refs):
-    edits = [{"op": "retire", "id": ref} for ref in answer["retire"]]
-    handles = {ref: label for label, ref in refs.items()}
-    for kind, field, key in (("person", "people", "role"), ("story", "stories", "story")):
-        for row in answer[field]:
-            label = row["ref"].strip().lstrip("$")
-            node = {"kind": kind, key: row[key]}
-            edits.append({"op": "amend", "id": label, "node": node} if label in refs else
-                         {"op": "add", "name": label, "node": node})
-            if kind == "story":
-                existing = {handles[source] for source, target in graph.links if target == refs.get(label)}
-                wanted = set(row["people"] + row["sources"])
-                edits.extend({"op": op, "source": ref, "target": label}
-                             for op, group in (("link", wanted - existing), ("unlink", existing - wanted))
-                             for ref in sorted(group))
-    return edits
-
-
-def normalise_edits(graph, edits, references):
+def normalise_edits(graph, answer, references):
     """Resolve shown references and omit unsupported relations."""
-    from .graph import CONTEXT, LINEAGE
+    from .graph import CONTEXT, LINEAGE, PROOF
+
+    def resolve(label):
+        name = label.strip().lstrip("$")
+        return references.get(name, "$" + name)
 
     kinds = {ref: node["kind"] for ref, node in graph.nodes.items()}
-    kinds.update(("$" + edit["name"].strip().lstrip("$"), edit["node"]["kind"])
-                 for edit in edits if edit["op"] == "add" and edit["name"])
-    result = []
-    for raw in edits:
-        edit = raw.copy()
-        for key in ("id", "source", "target"):
-            if key in edit:
-                handle = edit[key]
-                edit[key] = references.get(handle.strip().lstrip("$"), handle)
-        node = edit.get("node", {})
-        existing = graph.nodes.get(edit.get("id"), {})
-        if (node.get("kind") == "dream" or kinds.get(edit.get("id")) == "dream"
-                or node.get("kind") == "design" and node.get("reason") == "accepted default"
-                or existing.get("kind") == "design" and existing.get("reason") == "accepted default"):
-            continue
-        if edit["op"] in {"link", "unlink"}:
-            pair = tuple(kinds.get(ref) or kinds.get("$" + ref.strip().lstrip("$"))
-                         for ref in (edit["source"], edit["target"]))
-            if all(pair) and pair not in LINEAGE | CONTEXT and pair[::-1] not in LINEAGE | CONTEXT:
+    fixed = {ref for ref, node in graph.nodes.items()
+             if node["kind"] == "dream" or node.get("reason") == "accepted default"}
+    edits, seen, ignored = [], set(), 0
+    for kind, fields in NODE_BODIES.items():
+        for row in answer.get(kind, ()):
+            ref = resolve(row["ref"])
+            if (ref == "$" or ref in fixed or ref in seen or kinds.get(ref, kind) != kind
+                    or (kind == "design" and row["reason"] == "accepted default")):
+                ignored += 1
                 continue
-        result.append(edit)
-    return result
+            seen.add(ref)
+            node = {"kind": kind, **{key: row[key] for key in fields["properties"]}}
+            edits.append(dict(op="amend", id=ref, node=node) if ref in kinds else
+                         dict(op="add", name=ref, node=node))
+            kinds[ref] = kind
+    for label in answer["retire"]:
+        ref = resolve(label)
+        if ref in kinds and ref not in fixed:
+            edits.append(dict(op="retire", id=ref))
+            del kinds[ref]
+        else:
+            ignored += 1
+    for row in answer["replaces"]:
+        original = resolve(row["source"])
+        if graph.nodes.get(original, {}).get("kind") != "promise":
+            continue
+        for label in row["targets"]:
+            replacement = resolve(label)
+            if kinds.get(replacement) == "promise":
+                edits.extend(dict(op="link", source=replacement, target=target)
+                             for source, target in graph.links if source == original and target in kinds
+                             and graph.kinds((source, target)) in PROOF)
+    allowed = LINEAGE | CONTEXT
+    for op in ("unlink", "link"):
+        for row in answer[op]:
+            source = resolve(row["source"])
+            for label in row["targets"]:
+                target = resolve(label)
+                pair = kinds.get(source), kinds.get(target)
+                if pair in allowed or pair[::-1] in allowed:
+                    edits.append(dict(op=op, source=source, target=target))
+                else:
+                    ignored += 1
+    return edits, ignored

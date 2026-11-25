@@ -56,25 +56,25 @@ class Graph:
 
 
 def review_issues(graph):
-    """A reviewed spec connects every story to what, how and test."""
-    if not any(node["kind"] == "story" for node in graph.nodes.values()):
-        return ["Describe the product's stories and link them to verifiable promises."]
+    """Count missing trace relationships separately so review can measure progress."""
     issues = []
     for ref, node in graph.nodes.items():
         if node["kind"] == "story":
             sources = {graph.nodes[source]["kind"] for source, target in graph.links if target == ref}
-            if not {"dream", "person"} <= sources or graph.follow(ref) == {ref}:
-                issues.append("Link the owner's words and a role to this story, then a promise: "
-                              + node["story"])
+            missing = {"owner's words": "dream", "role": "person"}
+            issues.extend(f"Story has no {label} linked yet: {node['story']}"
+                          for label, kind in missing.items() if kind not in sources)
+            if graph.follow(ref) == {ref}:
+                issues.append(f"Story has no promise linked yet: {node['story']}")
         elif node["kind"] == "promise":
             roots = {graph.nodes[parent]["kind"] for parent in graph.follow(ref, upstream=True)}
             witnesses = {graph.nodes[child]["kind"] for child in graph.follow(ref, PROOF)}
             missing = {"design", "check", "walk"} - witnesses
             if "dream" not in roots:
-                missing.add("owner words")
-            if missing:
-                issues.append(f"Link this promise to {', '.join(sorted(missing))}: {node['action']}")
-    return issues
+                missing.add("link to the owner's words")
+            issues.extend(f"Promise has no {kind} yet: {node['result']}" for kind in sorted(missing))
+    return issues or (["The spec has no stories yet."] if not any(
+        node["kind"] == "story" for node in graph.nodes.values()) else [])
 
 
 def edited(graph: Graph, batch: dict) -> tuple[Graph, dict[str, str]]:

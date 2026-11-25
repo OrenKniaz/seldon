@@ -121,12 +121,13 @@ def test_door_spec_proof_tracks_the_current_graph_and_candidate(tmp_path):
         assert states(spec, revision, names, NEXT_COMMIT) == ("stale",) * 3
 
         label = spec.snapshot().graph.nodes[handoff]
-        wording = edit(spec, revision, "Use the role name in the description",
-                       amend(handoff, **{**label, "action": "Admit one guest and switch to Door lead"}),
+        wording = edit(spec, revision, "Polish the check's punctuation and spacing",
+                       amend(handoff, **{**label, "action": f"  {label['action'].upper()}! "}),
                        mode="wording-only").revision
         assert states(spec, wording, names) == ("proven-current",) * 3
         changed = edit(spec, wording, "Exercise the late-night reset before the handoff",
-                       amend(handoff, **{**label, "action": "Reset after midnight, then admit one guest"}))
+                       amend(handoff, **{**label, "action": "Reset after midnight, then admit one guest"}),
+                       mode="wording-only")
         spec = SpecStore(store)
         assert states(spec, changed.revision, names) == ("stale", "stale", "proven-current")
 
@@ -169,7 +170,8 @@ def test_door_spec_keeps_conflicting_and_unapproved_edits_out_of_the_head(tmp_pa
     """Competing planners and a late owner reply cannot publish over a newer accepted snapshot.
 
     Reopen the run DB to catch in-memory proposal state or partial writes. Existing decision
-    journeys have no candidate to bind independently of the spec head.
+    journeys have no candidate to bind independently of the spec head. An edit labeled as
+    wording-only could previously reverse a promise while its old proof stayed current.
     """
     with closing(Store(tmp_path)) as store:
         spec, names, revision, _, _ = grow(store)
@@ -177,12 +179,15 @@ def test_door_spec_keeps_conflicting_and_unapproved_edits_out_of_the_head(tmp_pa
         check = names["$handoff"]
         old_revision, view = spec.read_slice(hand)
         promise = view.nodes[hand]
+        observe(spec, revision, names, "$handoff", "$hand")
         changed_promise = {**promise, "result": "Lead sees the count with the last volunteer's name"}
         pending = edit(spec, old_revision, "Add the last volunteer to the handoff",
-                       amend(hand, **changed_promise))
+                       amend(hand, **changed_promise), mode="wording-only")
         assert not pending.accepted
         assert spec.snapshot().revision == revision
         assert spec.read_slice(hand)[1].nodes[hand] == promise
+        assert states(spec, revision, names)[1] == "proven-current"
+        assert states(spec, pending.revision, names)[1] == "stale"
         assert "Scope proposal" in render_person(spec, revision=pending.revision, since=revision)
 
         with closing(Store(tmp_path)) as concurrent_store:
@@ -223,7 +228,7 @@ def test_door_spec_keeps_conflicting_and_unapproved_edits_out_of_the_head(tmp_pa
         assert reopened.read_slice(hand)[1].nodes[hand] == changed_promise
         assert reopened.read_slice(hand, revision)[1].nodes[hand] == promise
         assert reopened.pins()["B"] == revision
-        assert states(reopened, replacement.revision, names) == ("planned", "changed-by-person", "planned")
+        assert states(reopened, replacement.revision, names) == ("planned", "stale", "planned")
         proof = observe(reopened, replacement.revision, names, "$handoff", "$hand")
         assert states(reopened, replacement.revision, names)[1] == "proven-current"
         assert trace_observation(reopened, proof.id).approvals["scope", replacement.revision] == approved

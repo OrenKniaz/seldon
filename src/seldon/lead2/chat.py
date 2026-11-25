@@ -16,7 +16,7 @@ SIZE = "size"
 APPROVE = "approve"
 REVISE = "revise"
 RELAY = ("Show the proposal and options. Relay the person's choices and exact words with a fresh replyId. "
-         "Reuse it on transport retry. Select approval only when the person explicitly approves.")
+         "Reuse it on transport retry. Relay unqualified approval as the Approve selection alone.")
 
 
 def manually_paused(store):
@@ -115,17 +115,15 @@ def options(*items):
 
 
 def product_groups(questions):
-    groups = []
-    for question in questions:
-        unique = {}
-        for option in question["options"]:
-            label = option["label"].strip()
-            if label and label.casefold() != "other":
-                unique.setdefault(label.casefold(), option)
-        if unique:
-            groups.append(group(f"q{len(groups) + 1}", question["question"],
-                                [{"id": f"o{i}", **o} for i, o in enumerate(unique.values(), 1)]))
-    return groups
+    grouped = {}
+    for row in questions:
+        label = row["label"].strip()
+        if label and label.casefold() != "other":
+            picks = grouped.setdefault(row["question"].strip(), {})
+            picks.setdefault(label.casefold(), (label, row["means"]))
+    return [group(f"q{i}", question, options(*((f"o{j}", *option)
+             for j, option in enumerate(picks.values(), 1))))
+            for i, (question, picks) in enumerate(grouped.items(), 1)]
 
 
 def gate_group(gate, *, recommend=True):

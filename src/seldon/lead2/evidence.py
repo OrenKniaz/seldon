@@ -64,10 +64,10 @@ def promise_status(spec: SpecStore, revision: int, commit: str | None) -> dict[s
             result[promise] = "proven-current"
         elif "not-verifiable-here" in outcomes:
             result[promise] = "not-verifiable-here"
-        elif change.mode == "scope-proposal" and change.accepted:
-            result[promise] = "changed-by-person"
         elif previous and not current:
             result[promise] = "stale"
+        elif change.mode == "scope-proposal" and change.accepted:
+            result[promise] = "changed-by-person"
         else:
             result[promise] = "built" if current else "planned"
     return result

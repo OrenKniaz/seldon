@@ -127,10 +127,8 @@ class SpecStore:
             mode = batch["mode"]
             if graph == current.graph:
                 return EditResult(current.revision, True)
-            if mode == "wording-only" and not _wording_only(delta):
-                mode = "substantive"
-            if mode == "substantive" and any(self.scope_changes(delta)):
-                mode = "scope-proposal"
+            mode = ("scope-proposal" if self.scope_changes(delta) else
+                    "wording-only" if mode == "wording-only" and _wording_only(delta) else "substantive")
             row = self._store.db.execute("""
                 INSERT INTO lead2_spec(parent, graph, mode, author, reason, time) VALUES (?, ?, ?, ?, ?, ?)
             """, (current.revision, encode(asdict(graph)), mode, author, batch["reason"],
@@ -157,7 +155,7 @@ class SpecStore:
         with self._store.transaction():
             if approval and self.decision(gate, revision) == approval:
                 return
-            request, words = self._check_approval(gate, revision, approval)
+            request = self._check_approval(gate, revision, approval)
             if self._store.db.execute(
                 "SELECT 1 FROM lead2_spec_decision WHERE gate = ? AND approval = ?", (gate, approval),
             ).fetchone():
@@ -173,7 +171,7 @@ class SpecStore:
                 if revision == 0 or gate in pins or (gate == "B" and "A" not in pins):
                     raise ValueError("Pin A then B, each once, on a saved spec.")
                 self._require_head(snapshot, current)
-            if gate == "A" and (edits := _accepted_defaults(request, words)):
+            if gate == "A" and (edits := _accepted_defaults(request)):
                 revision = self.apply(dict(revision=revision, mode="substantive", edits=edits,
                                            reason="Record defaults accepted at A"), author="owner").revision
             self._store.db.execute("INSERT INTO lead2_spec_decision VALUES (?, ?, ?)",
@@ -220,33 +218,17 @@ class SpecStore:
         if requested.revision != current.revision:
             raise Conflict(requested.revision, current.revision, Delta(requested.graph, current.graph))
 
-    def scope_changes(self, delta: Delta):
+    def scope_changes(self, delta: Delta) -> set[str]:
         """The exact changes that need separate scope approval."""
         pins = self.pins()
         if "A" not in pins:
-            return set(), set()
-        locked = self.snapshot(pins["A"]).graph.nodes
-        nodes = set()
-        for ref in delta.nodes:
-            before, after = delta.before.nodes.get(ref), delta.after.nodes.get(ref)
-            kind = (after or before)["kind"]
-            if kind in {"dream", "story"} or (kind == "promise" and (ref in locked or "B" in pins)):
-                nodes.add(ref)
-            if kind == "design" and locked.get(ref, {}).get("reason") == "accepted default":
-                nodes.add(ref)
-            if kind == "person" and any(
-                source == ref and graph.nodes[target]["kind"] == "story"
-                for graph in (delta.before, delta.after) for source, target in graph.links
-            ):
-                nodes.add(ref)
-        locked_links = {("dream", "story"), ("person", "story")}
-        if "B" in pins:
-            locked_links.add(("story", "promise"))
-        links = {link for graph in (delta.before, delta.after) for link in delta.links & set(graph.links)
-                 if graph.kinds(link) in locked_links}
-        return nodes, links
+            return set()
+        locked = self.snapshot(pins["A"]).graph.nodes if "B" not in pins else None
+        return {ref for ref in delta.nodes if (locked is None or ref in locked)
+                and (delta.after.nodes.get(ref) or delta.before.nodes[ref])["kind"] == "promise"
+                and not _presentation_only(delta.before.nodes.get(ref), delta.after.nodes.get(ref))}
 
-    def _check_approval(self, gate: str, revision: int, approval: str) -> tuple[dict, dict]:
+    def _check_approval(self, gate: str, revision: int, approval: str) -> dict:
         receipt = self._record("approval", approval)
         request = self._record("decision_request", receipt.get("request"))
         words = self._record("user_words", receipt.get("userWords"))
@@ -258,7 +240,7 @@ class SpecStore:
                 or words.get("request") != receipt["request"] or words.get("origin") != request.get("origin")
                 or not words.get("words")):
             raise ValueError(f"Use the person's approval bound to {gate} revision {revision}.")
-        return request, words
+        return request
 
     def _record(self, kind: str, ref: str | None) -> dict:
         if isinstance(ref, str) and ref.startswith("r") and ref[1:].isascii() and ref[1:].isdigit():
@@ -269,11 +251,10 @@ class SpecStore:
         raise ValueError(f"Use a stored {kind} record, got {ref!r}.")
 
 
-def _accepted_defaults(request, words):
-    chosen = {choice["group"] for choice in words.get("choices", [])}
+def _accepted_defaults(request):
     edits = []
     for group in request.get("ask", {}).get("groups", []):
-        if group["id"] == "round" or group["id"] in chosen:
+        if not group["id"].startswith("q"):
             continue
         option = next(item for item in group["options"] if item["id"] == group["default"])
         edits.append(dict(op="add", name=None, node=dict(
@@ -284,13 +265,16 @@ def _accepted_defaults(request, words):
 
 
 def _wording_only(delta: Delta) -> bool:
-    if delta.links:
-        return False
-    for ref in delta.nodes:
-        old, new = delta.before.nodes.get(ref), delta.after.nodes.get(ref)
-        if (not old or not new or old["kind"] == "person" or old.get("words") != new.get("words")):
-            return False
-    return True
+    return not delta.links and all(_presentation_only(delta.before.nodes.get(ref), delta.after.nodes.get(ref))
+                                   for ref in delta.nodes)
+
+
+def _presentation_only(old, new):
+    def tokens(text):
+        return re.findall(r"\w+(?:[.,'’/-]\w+)*|[^\w\s.,;:!?()\"“”]", text.lower())
+
+    return (old and new and old.get("words") == new.get("words")
+            and all(tokens(old[key]) == tokens(value) for key, value in new.items()))
 
 
 def _observation(ref: int, revision: int, body: dict) -> Observation:

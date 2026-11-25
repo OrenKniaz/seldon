@@ -6,9 +6,9 @@ LEAD2_MODE = "lead2"
 LEAD2_READY = "L2-READY"
 LEAD2_RUN = {
     "ALIGN": {"aligned": "A"},
-    "A": {"revise": "ALIGN", "approve": "L2-SPEC"},
+    "A": {"revise": "ALIGN", "approve": "L2-SPEC", "approve-spec": "L2-REVIEW"},
     "L2-SPEC": {"planned": "L2-REVIEW", "revise": "L2-SPEC"},
-    "L2-REVIEW": {"reviewed": "B", "revise": "L2-SPEC"},
+    "L2-REVIEW": {"reviewed": "B", "trace-progress": "L2-REVIEW", "revise": "L2-SPEC"},
     "B": {"revise": "L2-SPEC", "approve": LEAD2_READY},
     LEAD2_READY: {},
 }

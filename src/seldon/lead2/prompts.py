@@ -1,72 +1,53 @@
 """C1/C6/C9/C11: the product briefs and typed planning answers."""
 
 from ..questions import labelled
-from ..schema import OPTION, REFS, TEXT, array, choice, obj
-from .contracts import EDIT_ROWS, NODE_BODIES, STRING, answer_schema
+from ..schema import TEXT, array, choice, obj
+from .contracts import EDIT_FIELDS
 
 SIZES = {"micro": "Minutes of agent work.", "small": "An hour or two of agent work.",
          "medium": "Days of agent work across sessions.", "big": "Weeks or months of agent work."}
-QUESTIONS = array(obj(question=TEXT, options=array(OPTION, 2)))
-ALIGN = answer_schema(reason=TEXT, aligned={"type": "boolean"}, size=choice(*SIZES), size_reason=TEXT,
-                      people=array(obj(ref=TEXT, role=TEXT)),
-                      stories=array(obj(ref=TEXT, story=TEXT, people=REFS, sources=REFS)), retire=REFS,
-                      questions=QUESTIONS)
-DELIVERY = obj(outcome=TEXT, separate_session_reason=STRING, recommend_demo={"type": "boolean"})
-SPEC = answer_schema(reason=TEXT, edits=EDIT_ROWS, build_order=array(DELIVERY, 1))
-REVIEW = answer_schema(reason=TEXT, edits=EDIT_ROWS, findings=TEXT, questions=QUESTIONS,
-                       build_order=array(DELIVERY))
+QUESTIONS = array(obj(question=TEXT, label=TEXT, means=TEXT))
+DELIVERY = array(obj(outcome=TEXT, recommend_demo={"type": "boolean"}))
+ALIGN = obj(aligned={"type": "boolean"}, size=choice(*SIZES), size_reason=TEXT, questions=QUESTIONS)
+SPEC = obj()
+REVIEW = obj(findings=TEXT, questions=QUESTIONS)
 TASK = {
-    "LEAD2-ALIGN": """Help the person shape the product. Keep their exact values. Improve the idea and
-include people working together, handoffs, simultaneous actions, and recovery where relevant.
-Ask every remaining choice a capable builder could take two ways that the person would care about.
-Offer concrete options, best first, including better ideas where useful. The interface adds Other.
-Say whether the vision seems ready. The person decides when it is.
-Size by agent effort: micro minutes, small 1–2 hours, medium days, big weeks or months.
-Honor the person's chosen size without changing their requirements.
-
-Return only people and stories that changed. Use shown references for existing rows or short names
-for new rows. For each changed story list the people involved and the words it draws on. Use brief
-for the opening words and the shown reply references for decisions. Retire only superseded rows.
-
-Example question: How should the incoming attendant follow up on an overdue key?
-- Show the borrower and due time so they can follow up without handover notes.
-- Show only the key so staff can use their existing log for borrower details.""",
-    "LEAD2-SPEC": """Specify the whole agreed product. Each promise names an action, an observable
-result and what counts as failure. Link it through design or interfaces to checks and walks.
-Explain design choices and reasons. Model the identities, lifetimes, state transitions and
-agreements in the person's world. Preserve accepted defaults and cover them in applicable walks.
-Keep the agreed stories and quote the person's choices exactly. Keep checks in plain language.
-Give the walker roles, setup, steps and expected results, including overlap,
-interruption, resumption and how a new person tries a fresh copy.
-For each real-world identity in the data model (a night, a session, an order), include a walk
-where an earlier action arrives late or is retried after that identity has changed.
-Order working outcomes. Keep one builder session where feasible and explain any real split.
-Suggest useful demonstrations. The person chooses which to see. A demonstration can happen within
-the same builder session. Leave separate_session_reason empty when the same session continues.""",
-    "REVIEW": """Independently trace every promise back to the person's words, and those words forward
-to promises. Include chosen options, specifics, constraints, quality and distinct outputs.
-Check designs, checks, walks and build order for omissions, misleading proof and likely misreadings.
-Repair concrete gaps and keep accepted defaults intact. Leave build_order empty unless it needs revision.
-Ask the person only about
-material choices their words cannot settle. Offer concrete options with the recommendation first.
-The interface adds Other. Explain what you checked and found.""",
+    "LEAD2-ALIGN": """Improve the idea while keeping exact values, handoffs, races and recovery.
+Ask only consequential unresolved choices. Read prior replies, carry accepted recommendations
+into stories, and never repeat answered questions. Offer concrete choices, best first. Say whether
+the vision is ready; the owner decides. Honor their chosen size: micro minutes, small 1–2 hours,
+medium days, big weeks or months. Return changed roles and stories linked to the owner's words;
+start each story with a short title sentence. Fold a ready micro or small spec and build order here;
+otherwise leave the detailed spec arrays empty.""",
+    "LEAD2-SPEC": """Explain identities, state changes and design. Preserve exact owner choices.
+Walk overlap, recovery, fresh setup and stale retries. Order outcomes in one session and suggest demos.""",
+    "REVIEW": """Trace owner words to promises and back. Repair bundles, missing deliverables and
+material gaps using the existing walks first. Verify accepted defaults and design against checks
+and walks; committed retries return their original outcome. Repair without changing accepted defaults.
+Leave build_order empty unless changed. Explain findings; ask only consequential unresolved choices.""",
 }
-EDIT_GUIDE = """Each edit is one row. For add/amend, use ref_or_source as a new short name or
-shown reference, and node_json as the full node object encoded as text. For retire name the
-reference. For link/unlink use ref_or_source and target. Leave unused text empty.
-Link words and roles to stories and stories to promises. Give each promise a design and link its
-checks and walks to the promise or to its design or interface. Checks can also link to walks.
-Stories and roles can link directly to walks for context."""
-NODE_FIELDS = "Node fields in addition to kind: " + "; ".join(
-    f"{kind} ({', '.join(body['properties'])})" for kind, body in NODE_BODIES.items() if kind != "dream"
-)
+EDIT_GUIDE = """Use one row per changed node, in its kind's array. Use a short new ref to add
+or a shown ref to amend. Retire only superseded nodes. Group link and unlink targets by source.
+For splits, replaces.source is the old promise and targets inherit its proof links; unlink to opt out.
+Link brief and reply refs and roles to stories, stories to promises, promises to design and proof.
+Leave unused arrays empty. List options separately, recommendation first, label matching meaning."""
+PROMISE_GUIDE = """One promise per independently verifiable output or workflow, with its action,
+result and failure. Split each separately named resource view, administration editor and report format.
+Split board updates from notices and hosting from migrations. Requested artifacts such as automated
+integration/E2E tests per workflow are promises, distinct from checks within the plan.
+Walk user handoffs with the receiving role observing the result and setting changes through their
+effect in the affected workflow. A direct check suffices for a standalone artifact such as a sample.
+Use terse B results: output name, exact filters, labels and distinguishing conditions, including
+qualified replies. Name sibling formats 'Report name screen — ...', 'Report name print — ...',
+and 'Report name CSV — ...'. Start their results with identical shared conditions."""
 
 
 def question(kind, words, current, **facts):
-    task = TASK[kind] + ("\n\n" + EDIT_GUIDE + "\n" + NODE_FIELDS if kind != "LEAD2-ALIGN" else "")
-    schema = {"LEAD2-ALIGN": ALIGN, "LEAD2-SPEC": SPEC, "REVIEW": REVIEW}[kind]
+    fields = {"LEAD2-ALIGN": ALIGN, "LEAD2-SPEC": SPEC, "REVIEW": REVIEW}[kind]["properties"]
+    schema = obj(answer=obj(reason=TEXT, **fields, **EDIT_FIELDS, build_order=DELIVERY))
     return {"kind": kind, "execution": {}, "schema": schema, "renderContext": {"lead2": True},
-            "prompt": task, "facts": {"Owner's words": words, "Current proposal": current, **facts}}
+            "prompt": "\n\n".join((TASK[kind], PROMISE_GUIDE, EDIT_GUIDE)),
+            "facts": {"Owner's words": words, "Current proposal": current, **facts}}
 
 
 def render(question):

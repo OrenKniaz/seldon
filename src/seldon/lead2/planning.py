@@ -10,7 +10,7 @@ from ..questions import AnswerRejected
 from ..states import LEAD2_RUN, TERMINAL
 from ..states import advance as advance_run
 from . import chat, prompts
-from .contracts import normalise_edits, spec_edits, typed_reply, vision_edits
+from .contracts import normalise_edits, typed_reply
 from .graph import review_issues
 from .store import SpecStore
 from .views import b_summary, planning_facts, planning_view, scope_summary
@@ -45,33 +45,23 @@ def _plan(store, spec, provider, cursor):
         snapshot = spec.snapshot()
     kind = {"ALIGN": "LEAD2-ALIGN", "L2-SPEC": "LEAD2-SPEC", "L2-REVIEW": "REVIEW"}[cursor.state]
     proposal, quoted_replies, refs = planning_facts(snapshot.graph, kickoff)
-    replies = [r for _, _, r in store.records("user_words") if r.get("effect") == "direct"]
-    graph_words = {n["words"] for n in snapshot.graph.nodes.values() if n["kind"] == "dream"}
-    choices = [c for reply in replies for c in reply["choices"]]
-    facts = {"Earlier replies": quoted_replies,
-             "Follow-up words": "\n\n".join(r["words"] for r in replies if r["words"] not in graph_words),
-             "Chosen details": "\n".join(c["meaning"] for c in choices if c["group"].startswith("q")
-                                         and not c["text"])}
-    if cursor.leadPlan and kind != "LEAD2-ALIGN":
+    size = next((item["size"] for _, _, item in reversed(store.records("approval")) if "size" in item), None)
+    facts = {"Earlier replies": quoted_replies, "Owner's chosen size": size}
+    if kind == "LEAD2-ALIGN" and cursor.vision:
+        facts["Previous questions and options"] = store.read(cursor.vision)["answer"]["questions"]
+    elif cursor.leadPlan and kind != "LEAD2-ALIGN":
         facts["Proposed build order"] = store.read(cursor.leadPlan)["build_order"]
     if kind == "REVIEW":
         facts["Missing proof links"] = review_issues(snapshot.graph)
-    size = next((c["optionId"] for c in reversed(choices)
-                 if c["group"] == chat.SIZE and c["optionId"] in prompts.SIZES), None)
-    facts["Owner's chosen size"] = size
-    last = store.records()[-1]
-    if last[1] == "lead2_unusable_answer":
-        issue = last[2]["reason"]
-        for alias, ref in refs.items():
-            issue = issue.replace(ref, alias)
-        facts["Unresolved proposal issue"] = issue
     question = prompts.question(kind, kickoff, proposal, **{k: v for k, v in facts.items() if v})
     try:
         inference.call(store, provider, question, normalise=typed_reply,
                        consume=lambda ref, answer: _propose(store, spec, snapshot, ref, answer, size, refs))
     except (AnswerRejected, ConsumptionFailure) as error:
-        store.record("lead2_unusable_answer", {"reason": str(error.__cause__ or error)})
-        raise UnusableAnswer("The planner returned an unusable answer. The proposal is unchanged.") from error
+        reason = (str(error).partition("; ")[2] if isinstance(error, AnswerRejected)
+                  else str(error.__cause__ or error))
+        store.record("lead2_unusable_answer", {"reason": reason})
+        raise UnusableAnswer(f"Planning paused. {reason}") from error
 
 
 def _add_words(spec, revision, words, reason):
@@ -82,10 +72,8 @@ def _add_words(spec, revision, words, reason):
 
 def _propose(store, spec, snapshot, answer_ref, answer, size, references):
     cursor = store.cursor()
-    graph = snapshot.graph
-    raw = vision_edits(graph, answer, references) if cursor.state == "ALIGN" else spec_edits(answer["edits"])
-    edits = normalise_edits(graph, raw, references)
-    if ignored := len(raw) - len(edits):
+    edits, ignored = normalise_edits(snapshot.graph, answer, references)
+    if ignored:
         store.record("lead2_normalisation", {"answer": answer_ref, "ignoredEdits": ignored})
     updated = snapshot
     if edits:
@@ -94,27 +82,35 @@ def _propose(store, spec, snapshot, answer_ref, answer, size, references):
         result = spec.apply(batch, author="reviewer" if cursor.state == "L2-REVIEW" else "planner")
         updated = spec.snapshot(result.revision)
     plan = cursor.leadPlan if cursor.state == "L2-REVIEW" else None
-    if order := answer.get("build_order"):
+    if order := answer["build_order"]:
         plan = store.record("lead2_plan", {"build_order": order, "source": answer_ref})
     store.cursor(replace(cursor, leadPlan=plan, failure=""))
     if cursor.state == "ALIGN":
         _offer_a(store, updated, answer_ref, answer, size)
     elif not updated.accepted:
         chat.request(store, "scope", updated.revision, [chat.gate_group("scope")],
-                     proposal=scope_summary(spec, snapshot, updated), summary="Changes to the agreed scope")
+                     proposal=scope_summary(snapshot, updated), summary="Changes to the agreed scope",
+                     **({"review": answer_ref} if cursor.state == "L2-REVIEW" else {}))
     elif cursor.state == "L2-SPEC":
         advance(store, "planned", answer_ref)
-    elif groups := chat.product_groups(answer["questions"]):
-        chat.request(store, "Review choices", updated.revision, groups,
-                     proposal=planning_view(updated.graph, detailed=True), summary=answer["findings"])
     else:
-        if issues := review_issues(updated.graph):
-            raise ValueError("\n".join(issues))
-        advance(store, "reviewed", answer_ref, review=answer_ref)
+        _finish_review(store, snapshot.graph, updated, answer_ref, answer)
+
+
+def _finish_review(store, before, updated, answer_ref, answer):
+    if groups := chat.product_groups(answer["questions"]):
+        chat.request(store, "Review choices", updated.revision, groups,
+                     proposal=planning_view(updated.graph), summary=answer["findings"])
+        return
+    gaps = review_issues(updated.graph)
+    if not store.cursor().leadPlan:
+        raise ValueError("The plan is missing its build order.")
+    progress = gaps and len(gaps) < len(review_issues(before))
+    advance(store, "trace-progress" if progress else "reviewed", answer_ref, review=answer_ref)
 
 
 def _offer_a(store, snapshot, source, answer, chosen_size):
-    proposal = planning_view(snapshot.graph, detailed=True)
+    proposal = planning_view(snapshot.graph)
     if not proposal:
         raise ValueError("Describe at least one story before asking the owner to lock the vision.")
     size = chosen_size or answer["size"]
@@ -141,9 +137,10 @@ def _offer_b(store, spec, cursor):
             choices.reverse()
         groups.append(chat.group(f"delivery-{index}", f"Demonstrate this delivery? {outcome}", choices,
                                  default="skip"))
+    revised = any(r["gate"] == "B" for _, _, r in store.records("decision_request"))
     chat.request(store, "B", snapshot.revision, [*groups, chat.gate_group("B")],
-                 proposal=b_summary(snapshot.graph, order, {}), summary="Reviewed spec",
-                 plan=cursor.leadPlan, review=cursor.review)
+                 proposal=b_summary(snapshot.graph, order, {}, revised=revised), summary="Reviewed spec",
+                 plan=cursor.leadPlan, review=cursor.review, revised=revised)
 
 
 def _answer(store, spec, user, cursor):
@@ -154,7 +151,7 @@ def _answer(store, spec, user, cursor):
     revision = subject["lead2_revision"]
     by_group = {c["group"]: c for c in choices}
     explicit = by_group.get(chat.ROUND, {}).get("optionId") == chat.APPROVE
-    changes = _changes(item["ask"], choices, gate)
+    changes = bool(reply.get("words")) or _changes(item["ask"], choices, gate)
     approve = explicit and not changes
     effect = "approve" if approve else "direct"
     with store.transaction():
@@ -162,20 +159,24 @@ def _answer(store, spec, user, cursor):
         if store.cursor().decision != ref or spec.snapshot().revision != expected:
             raise ValueError("The proposal changed. Reopen the current proposal before recording a reply.")
         raw = store.record("user_words", {**reply, "words": words, "origin": item["origin"],
-                                         "choices": choices,
                                          "effect": effect if changes or approve else "continue"})
         store.cursor(replace(cursor, decision=None, failure=""))
         if gate == "B" and not explicit and not changes and chat.ROUND not in by_group:
             ask = item["ask"]
             retained = {c["group"]: c for c in ask["retained"]} | by_group
             order = store.read(subject["plan"])["build_order"]
-            proposal = b_summary(spec.snapshot(revision).graph, order, retained)
+            proposal = b_summary(spec.snapshot(revision).graph, order, retained,
+                                 revised=subject.get("revised", False))
             decisions.request(store, "B", subject, ask={**ask, "proposal": proposal,
                                                         "retained": list(retained.values())})
             return
         receipt = {"request": ref, "subject": subject, "words": raw, "userWords": raw,
                    "scripted": store.read(cursor.kickoff)["setup"].get("scriptedUser", False),
                    "effect": effect}
+        if gate == "A":
+            receipt["size"] = by_group.get(chat.SIZE, {}).get("optionId", subject["size"])
+            if receipt["size"] not in prompts.SIZES:
+                receipt["size"] = subject["size"]
         if approve and gate == "B":
             picked = {c["group"]: c for c in item["ask"]["retained"]} | by_group
             receipt["demonstrations"] = [g["id"] for g in item["ask"]["groups"]
@@ -186,13 +187,25 @@ def _answer(store, spec, user, cursor):
             if gate == "scope":
                 if cursor.state == "L2-SPEC":
                     advance(store, "planned", approval)
+                elif reviewed := subject.get("review"):
+                    _finish_review(store, spec.snapshot(expected).graph, spec.snapshot(revision),
+                                   reviewed, store.read(reviewed)["answer"])
             elif gate == "A":
-                advance(store, "approve", approval, A=approval, leadPlan=None)
+                folded = (receipt["size"] in {"micro", "small"} and cursor.leadPlan
+                          and not review_issues(spec.snapshot().graph))
+                advance(store, "approve-spec" if folded else "approve", approval, A=approval,
+                        leadPlan=cursor.leadPlan if folded else None)
             else:
                 advance(store, "approve", approval, B=approval)
         else:
-            if gate == "A" and changes:
-                _add_words(spec, revision, words, "Record the owner's alignment answers")
+            notes = [reply["words"]] if reply.get("words") else []
+            for choice in choices:
+                if choice["text"] and choice["text"] not in notes:
+                    notes.append(choice["text"])
+                elif choice["group"].startswith("q") and not choice["text"]:
+                    notes.append(f"{choice['question']} {choice['label']} — {choice['meaning']}")
+            if notes:
+                _add_words(spec, expected, "\n".join(notes), "Record the owner's reply")
             advance(store, "revise", approval)
 
 
