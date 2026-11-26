@@ -8,7 +8,7 @@ from urllib.parse import quote
 from .. import gitwork
 from .owner_guide import owner_steps, owner_text
 from .store import SpecStore
-from .walk_record import ASSESSMENTS, current_walk, limits, open_defects, read_walk
+from .walk_record import ASSESSMENTS, current_walk, read_walk, release_notes
 
 LABEL = {"works": ("ok", "Works"), "broken": ("bad", "Broken"),
          "can't-test-here": ("cant", "Couldn’t test here"), "pending": ("cant", "Awaiting proof")}
@@ -125,13 +125,16 @@ def render(template, store, name, owner):
         current = current_walk(store, SpecStore(store, readonly=True).snapshot().revision)
         ref, _, raw = runs[-1]
         run = current or read_walk(store, ref, raw)
-        active = open_defects(store, run)
-        run["open_defects"] = [row for row in run.get("issues", []) if row.get("ref") in active]
+        if "results" in run:
+            body = _release(run, release_notes(store, current) if current else None,
+                            store.cursor().scratch, current is not None)
+            return template.replace("<!-- walk identity -->", escape(name)).replace("<!-- walk content -->", body)
+        run["open_defects"] = [row for row in run.get("issues", []) if row.get("ref") in run.get("defects", {})]
         sent = next((row for _, _, row in reversed(store.records("lead2_walk_repair"))
                      if row["target"] == run["target"]), None)
         cursor = store.cursor()
         scratch = cursor.scratch
-        unverified = [row["reason"] for row in limits(store, current)] if current else []
+        unverified = [store.read(ref)["reason"] for ref in run.get("limits", []) if isinstance(ref, str)]
         body = _contents(_owner_projection(run, scratch), sent, name, scratch, current, unverified)
         if "verdicts" not in raw:
             answer = store.read(run["source"])["answer"]
@@ -140,9 +143,33 @@ def render(template, store, name, owner):
 
     else:
         body = ('<div class="hero"><div><h1>The walk</h1>'
-                '<p>The independent walk has yet to finish.</p></div></div>')
+                f'<p>{"The independent walk is under way." if store.cursor().state == "L2-WALK" else "The independent walk has yet to start."}</p></div></div>')
     identity = name if owner == "Dream owner" else f'{name} · {owner.split(" · ", 1)[0]}'
     return template.replace("<!-- walk identity -->", escape(identity)).replace("<!-- walk content -->", body)
+
+
+def _release(run, notes, scratch, current):
+    candidate = quote(run["candidate"])
+    preview = (f'<form method="post" action="walk-preview/{candidate}">'
+               '<button class="btn" type="submit">▶ Open this build</button></form>' if run["launch"] else "")
+    body = (f'<div class="hero"><h1>The independent walk</h1><div class="open">{preview}'
+            f'<a class="btn2" href="walk-build/{candidate}">Download a clean copy</a></div></div>')
+    if not current:
+        body += '<p class="limits">These results describe an earlier build.</p>'
+    if notes:
+        body += '<section><h2>What works</h2>'
+        for row in notes["works"]:
+            link = f' <a href="walk-shot/{quote(row["artifact"])}">Screenshot</a>' if row["artifact"] else ""
+            body += f'<p>{escape(row["text"])}{link}</p>'
+        if notes["items"]:
+            body += '<h2>What’s weaker</h2>' + "".join(
+                f'<p>{escape(r["id"])} · <b>{escape(r["label"])}</b> {escape(r["text"])}</p>' for r in notes["items"])
+        body += '</section>'
+    body += "".join(_step(step) for step in _owner_projection(run["steps"], scratch))
+    if run["guide_text"]:
+        body += ('<details class="limits guide"><summary>How to try it yourself</summary>'
+                 f'{owner_steps(run["guide_text"], scratch)}</details>')
+    return body
 
 
 def _owner_projection(value, scratch):

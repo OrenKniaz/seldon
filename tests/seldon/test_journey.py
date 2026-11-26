@@ -551,9 +551,6 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
             if "items" in field:
                 pending.append(field["items"])
         proposal = facts["Current proposal"]
-        if "B condition" not in facts:
-            assert facts["Owner's technical preference"] == (
-                "Yes, show me the technical choices" if loose_answer else "No, keep it in business terms")
         prompt, _ = render_question(q)
         assert facts["Owner's words"] == dream and prompt.startswith(dream)
         words = SpecStore(run.store).snapshot().graph.nodes
@@ -764,11 +761,6 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
                 run.user = lambda _: envelope
             return displayed
 
-        assert run.step() == "ALIGN" and not calls
-        kickoff = reply("kickoff", ("technical", "technical" if loose_answer else "plain", {}))
-        assert kickoff["ask"]["groups"][0]["question"] == "Are you technical?"
-        assert kickoff["ask"]["groups"][0]["options"][-1]["id"] == "other"
-        assert run.step() == "ALIGN" and not calls
         assert run.step() == "A"
         spec = SpecStore(run.store)
         assert not spec.pins()  # Planner recommended alignment in the first round.
@@ -777,7 +769,6 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         assert [o["label"] for o in first["ask"]["groups"][0]["options"]] == [
             "Share a live list", "Use a separate list", "Other"]
         assert first["ask"]["delta"].startswith("A volunteer checks in a coat")
-        assert first["ask"]["groups"][-1]["question"] == "Anything else we missed that you'd like to include?"
         assert sum(g["id"] == "size" for g in first["ask"]["groups"]) == 1
         assert "build_order" not in run.store.read(run.store.cursor().vision)["answer"]
         if loose_answer:
@@ -785,8 +776,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
                 "Removed a duplicate role link with a mistyped ID.")
         assert run.step() == "ALIGN"
         assert run.step() == "A"
-        second = reply("handoff", ("anything-else", "other", {"text": other}), ("round", "approve", {}))
-        assert second["ask"]["groups"][-1]["id"] == "anything-else"
+        second = reply("handoff", ("round", "other", {"text": other}))
         assert all(g["id"] != "size" for g in second["ask"]["groups"])
         stale_user = run.user
         assert run.step() == "ALIGN"  # The simultaneous request for a change must be folded first.
@@ -801,7 +791,6 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
             run.step()
         assert not spec.pins()
         a = reply("vision lock", ("round", "approve", {}))
-        assert a["ask"]["groups"][-1]["id"] == "anything-else"
         assert a["subject"]["size"] == "small"  # The scripted planner kept recommending micro.
         assert run.step() == "L2-STACK"
         run.close()
@@ -850,7 +839,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         assert run.step() == "B"
         offered = frontdoor.state(product)["waitingFor"]["ask"]["proposal"]
         assert "1. Check in and recover a coat" in offered and "1. 1." not in offered
-        assert "### Demonstrations\n- Delivery 1\n- Delivery 3" in offered
+        assert "### Demonstrations\nNone selected." in offered
         assert "Desk tablet — Volunteer lead" in offered
         assert "Check the label printer at the venue. — Deferred by agreement" in offered
         if not loose_answer:
@@ -878,7 +867,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
             assert original_graph.links == updated.links
         b = reply("demo", ("delivery-1", "show", {}))
         groups = {g["id"]: g for g in b["ask"]["groups"]}
-        assert groups["delivery-1"]["default"] == "show" and groups["delivery-2"]["default"] == "skip"
+        assert groups["delivery-1"]["default"] == "skip" and groups["delivery-2"]["default"] == "skip"
         assert "1. Check in" not in groups["delivery-1"]["question"]
         assert "Restart the tablet before the second shift scans the receipt" not in b["ask"]["proposal"]
         full = frontdoor.state(product, full_spec=True)
@@ -890,7 +879,9 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         assert "Check in and recover a coat" in b["ask"]["proposal"]
         assert run.step() == "B"
         assert "B" not in spec.pins()
-        waiting = reply("spec lock", ("round", "approve", {}))
+        story = next(key for key in groups if key.startswith("priority-"))
+        assert groups[story]["default"] == "must"
+        waiting = reply("spec lock", ("round", "approve", {}), (story, "should", {}))
         assert expected_result in waiting["ask"]["proposal"]
         assert waiting["ask"]["retained"][0]["label"] == "Show me this working"
         assert "### Demonstrations\n- Delivery 1" in waiting["ask"]["proposal"]
@@ -899,12 +890,14 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         run.close()
         assert cursor.state == "L2-READY"
         receipt = run.store.read(cursor.B)
-        assert receipt["demonstrations"] == ["delivery-1", "delivery-3"]
+        assert receipt["demonstrations"] == ["delivery-1"]
         assert receipt["scripted"] is True and receipt["request"] == waiting["request"]
-        assert spec.pins()["B"] == b["subject"]["lead2_revision"] > spec.pins()["A"]
+        assert spec.pins()["B"] > b["subject"]["lead2_revision"] > spec.pins()["A"]
+        assert spec.snapshot(spec.pins()["B"]).graph.nodes[story.removeprefix("priority-")]["priority"] == "should"
         assert any(n.get("reason") == "accepted default" and "Show the outstanding claim" in n["decision"]
                    for n in spec.snapshot(spec.pins()["B"]).graph.nodes.values())
-        assert run.store.read(receipt["userWords"])["words"] == "Approve the spec at B"
+        assert run.store.read(receipt["userWords"])["selections"] == [
+            {"groupId": "round", "optionId": "approve"}, {"groupId": story, "optionId": "should"}]
         status = frontdoor.state(product)
         assert status["status"] == "PAUSED"
         assert status["build"]["stage"] == "building"
@@ -926,457 +919,6 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
             expected_calls.append("LEAD2-SPEC")
         assert calls == ["LEAD2-ALIGN"] * 3 + ["LEAD2-STACK"] * (2 if loose_answer else 1) + [
             "LEAD2-SPEC", *expected_calls]
-        if review_reply == "button":
-            _build_coat_journey(product, dream)
-    finally:
-        run.close()
-
-
-def _build_coat_journey(product, dream):
-    """Continue over an in-flight review and carry an approved edit even after a done return."""
-    import threading
-
-    from seldon import frontdoor
-    from seldon.lead2 import SpecStore
-    from seldon.lead2.status_read import status as read_pane
-    from seldon.providers import render_question
-
-    change = "A blue tag is shown on the coat claim."
-    archive_result = "The manager can read yesterday's claims."
-    review_gap = "The feature checks did not exercise restarting the shop app."
-    clarified = "Front desk opens the claim when asked."
-    review_started, builder_continued = threading.Event(), threading.Event()
-    turns = []
-    reviews = []
-    walks = []
-    alternatives = []
-    venue_limit = "Check the label printer at the venue."
-
-    class Builder:
-        def invoke(self, question, _):
-            if question["kind"] == "LEAD2-WALK":
-                from base64 import b64decode
-
-                if question["execution"]["session"]:
-                    if question["execution"]["session"] == "walker-1-False":
-                        assert "no complete trace to a story and proof witness" in question["prompt"]
-                        return json.dumps({**self.walk_answer, "promises": [
-                            row for row in self.walk_answer["promises"] if row["promise"] != self.orphan],
-                            "correction_note": "The unlinked tag has no relevant story in the walk."}), "walker-1-False"
-                    if question["execution"]["session"] == "walker-3-False":
-                        assert "Re-filed defect" in question["prompt"]
-                        return json.dumps({**self.walk_answer, "correction_note": "Still hidden."}), "walker-3-False"
-                    if question["execution"]["session"] == "walker-7-False":
-                        assert "evidence IDs from this build" in question["prompt"]
-                        self.walk_answer["promises"][-1]["evidence"] = ["follow-up"]
-                        return json.dumps(self.walk_answer), "walker-7-False"
-                    if question["execution"]["session"] == "walker-5-False":
-                        assert "Recheck defect" in question["prompt"]
-                        return json.dumps({**self.walk_answer,
-                                           "correction_note": "The archived shift was not exercised yet."}), "walker-5-False"
-                    assert question["execution"]["session"] == "walker-0-True"
-                    evidence = Path(question["execution"]["evidence"])
-                    assert str(evidence) in question["prompt"] and "claim.png" in question["prompt"]
-                    assert "mistyped-story" in question["prompt"]
-                    misplaced = evidence.parent / "mistyped-directory" / "claim-390.png"
-                    misplaced.rename(evidence / misplaced.name)
-                    for row in self.walk_answer["steps"]:
-                        row.update(story=story, screenshot=misplaced.name)
-                    for row in self.walk_answer["promises"]:
-                        row["evidence"] = [misplaced.name]
-                    return json.dumps(self.walk_answer), "walker-0-True"
-                facts = question["facts"]
-                checkout = Path(question["execution"]["walk"])
-                assert checkout != Path(spec.build_status()["workspace"])
-                assert gitwork.git(checkout, "rev-parse", "HEAD") == facts["Candidate"]
-                assert not question["execution"]["session"]
-                assert (checkout / "TRY.md").is_file()
-                demo = bool(facts["Selected demonstration"])
-                product_text = (checkout / "coat.txt").read_text(encoding="utf-8")
-                clean = demo or "blue tag fixed" in product_text
-                archive_broken = "archive hidden" in product_text
-                archive = next((ref for ref, node in facts["Promises to judge"].items()
-                                if node["result"] == archive_result), "")
-                archive_story = next((ref for ref, row in facts["Stories to walk"].items()
-                                      if archive in row["promises"]), "")
-                if not demo:
-                    assert facts["Earlier demonstrations"] == [feature]
-                    walks.append(facts)
-                stories = facts["Stories to walk"]
-                evidence = Path(question["execution"]["evidence"])
-                wrong_capture = demo and not hasattr(self, "walk_answer")
-                if wrong_capture:
-                    evidence = evidence.parent / "mistyped-directory"
-                    evidence.mkdir()
-                picture = evidence / "claim-390.png"
-                picture.write_bytes(b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
-                                              "/x8AAwMCAO+aX1sAAAAASUVORK5CYII="))
-                results = [{"promise": ref, "outcome": "works" if clean or ref != promise_ref else "broken",
-                            "reason": "Claim survives restart" if clean else "Restart lost the saved claim",
-                            "evidence": ["claim.png" if wrong_capture else picture.name]}
-                           for ref in facts["Promises to judge"]]
-                if archive_broken:
-                    result = next(row for row in results if row["promise"] == archive)
-                    result.update(outcome="broken", reason="Claim history is hidden")
-                steps = [{"story": "mistyped-story" if wrong_capture else ref,
-                          "role": "Front desk", "action": "Recover a coat claim",
-                          "expected": "Claim persists and shows the tag",
-                          "actual": "The saved claim and tag are visible" if clean or ref != story
-                          else "The claim was lost and the blue tag is missing",
-                          "outcome": "works" if clean or ref != story else "broken",
-                          "screenshot": "claim.png" if wrong_capture else picture.name} for ref in stories]
-                findings = []
-                prior_defects = facts["Defects to recheck"]
-                if archive_broken and len(walks) in (2, 3):
-                    findings = [dict(story=archive_story, promise=archive,
-                                     owner="Claim history and retention", finding="Restore access to claim history", must_fix=True)]
-                elif not clean:
-                    findings = [
-                        {"story": story, "promise": promise_ref,
-                         "owner": "builder", "finding": "Restore the claim after restart", "must_fix": True},
-                        {"story": story, "promise": promise_ref,
-                         "owner": "builder", "finding": "Show the blue tag on the restored claim", "must_fix": True}]
-                if not demo and len(walks) == 1:
-                    self.orphan, = facts["Promises to judge"].keys() - {
-                        ref for row in stories.values() for ref in row["promises"]}
-                supplement = not demo and len(walks) >= 6
-                omitted = next((ref for ref in stories[story]["promises"] if ref != promise_ref), "")
-                if not demo and len(walks) == 5:
-                    results = [row for row in results if row["promise"] != omitted]
-                elif supplement:
-                    results = [row for row in results if len(walks) == 7 and row["promise"] == omitted]
-                    steps = [{**row, "action": "Verify the remaining claim format or archived shift"}
-                             for row in steps if len(walks) == 7 and row["story"] in (story, archive_story)]
-                if supplement:
-                    earlier = facts["Saved observations"]
-                    assert any(row.get("promise") == promise_ref and row["session"] == "walker-5-False"
-                               for row in earlier.values())
-                    assert facts["Open probes"]["findings"]
-                deferral, = facts["Approved venue deferrals"]
-                checks = [] if supplement else [dict(ref="inspect", action="Inspect the tracked checkout and guide",
-                                                     result="Tracked paths and sample job checked.", outcome="works")]
-                if not supplement:
-                    results.extend(dict(promise=key, outcome="pending" if key == "code_map" and len(walks) == 5
-                                        else "works", reason="Actual paths exist", evidence=["inspect"])
-                                   for key in ("code_map", "guide", "quality"))
-                if len(walks) == 6:
-                    proof_ref = next(ref for ref, row in earlier.items() if row.get("ref") == "inspect")
-                    results.append(dict(promise="code_map", outcome="pending",
-                                        reason="Only the archive map is still pending.", evidence=[proof_ref]))
-                    prior_ref, observation = next((ref, row) for ref, row in earlier.items()
-                                                  if row.get("promise") not in (None, promise_ref, omitted)
-                                                  and row.get("observation") and row["outcome"] == "works")
-                    capture = next(ref for ref, row in earlier.items()
-                                   if row.get("artifact") and row["scenario"] == observation["scenario"])
-                    self.revisited = observation["promise"], observation["scenario"], capture
-                    results.append(dict(promise=self.revisited[0], outcome="pending",
-                                        reason="Inspect the archived copy before deciding.", evidence=[prior_ref]))
-                if len(walks) == 7:
-                    checks.append(dict(ref="follow-up", action="Verify archived shift and its source",
-                                       result="Claim history shows yesterday's entry.", outcome="works"))
-                    ref, scenario, prior_ref = self.revisited
-                    results.append(dict(promise=ref, scenario=scenario, outcome="works",
-                                        reason="Reconsidered the archived evidence.", evidence=[prior_ref]))
-                    earlier_candidate = next(row["steps"][0] for _, _, row in run.store.records("lead2_walk")
-                                             if not row["final"])
-                    results.append(dict(promise="code_map", outcome="works", reason="Archive map verified.",
-                                        evidence=[earlier_candidate]))
-                    findings.extend([
-                        dict(story=story, promise=promise_ref, owner="builder", must_fix=True,
-                             finding="Mark the archive tab more prominently."),
-                        dict(story=story, promise=promise_ref, owner="planner", must_fix=False,
-                             finding="Keep the quick claim lookup visible.")])
-                self.walk_answer = dict(steps=steps, promises=results, findings=findings, checks=checks,
-                                       rechecks=[dict(ref=ref,
-                                           outcome="reproducible" if archive_broken and row.get("promise") == archive
-                                           else "resolved",
-                                           reason="Archive still hidden" if archive_broken else "Recovered claim visible",
-                                           evidence=["follow-up" if len(walks) == 7 else picture.name])
-                                           for ref, row in prior_defects.items() if len(walks) not in (5, 6)],
-                                       limits=[dict(story="", reason="No physical printer used.", decision=deferral)]
-                                       if clean and not demo and not supplement else [],
-                                       guide_path="" if supplement else "TRY.md",
-                                       sample_job="" if supplement else "Use claim 42.")
-                return json.dumps(self.walk_answer), f"walker-{len(walks)}-{demo}"
-            if question["kind"] == "LEAD2-WALK-STEER":
-                facts = question["facts"]
-                if len(walks) == 1:
-                    if not facts:
-                        assert "Choose one route" in question["prompt"]
-                        return json.dumps({"correction_note": "I combined two actions."}), "steer-retry"
-                    if not facts["No_progress"]:
-                        gap = next(row["ref"] for row in facts["Findings"] if row.get("trace"))
-                        return json.dumps({"direction": "Restore the lost claim.",
-                                           "probe": [gap], "repair": facts["Repairable"]}), "steer-retry"
-                if len(walks) == 6 and not facts:
-                    assert question["execution"]["session"] == "walk-planner"
-                    assert "use declared IDs" in question["prompt"]
-                    return json.dumps({"direction": "Start a new shift and inspect the claim history.",
-                                       "probe": [self.pending],
-                                       "correction_note": "No valid link to the old ID."}), "walk-planner"
-                if len(walks) == 6:
-                    from seldon.lead2 import promise_status
-
-                    assert facts["Other verdicts"]["code_map"]["reason"] == "Only the archive map is still pending."
-                    assert promise_status(spec, spec.snapshot().revision, run.store.cursor().candidate)[
-                        self.revisited[0]] == "under review"
-                    assert facts["No_progress"]
-                    self.pending = next(row["ref"] for row in facts["Findings"] if row.get("promise"))
-                    return json.dumps({"direction": "Check the outstanding archive evidence.",
-                                       "probe": [self.pending],
-                                       "link": [{"source": story, "targets": ["stale-scenario-id"]}]}), "walk-planner"
-                if len(walks) == 5:
-                    pending = next(row["ref"] for row in facts["Findings"] if row["owner"] == "planner")
-                    scenario, node = next(iter(facts["Walk scenarios"].items()))
-                    return json.dumps({"direction": "Clarify the walk wording and inspect the remaining evidence.",
-                                       "walk": [dict(ref=scenario, scenario=node["scenario"],
-                                                     interruption=node["interruption"] + ".")],
-                                       "probe": [pending, *facts["Defect_rechecks"]]}), None
-                if len(walks) == 7:
-                    issue, = facts["Findings"]
-                    assert issue["finding"] == "Mark the archive tab more prominently."
-                    return json.dumps({"dispositions": [dict(ref=issue["ref"], disposition="downgrade",
-                                      reason="Archive lookup works and the label change is optional.")]}), None
-                if len(walks) == 4:
-                    history = [row for row in facts["Repair_attempts"].values() if row["defects"]]
-                    assert len(history) == 2 and history[0]["defects"] == history[1]["defects"]
-                    alternatives.extend(history[-1]["defects"])
-                    return json.dumps({"direction": "Use the durable ledger for archive reads.",
-                                       "repair": facts["Repairable"]}), None
-                missing = [row for row in facts["Findings"] if row.get("trace")]
-                recovery = next(ref for ref, walk in facts["Walk scenarios"].items()
-                                if "recover a claim" in walk["scenario"])
-                link = [{"source": row["promise"],
-                         "targets": [recovery]} for row in missing]
-                link.extend({"source": story, "targets": [row["promise"]]} for row in missing
-                            if not any(row["promise"] in s["promises"] for s in facts["Stories"].values()))
-                direction = "Fix both observed coat regressions together."
-                return json.dumps({"direction": direction, "link": link, "repair": facts["Repairable"]}), None
-            if question["kind"] == "LEAD2-STEER":
-                assert question["facts"]["Builder report"] == "Which collection desk is available for a check?"
-                return json.dumps({"direction": "The spec does not name a desk we can use.", "questions": [{
-                    "question": "Which desk is available for the receipt check?",
-                    "recommended": "Use the front desk", "recommended_means": "Exercise lookup at the front.",
-                    "alternative": "Use the side desk", "alternative_means": "Exercise lookup at the side.",
-                }]}), None
-            if question["kind"] == "LEAD2-CHUNK":
-                reviews.append(question["facts"]["Feature"])
-                if not question["facts"]["Checks"][0]["passed"]:
-                    review_started.set()
-                    assert builder_continued.wait(10)
-                    return '{"verdict":"broken","reason":"The draft has no working coat claim."}', None
-                if question["facts"]["Feature"] == feature:
-                    assert question["facts"]["Prior_findings"]
-                    assert question["facts"]["Unverified_for_C"] == ["The physical label printer is unavailable here."]
-                    assert len(question["facts"]["Checks"]) == 1
-                assert question["facts"]["Checks"][0]["passed"]
-                return json.dumps({"verdict": "works", "reason": "The earlier gap is closed.",
-                                   "limits": [review_gap]}), None
-            assert question["kind"] == "WORK"
-            assert question["execution"]["session"] == ("coat-session" if turns else None)
-            if "mistyped-promise" in question["prompt"]:
-                return json.dumps(self.build_answer), "coat-session"
-            turns.append(question)
-            prompt, _ = render_question(question)
-            workspace = Path(question["execution"]["cwd"])
-            coat = workspace / "coat.txt"
-            test = workspace / "check.py"
-            chunk = {"delivery": "delivery-1: Verify the first coat flow", "command": [sys.executable, test.name]}
-            mapping = [dict(promise=ref, modules=["./coat.txt"], tests=[test.name])
-                       for ref, node in spec.snapshot().graph.nodes.items() if node["kind"] == "promise"]
-            for row in mapping:
-                if spec.snapshot().graph.nodes[row["promise"]]["result"] == archive_result:
-                    row.update(modules=["archive.txt", "coat.txt"], tests=["archive_check.py"])
-            chunks = [chunk]
-            if len(turns) == 1:
-                assert prompt.startswith(dream)
-                assert "Not met if — A restart loses the receipt" in prompt
-                assert "Planned code and tests" in prompt
-                assert change not in prompt
-                assert "Return partial at delivery-1" in prompt
-                coat.write_text("draft")
-                (workspace / "TRY.md").write_text("Open coat.txt and try claim 42.", encoding="utf-8")
-                (workspace / "archive.txt").write_text("Yesterday: claim 41")
-                (workspace / "archive_check.py").write_text(
-                    "from pathlib import Path\nassert 'claim 41' in Path('archive.txt').read_text()\n")
-                test.write_text("import sys\nfrom pathlib import Path\n"
-                                "assert 'ready' in Path('coat.txt').read_text() and '--ready' in sys.argv\n")
-                return json.dumps({"outcome": "partial", "note": "Finish the coat lookup", "chunks": chunks,
-                                   "code_map": [r for r in mapping if r["promise"] == promise_ref],
-                                   "demos": ["delivery-1"]}), "coat-session"
-            if len(turns) == 5:
-                assert clarified in prompt and coat.read_text(encoding="utf-8") == "ready — blue tag"
-                self.build_answer = dict(outcome="done", acknowledged=True, code_map=mapping)
-                wrong = dict(promise="mistyped-promise", modules=["./coat.txt"], tests=[test.name])
-                return json.dumps({**self.build_answer, "code_map": [*mapping, wrong]}), "coat-session"
-            if len(turns) == 6:
-                assert "Restore the claim after restart" in prompt and "Show the blue tag" in prompt
-                coat.write_text("ready — blue tag fixed / archive hidden", encoding="utf-8")
-                return json.dumps(dict(outcome="done", acknowledged=True, code_map=mapping)), "coat-session"
-            if len(turns) in (7, 8):
-                assert "Restore access to claim history" in prompt
-                coat.write_text(f"ready — blue tag fixed / archive hidden (revision {len(turns)})", encoding="utf-8")
-                return json.dumps(dict(outcome="done", acknowledged=True, code_map=mapping)), "coat-session"
-            if len(turns) == 9:
-                assert alternatives and "Use the durable ledger for archive reads." in prompt
-                coat.write_text("ready — blue tag fixed", encoding="utf-8")
-                (workspace / "archive.txt").rename(workspace / "claims-history.txt")
-                check = workspace / "archive_check.py"
-                check.write_text(check.read_text().replace("archive.txt", "claims-history.txt"))
-                for row in mapping:
-                    if "archive.txt" in row["modules"]:
-                        row["modules"].remove("archive.txt")
-                        row["modules"].insert(0, "claims-history.txt")
-                shared = [row for row in mapping if "./coat.txt" in row["modules"]]
-                initial_brief, _ = render_question(turns[0])
-                shown = dict(tuple(reversed(line.split(": ", 1))) for line in initial_brief.splitlines()
-                             if ": " in line)
-                refs = [shown.get(spec.snapshot().graph.nodes[row["promise"]]["result"], row["promise"])
-                        for row in shared]
-                mapping = [row for row in mapping if row not in shared] + [
-                    {**row, "promise": ref} for row, ref in zip(shared, refs, strict=True)]
-                return json.dumps(dict(outcome="done", acknowledged=True, code_map=mapping)), "coat-session"
-            assert coat.read_text() == "draft"
-            if len(turns) == 2:
-                assert change in prompt
-                assert "The physical label printer is unavailable here." in prompt
-                assert prompt.startswith("Continue: Finish the coat lookup")
-                assert "Stories and promises" not in prompt
-                assert review_started.wait(10)
-                builder_continued.set()
-                (workspace / "unrelated.txt").write_text("The claim code and its tests are unchanged.")
-
-                return json.dumps({"outcome": "done", "acknowledged": False}), "coat-session"
-            if len(turns) == 3:
-                assert change in prompt
-                assert "The draft has no working coat claim." in prompt and "Check failed" in prompt
-                return json.dumps({"outcome": "partial", "acknowledged": True,
-                                   "note": "Which collection desk is available for a check?"}), "coat-session"
-            assert len(turns) == 4 and "Use the front desk" in prompt
-            assert change not in prompt
-            coat.write_text("ready — blue tag", encoding="utf-8")
-            chunk["command"] = [sys.executable, test.name, "--ready"]
-            spec.apply(dict(revision=spec.snapshot().revision, mode="substantive", reason=clarified, edits=[
-                {"op": "add", "name": None, "node": {"kind": "design", "decision": clarified,
-                    "reason": "Record which desk is available.", "words": "Use the front desk"}},
-            ]), author="owner")
-            chunks = [chunk, {**chunk, "delivery": "delivery-2 and delivery-3: Exercise the new flows"}]
-            return json.dumps({"outcome": " Done ", "note": "Coat lookup and blue tag work",
-                               "acknowledged": True, "chunks": chunks, "code_map": mapping}), "coat-session"
-
-    def user(request):
-        if request["gate"] == "C":
-            from seldon.decisions import Waiting
-
-            raise Waiting()
-        if request["gate"] == "scope":
-            assert change in request["ask"]["proposal"]
-            group, option = "round", "approve"
-        else:
-            shown = frontdoor.state(product)["waitingFor"]
-            assert shown["gate"] == "Build question"
-            assert [o["label"] for o in shown["ask"]["groups"][0]["options"]] == [
-                "Use the front desk", "Use the side desk", "Other"]
-            group, option = "q1", "o1"
-        return {"request": request["request"], "replyId": "mara-approved",
-                "selections": [{"groupId": group, "optionId": option}]}
-
-    provider = Builder()
-    run = Run.reopen(product, provider, user)
-    try:
-        spec = SpecStore(run.store)
-        approved = spec.snapshot(spec.pins()["B"])
-        promise_ref, promise = next((ref, node["result"]) for ref, node in approved.graph.nodes.items()
-                                    if node.get("result", "").startswith("The receipt still finds it"))
-        story = next(ref for ref, node in approved.graph.nodes.items()
-                     if node["kind"] == "story" and promise_ref in approved.graph.follow(ref))
-        feature = "Check in and recover a coat: restore the claim"
-        assert run.step() == "L2-READY"
-        partial = spec.build_status()
-        assert partial["features"][feature] == "under review"
-        assert partial["demos"] == ["Check in and recover a coat: restore the claim"]
-        observed, witness = next((ref, child) for ref, n in approved.graph.nodes.items() if n["kind"] == "promise"
-                                 for child in approved.graph.follow(ref)
-                                 if approved.graph.nodes[child]["kind"] in {"check", "walk"})
-        spec.observe(approved.revision, promises=[observed], witness=witness,
-                     commit=partial["candidate"], session=partial["session"], outcome="not-verifiable-here",
-                     result="The physical label printer is unavailable here.")
-        dream_ref = next(ref for ref, node in approved.graph.nodes.items() if node["kind"] == "dream")
-        staged = spec.apply(dict(revision=approved.revision, mode="substantive", reason=change, edits=[
-            {"op": "add", "name": "tag", "node": {"kind": "promise", "action": "Open the claim",
-                "result": change, "not_met_if": "The tag is missing"}},
-            {"op": "add", "name": "archive_story",
-             "node": {"kind": "story", "story": "Read yesterday's claims"}},
-            {"op": "add", "name": "archive", "node": {"kind": "promise", "action": "Open archive",
-                "result": archive_result, "not_met_if": "Yesterday's claims are missing"}},
-            {"op": "add", "name": "archive_walk", "node": {"kind": "walk", "scenario": "Find claim 41",
-                "interruption": "Start a new shift before viewing yesterday's claims"}},
-            {"op": "link", "source": dream_ref, "target": "$archive_story"},
-            {"op": "link", "source": "$archive_story", "target": "$archive"},
-            {"op": "link", "source": "$archive", "target": "$archive_walk"},
-        ]), author="owner")
-        assert not staged.accepted and spec.snapshot().revision == approved.revision
-        run.close()
-        run = Run.reopen(product, provider, user)
-        spec = SpecStore(run.store)
-        assert run.run().state == "C"
-        waiting = frontdoor.state(product)["waitingFor"]
-        assert waiting["gate"] == "C"
-        assert "Open coat.txt and try claim 42." in waiting["ask"]["proposal"]
-        assert review_gap not in waiting["ask"]["proposal"]
-        assert "Keep the quick claim lookup visible." in waiting["ask"]["proposal"]
-        assert "Mark the archive tab more prominently. (Archive lookup works" in waiting["ask"]["proposal"]
-        assert len(walks) == 7
-        assert walks[-1]["Open probes"]["direction"] == "Start a new shift and inspect the claim history."
-        assert any(row["note"] == "No valid link to the old ID."
-                   for _, _, row in run.store.records("lead2_correction"))
-        assert all(set(facts["Stories to walk"]) == set(walks[0]["Stories to walk"]) > {story}
-                   for facts in walks[1:])
-        archive_promise = next(ref for ref, node in spec.snapshot().graph.nodes.items()
-                               if node.get("result") == archive_result)
-        assert len(alternatives) == 1
-        status = frontdoor.state(product)["build"]
-        assert status["session"] == "coat-session"
-        assert [(row["reason"], row["agreed"]) for row in status["unverified"]] == [(venue_limit, True)]
-        assert status["acceptedRevision"] > status["acknowledgedRevision"] > staged.revision
-        assert status["candidate"] != partial["candidate"]
-        assert status["features"][feature] == "passed"
-        pane = read_pane(run.store)
-        states = list(dict.fromkeys(frame["features"][0][1] for frame in pane["frames"]
-                                    if "features" in frame))
-        assert states == ["planned", "building", "under review", "failed", "fixing", "passed"]
-        assert pane["frames"][-1]["activity"] == "Waiting on you"
-        assert any(frame.get("judgment", {}).get(promise_ref) == "fixing" for frame in pane["frames"])
-        assert pane["frames"][-1]["judgment"][promise_ref] == "proven-current"
-        history = [frame.get("judgment", {}).get(archive_promise) for frame in pane["frames"]]
-        assert history.index("stale") < history.index("failed") < len(history) - 1
-        assert history[-1] == "proven-current"
-        assert [row["text"] for row in pane["unverified"]] == [venue_limit]
-        assert waiting["ask"]["proposal"].count(venue_limit) == 1
-        from seldon.lead2.walk_page import render
-
-        assert render("<!-- walk content -->", run.store, "Coat check", "Volunteer").count(venue_limit) == 1
-        assert any(row["ref"] == alternatives[0] and row["outcome"] == "resolved"
-                   for _, _, row in run.store.records("lead2_defect_recheck"))
-        assert walks[4]["Spec revision"] < walks[5]["Spec revision"] == spec.snapshot().revision
-        witnesses = [obs for obs in spec.observations() if promise_ref in obs.promises
-                     and obs.commit == status["candidate"]]
-        assert [(obs.session, obs.revision) for obs in witnesses] == [
-            ("walker-5-False", walks[4]["Spec revision"])]
-        assert reviews[:2] == [feature, feature]
-        assert set(reviews[2:]) == {"Add a printed claim card", "Share the shift handover"}
-        assert {row["promise"] for row in status["codeMap"]} == {
-            ref for ref, n in spec.snapshot().graph.nodes.items() if n["kind"] == "promise"}
-        assert {tuple(row["modules"] + row["tests"]) for row in status["codeMap"]} == {
-            ("coat.txt", "check.py"), ("claims-history.txt", "coat.txt", "archive_check.py")}
-        assert gitwork.git(status["workspace"], "show", f"{status['candidate']}:coat.txt") == (
-            "ready — blue tag fixed")
-        run = Run.reopen(product, provider, lambda item: {
-            "request": item["request"], "replyId": "scripted-C",
-            "selections": [{"groupId": "round", "optionId": "approve"}],
-        })
-        assert run.run().state == "SCRIPTED_C"
-        assert frontdoor.state(product)["outcome"]["acceptedByPerson"] is False
     finally:
         run.close()
 
@@ -1430,12 +972,6 @@ def test_fresh_lead_attempt_and_pause_journey(tmp_path, monkeypatch):
     planner = Planner()
     run = Run(product, tmp_path / "workers", "Show a shared shelf.", {}, planner, waiting, mode="lead2")
     try:
-        assert run.step() == "ALIGN"
-        run.user = lambda item: {"request": item["request"], "replyId": "kickoff",
-                                "selections": [{"groupId": "technical", "optionId": "other",
-                                                "text": "Business terms, please."}]}
-        assert run.step() == "ALIGN" and planner.calls == 0
-        run.user = waiting
         assert run.run().state == "ALIGN" and planner.calls == 2
         assert len(run.store.records("lead2_unusable_answer")) == 1
         assert "reason: expected string" in frontdoor.state(product)["reason"]

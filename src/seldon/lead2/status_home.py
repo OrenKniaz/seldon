@@ -14,7 +14,7 @@ from ..store import Store, encode
 from .status_read import HOME_STAGES, HomeSummary, last_activity, summary
 
 PAGE_SIZE = 20
-TONES = {"Waiting on you": "wait", "Building": "build", "Fixing": "fix", "Review failed": "fix",
+TONES = {"Waiting on you": "wait", "Building": "build", "Walking": "build", "Fixing": "fix", "Review failed": "fix",
          "Done": "done", "Built": "done", "Stopped": "stop", "Missing": "stop", "Paused": "stop"}
 
 

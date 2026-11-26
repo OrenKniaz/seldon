@@ -1,5 +1,6 @@
 """C8/C16/C20; R17: planner first, concrete choices, and only dependent work waits."""
 
+import time
 from dataclasses import replace
 from pathlib import Path
 import traceback
@@ -290,6 +291,7 @@ def request(store, gate, subject, *, ask=None):
         if summary:
             subject = {**subject, "normalisations": list(dict.fromkeys(summary))}
         ref = store.record("decision_request", {"gate": gate, "subject": subject,
+            **({"offeredAt": time.time()} if "lead2_revision" in subject else {}),
             **({"ask": ask} if ask else {}),
             "origin": store.read(cursor.kickoff)["setup"].get("userOrigin", "user")})
         if waived:

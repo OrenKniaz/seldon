@@ -16,8 +16,6 @@ from .views import render_person
 
 ROUND = "round"
 SIZE = "size"
-TECHNICAL = "technical"
-ANYTHING_ELSE = "Anything else we missed that you'd like to include?"
 APPROVE = "approve"
 REVISE = "revise"
 RELAY = ("Show the proposal and options. Relay exact choices and words with a fresh replyId reused on retry. "
@@ -60,10 +58,11 @@ def state(store, cursor, run, active, submitted=False, full_spec=False):
         })
         spec = SpecStore(store)
         result["build"] = spec.build_status()
-        from .walk_record import current_walk, limits
+        result["approvedSpec"]["revision"] = spec.pins()["B"]
+        from .walk_record import current_walk, release_notes
 
         walk = current_walk(store, spec.snapshot().revision)
-        result["build"]["unverified"] = limits(store, walk) if walk else []
+        result["releaseNotes"] = release_notes(store, walk) if walk else None
     if cursor.state == BUILT:
         result.update(status="BUILT", next="The builder returned the candidate and its code map.")
     elif cursor.state in ("ACCEPTED", "SCRIPTED_C"):
@@ -147,14 +146,6 @@ def options(*items):
     return [{"id": ref, "label": label, "means": means} for ref, label, means in items]
 
 
-def ask_technical(store):
-    choices = options(("plain", "No, keep it in business terms", "Recommend and explain the stack."),
-                      ("technical", "Yes, show me the technical choices",
-                       "Offer stack choices with defaults."))
-    request(store, "Kickoff", 0, [group(TECHNICAL, "Are you technical?", choices)],
-            proposal="", summary="")
-
-
 def product_groups(questions):
     grouped = {}
     for row in questions:
@@ -166,10 +157,6 @@ def product_groups(questions):
     return [group(f"q{i}", question, options(*((f"o{j}", *option)
              for j, option in enumerate(picks.values(), 1))))
             for i, (question, picks) in enumerate(grouped.items(), 1)]
-
-
-def closing_group():
-    return group("anything-else", ANYTHING_ELSE, options(("nothing", "Nothing else", "Continue.")))
 
 
 def gate_group(gate, *, recommend=True):
@@ -225,4 +212,4 @@ def read_reply(store, user, ref, item):
                         "label": option["label"] if option else "Other",
                         "meaning": option["means"] if option else selection["text"]})
     material = [c for c in choices if c["group"] != ROUND or c["optionId"] == "other"]
-    return reply, words or "\n".join(c["text"] or c["label"] for c in (material or choices)), choices
+    return {**reply, "receivedAt": time.time()}, words or "\n".join(c["text"] or c["label"] for c in (material or choices)), choices

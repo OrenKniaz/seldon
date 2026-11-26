@@ -1,6 +1,5 @@
 """C1/C18/C23: run Fresh Lead independently of the legacy execution loop."""
 
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 from ..decisions import Waiting
@@ -21,11 +20,7 @@ class FreshRun(Run):
             walk.step(self.store, SpecStore(self.store), self.provider, self.user)
             return self.store.cursor().state
         if self.store.cursor().state == LEAD2_READY:
-            if not hasattr(self, "_chunk_pool"):
-                self._chunk_pool = ThreadPoolExecutor(max_workers=1)
-                self._chunk_reviews = {}
-            build.step(self.store, SpecStore(self.store), self.provider, self.user,
-                       self._chunk_pool, self._chunk_reviews)
+            build.step(self.store, SpecStore(self.store), self.provider, self.user)
             return self.store.cursor().state
         return planning.step(self.store, self.provider, self.user)
 
@@ -42,17 +37,8 @@ class FreshRun(Run):
                 cursor = self.store.cursor()
                 self.store.cursor(replace(cursor, failure=_reason(error, cursor.state == LEAD2_READY)))
         finally:
-            self._finish_reviews()
             self._lease.close()
         return self.store.cursor()
-
-    def close(self):
-        self._finish_reviews()
-        super().close()
-
-    def _finish_reviews(self):
-        if pool := self.__dict__.pop("_chunk_pool", None):
-            pool.shutdown()
 
 
 def _reason(error, building):

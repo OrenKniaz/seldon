@@ -206,9 +206,24 @@ def codex_command(setup, config, folder, worker, session, images):
     return command + [f"--image={path}" for path in images] + ["-"]
 
 
+def codex_usage(output):
+    totals = {}
+    for line in output.splitlines():
+        if '"turn.completed"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "turn.completed" and (usage := event.get("usage")):
+            for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+                totals[key] = totals.get(key, 0) + (usage.get(key) or 0)
+    return totals or None
+
+
 NATIVE = {"codex": types.SimpleNamespace(command=codex_command, prompt=lambda images: "",
                                          answer=terminal_answer, session=session_id, errors=native_errors,
-                                         usage=lambda output: None),
+                                         usage=codex_usage),
           "claude": claude}
 
 

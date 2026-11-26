@@ -209,6 +209,14 @@ class SpecStore:
             if gate == "A" and (edits := _accepted_defaults(request)):
                 revision = self.apply(dict(revision=revision, mode="substantive", edits=edits,
                                            reason="Record defaults accepted at A"), author="owner").revision
+            if gate == "B":
+                nodes = snapshot.graph.nodes
+                priorities = self._store.read(approval).get("priorities", {})
+                edits = [dict(op="amend", id=ref, node={**nodes[ref], "priority": priority})
+                         for ref, priority in priorities.items() if nodes[ref].get("priority", "must") != priority]
+                if edits:
+                    revision = self.apply(dict(revision=revision, reason="Record the owner's story priorities",
+                                               edits=edits, mode="substantive"), author="owner").revision
             self._store.db.execute("INSERT INTO lead2_spec_decision VALUES (?, ?, ?)",
                                    (gate, revision, approval))
 

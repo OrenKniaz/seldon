@@ -34,6 +34,19 @@ def _register(project, registry):
     return {"statusHome": home, "statusPage": f"{home}{run}/"}
 
 
+def registered_links(project):
+    registry = registry_path()
+    if not registry.is_file():
+        return {}
+    with closing(sqlite3.connect(registry, timeout=1)) as db:
+        server = db.execute("SELECT port, secret FROM server").fetchone()
+        row = db.execute("SELECT id FROM run WHERE folder = ?", (str(project.resolve()),)).fetchone()
+    if not server or not row:
+        return {}
+    port, key = server
+    return {"statusPage": f"http://127.0.0.1:{port}/{key}/{row[0]}/"}
+
+
 def _launch(registry):
     args = ["-B", "-m", "seldon.lead2.status_server", str(registry)]
     streams = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

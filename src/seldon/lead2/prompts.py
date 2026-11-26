@@ -22,15 +22,18 @@ TASK = {
     "LEAD2-ALIGN": """Start reason with one real job in the owner's world from start to finish.
 Use the walk to cover functions, operation (hosting, users, roles, logins, backups, offline, connections,
 cost) and appearance (device, style, key screen, language, direction, accessibility, reference).
-Preserve exact values, handoffs, races and recovery. Ask only unanswered consequential choices.
+Preserve exact values, handoffs, races and recovery. Ask only when the answer changes what gets built.
+Use sensible defaults for everything else.
 Use the size fields, never a product question about size. Honor the chosen size and scope.
 Link brief and earlier replies to each short-titled product story. Link people to their stories.
 Keep demos and the owner's readiness decision as delivery choices.""",
     "LEAD2-STACK": """Recommend the stack for the accepted vision. Give each choice a plain one-line reason
-and cite the need that drove it in words. For a technical owner offer concrete alternatives with defaults.
+and cite the need that drove it in words. Offer alternatives only when the answer changes what is built.
 For a plain owner explain the recommendation in business language. Incorporate the owner's latest reply.""",
     "LEAD2-SPEC": """Explain identities, state changes and design. Respect the approved stack and link it to
-the promises it serves. Order outcomes and suggest demos. For a product with a user interface, give a few
+the promises it serves. Order outcomes. Classify build size from this spec.
+Tag every user story with one priority. Must means the person would stop using the app if it broke.
+Should means it matters but would not stop use. Nice means optional polish. Include every story row. For a product with a user interface, give a few
 quick visual directions for the key screens in mockups: describe layout, interaction and appearance so
 the owner can pick or mix them. Use an empty list when there is no visual choice to make.""",
     "REVIEW": """What could disappear while this still passes? Fix missing behaviour and proof from the
@@ -74,7 +77,7 @@ def question(kind, words, current, *, qualification=None, **facts):
             fields = ALIGN["properties"]
             prompt += "\nUse short refs for new rows, shown refs for changes and links, and business terms."
         else:
-            extra = REVIEW["properties"] if kind == "REVIEW" else {"mockups": MOCKUPS}
+            extra = REVIEW["properties"] if kind == "REVIEW" else {"mockups": MOCKUPS, "build_size": choice("small", "large")}
             fields = {**extra, **SPEC_EDITS, "build_order": DELIVERY, "access": ACCESS}
             prompt = "\n\n".join((prompt, SPEC_GUIDE, PROMISE_GUIDE, EDIT_GUIDE))
     if kind in ("LEAD2-SPEC", "REVIEW") and not qualification:

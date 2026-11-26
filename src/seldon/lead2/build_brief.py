@@ -9,26 +9,24 @@ from .views import _details, _stories
 STRING = {"type": "string"}
 BOOLEAN = {"type": "boolean"}
 WORK = obj(outcome=choice("done", "partial", "blocked"), note=TEXT, acknowledged=BOOLEAN, demos=REFS,
-           chunks=array(obj(delivery=STRING, command=REFS)),
+           touched=REFS,
            code_map=array(obj(promise=STRING, modules=REFS, tests=REFS)))
 STEER = obj(direction=TEXT, questions=array(obj(question=TEXT, recommended=TEXT, recommended_means=TEXT,
                                                alternative=TEXT, alternative_means=TEXT)))
-VERDICT = choice("works", "broken", "can't-test-here", "pending")
-CHUNK = obj(verdict=VERDICT, reason=STRING, limits=REFS)
+END_REVIEW = obj(notes=REFS)
 
 GUIDE = """Build the whole product in this folder.
 Keep the implementation readable, with one clear way to use and run it.
-Write and run the planned tests through real behavior. Git-ignore runtime data, caches and test artifacts.
+Test your own work as you go through the real user paths. Git-ignore runtime data, caches and test artifacts.
 Use local sample data for ordinary interruption, restart and restore checks. For web checks,
 use the headless browser and local app helpers in checks/kit. Give the guide a tracked Python or Node
 startup command that accepts loopback address, port and separate sample data as command-line arguments.
 If a demo is the next return point, build through that delivery and return partial with its ID
 before starting the remaining work. Seldon shows the saved build and resumes you automatically.
-When a delivery is newly finished or fixed, report its delivery ID and runnable check argv, one row per check.
 Report selected demos by delivery ID when ready. On done or a selected demo, give the full map of actual
 module and test paths for the delivered promises, keyed by promise ID. Include the fresh-copy guide
 and a sample job in the product.
-Return done on completion, partial with the next step, or blocked with the actual question.
+Return done when the stories work, partial for a chosen demo, or blocked with the actual question.
 Apply any accepted changes in the message and set acknowledged to true when you have taken them on."""
 
 

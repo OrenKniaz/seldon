@@ -118,10 +118,15 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                 if fresh:
                     receipt = native_folder / "result.json" if native_folder else None
                     measured = json.loads(receipt.read_bytes()) if receipt and receipt.is_file() else {}
+                    used = measured.get("usage")
+                    cached = used.get("cached_input_tokens", 0) if used else None
+                    usage = ({"fresh_input_tokens": used["input_tokens"] - cached,
+                              "cached_input_tokens": cached, "output_tokens": used["output_tokens"]}
+                             if used else None)
                     store.record("lead2_call_metric", {"attempt": attempt, "kind": kind,
                         "elapsedSeconds": measured.get("seconds", time.monotonic() - begin),
                         "freshPlusOutputTokens": measured.get("freshPlusOutputTokens"),
-                        "frozen": measured.get("frozen", False)})
+                        "frozen": measured.get("frozen", False), "usage": usage})
 
     changes = []
 

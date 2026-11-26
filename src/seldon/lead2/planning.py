@@ -10,7 +10,7 @@ from ..questions import AnswerRejected
 from ..states import LEAD2_RUN, TERMINAL
 from ..states import advance as advance_run
 from . import chat, prompts, review_options
-from .contracts import normalise_edits, typed_reply
+from .contracts import PRIORITY, normalise_edits, typed_reply
 from .graph import review_issues
 from .store import SpecStore
 from .views import b_changes, b_summary, changed_promises, delivery_name, planning_facts, planning_view
@@ -29,8 +29,6 @@ def step(store, provider, user):
     spec = SpecStore(store)
     if cursor.decision:
         _answer(store, spec, user, cursor)
-    elif cursor.state == "ALIGN" and not cursor.vision and not store.records("lead2_owner"):
-        chat.ask_technical(store)
     elif cursor.state == "B":
         _offer_b(store, spec, cursor)
     else:
@@ -53,8 +51,6 @@ def _plan(store, spec, provider, cursor):
     proposal, quoted_replies, refs = planning_facts(snapshot.graph, kickoff)
     size = next((item["size"] for _, _, item in reversed(store.records("approval")) if "size" in item), None)
     facts = {"Earlier replies": quoted_replies, "Owner's chosen size": size}
-    if owners := store.records("lead2_owner"):
-        facts["Owner's technical preference"] = owners[-1][2]["preference"]
     if kind == "LEAD2-ALIGN" and cursor.vision:
         facts["Previous questions and options"] = store.read(cursor.vision)["answer"]["questions"]
     elif cursor.leadPlan and kind != "LEAD2-ALIGN":
@@ -95,7 +91,7 @@ def _propose(store, spec, snapshot, answer_ref, answer, size, references):
     cursor = store.cursor()
     if cursor.state == "L2-STACK":
         proposal = "\n".join(f"- {row['decision']} — {row['reason']}" for row in answer["stack"])
-        groups = [*chat.product_groups(answer["questions"]), chat.gate_group("Stack"), chat.closing_group()]
+        groups = [*chat.product_groups(answer["questions"]), chat.gate_group("Stack")]
         chat.request(store, "Stack", snapshot.revision, groups, proposal=proposal or answer["reason"],
                      summary=answer["reason"], stack=answer_ref)
         return
@@ -115,7 +111,8 @@ def _propose(store, spec, snapshot, answer_ref, answer, size, references):
     plan_ref = cursor.leadPlan
     previous = store.read(plan_ref) if plan_ref else {}
     plan = {key: answer.get(key) or previous.get(key, []) for key in ("build_order", "access")}
-    if plan["build_order"] and any(value != previous.get(key, []) for key, value in plan.items()):
+    plan["build_size"] = answer.get("build_size") or previous.get("build_size", "small")
+    if plan["build_order"] and any(value != previous.get(key) for key, value in plan.items()):
         plan_ref = store.record("lead2_plan", {**plan, "source": answer_ref})
     store.cursor(replace(cursor, leadPlan=plan_ref, failure=""))
     groups = review_options.offer(updated, answer, references) if reviewing else []
@@ -162,12 +159,15 @@ def _finish_review(store, revision, answer_ref, groups=(), *, source=None):
         chat.request(store, "Review choices", revision, groups, proposal="", summary=answer["findings"],
                      review=answer_ref)
         return
-    focused = 0
+    earlier = set()
     for _, _, row in reversed(store.records("transition")):
         if row["event"] == "planned" and row["next"] == "L2-REVIEW":
             break
-        focused += row["event"] == "focus"
-    more = (answer.get("unresolved_issue") or "").strip() and focused < 2
+        if row["event"] == "focus":
+            previous = store.read(row["cause"]).get("answer", {})
+            earlier.add((previous.get("unresolved_issue") or "").strip())
+    issue = (answer.get("unresolved_issue") or "").strip()
+    more = bool(issue and issue not in earlier)
     advance(store, "focus" if more else "reviewed", source or answer_ref,
             review=answer_ref, requestedChange=None)
 
@@ -180,7 +180,7 @@ def _offer_a(store, snapshot, source, answer, chosen_size):
         others = ((key, key.capitalize(), why) for key, why in prompts.SIZES.items() if key != size)
         groups.append(chat.group(chat.SIZE, "How large is the dream?",
                                  chat.options((size, size.capitalize(), answer["size_reason"]), *others)))
-    groups.extend((chat.gate_group("A", recommend=answer["aligned"]), chat.closing_group()))
+    groups.append(chat.gate_group("A", recommend=answer["aligned"]))
     advance(store, "aligned", source, vision=source)
     chat.request(store, "A", snapshot.revision, groups, proposal=proposal or answer["reason"],
                  summary=answer["reason"], planner_aligned=answer["aligned"], size=size)
@@ -192,8 +192,14 @@ def _offer_b(store, spec, cursor):
     skip, show = chat.options(("skip", "Skip demonstration", "Keep this in the build order."),
                               ("show", "Show me this working", "Demonstrate this delivery."))
     groups = [chat.group(f"delivery-{i}", f"Demonstrate this delivery? {delivery_name(delivery)}",
-                         [show, skip] if delivery["recommend_demo"] else [skip, show])
+                         [skip, show])
               for i, delivery in enumerate(plan["build_order"], 1)]
+    for ref, node in snapshot.graph.nodes.items():
+        if node["kind"] == "story":
+            current = node.get("priority", "must")
+            tags = [current, *(p for p in PRIORITY["enum"] if p != current)]
+            groups.append(chat.group(f"priority-{ref}", node.get("title") or node["story"],
+                                     chat.options(*((p, p.capitalize(), "") for p in tags))))
     offers = reversed(store.records("decision_request"))
     prior = next((r["subject"] for _, _, r in offers if r["gate"] == "B"), None)
     changes = b_changes(spec.snapshot(prior["lead2_revision"]), snapshot,
@@ -254,7 +260,10 @@ def _answer(store, spec, user, cursor):
             receipt["size"] = size if size in prompts.SIZES else subject["size"]
         if approve and gate == "B":
             receipt["demonstrations"] = [g["id"] for g in ask["groups"]
-                                         if picked.get(g["id"], {}).get("optionId", g["default"]) == "show"]
+                                         if picked.get(g["id"], {}).get("optionId") == "show"]
+            receipt["priorities"] = {key.removeprefix("priority-"): selection["optionId"]
+                                     for key, selection in picked.items() if key.startswith("priority-")
+                                     and selection["optionId"] in PRIORITY["enum"]}
         approval = store.record("approval", receipt)
         if review:
             if subject.get("options"):

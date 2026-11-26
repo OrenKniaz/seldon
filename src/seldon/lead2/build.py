@@ -8,14 +8,14 @@ from .. import gitwork, inference, lead
 from ..processes import reconcile_call
 from ..providers import Frozen
 from ..states import LEAD2_RUN, advance
-from . import build_brief, chat, chunk_review
+from . import build_brief, chat
 from .graph import Delta
 from .views import changed_promises, delivery_name
 
 DELIVERY_REF = re.compile(r"\bdelivery-[0-9]+\b", re.IGNORECASE)
 
 
-def step(store, spec, provider, user, pool, pending):
+def step(store, spec, provider, user):
     cursor = store.cursor()
     if cursor.decision:
         return _answer(store, spec, user, cursor.decision)
@@ -29,29 +29,27 @@ def step(store, spec, provider, user, pool, pending):
     session, recovered = _recover(store, spec, last)
     if recovered:
         return
-    _reviews(store, provider, pool, pending)
-    before = spec.snapshot(last.get("acknowledged") or approval["subject"]["lead2_revision"])
+    before = spec.snapshot(last.get("acknowledged") or spec.pins()["B"])
     snapshot = spec.snapshot()
-    feedback = _feedback(store, last)
     repairs = {ref: row for ref, _, row in store.records("lead2_walk_repair")
                if ref not in last.get("feedback", [])}
-    feedback.update({ref: row["direction"] for ref, row in repairs.items()})
+    feedback = {ref: row["direction"] for ref, row in repairs.items()}
     offered = {row["demo"] for _, _, row in store.records("lead2_walk_target")}
     points = store.records("lead2_demo_point")
     demo = next((ref for ref, _, _ in points if ref not in offered), None)
     if demo and not repairs:
         return _walk(store, store.read(demo).get("return", cursor.leadReturn), demo)
-    limits = [obs.result for obs in spec.observations() if obs.outcome == "not-verifiable-here"]
-    if last.get("outcome") == "done" and not feedback and pending:
-        next(iter(pending.values())).result()
-        return
+    if (last.get("outcome") == "done" and not feedback
+            and store.read(approval["subject"]["plan"]).get("build_size") == "large"
+            and not store.records("lead2_end_review")):
+        return _end_review(store, provider, snapshot, last)
     with store.transaction():
         if (last.get("outcome") == "done" and snapshot.revision == before.revision
                 and spec.snapshot().revision == snapshot.revision and not feedback):
             if not _scope_question(store, spec):
-                _walk(store, cursor.leadReturn, demo)
+                _walk(store, cursor.leadReturn, demo, last.get("repairs", []))
             return
-    task = _task(store, provider, last, snapshot, feedback, limits)
+    task = _task(store, provider, last, snapshot)
     if task is None:
         return
     order, demos = _deliveries(store, approval)
@@ -67,10 +65,10 @@ def step(store, spec, provider, user, pool, pending):
     if snapshot.revision != before.revision:
         facts["Accepted changes since your last acknowledgement"] = Delta(
             before.graph, snapshot.graph).describe(references=True) or ["Apply the owner's current wording."]
-    if feedback:
-        facts["Review follow-up"] = list(feedback.values())
-    if limits:
-        facts["Earlier checks still to verify"] = limits
+    if repairs:
+        facts["Story IDs"] = {ref: node["story"] for ref, node in snapshot.graph.nodes.items()
+                              if node["kind"] == "story"}
+        facts["Recheck"] = "Return all story IDs affected by your changes in touched. Use an empty list if none."
     question = build_brief.question("WORK", build_brief.WORK, prompt, **facts)
     question["execution"] = {"cwd": str(workspace), "session": session, "lead": cursor.B,
                              "revision": snapshot.revision, "feedback": list(feedback)}
@@ -88,9 +86,16 @@ def step(store, spec, provider, user, pool, pending):
             store.record("attempt_end", {"attempt": attempt, "result": source})
 
 
-def _walk(store, delivery, demo):
+def _walk(store, delivery, demo, repair_refs=()):
+    request = {"delivery": delivery, "demo": demo}
+    repairs = [store.read(ref) for ref in repair_refs]
+    if repairs and "prior" in repairs[-1]:
+        result = store.read(delivery)
+        request.update(prior=repairs[-1]["prior"],
+                       stories=sorted(set(result["touched"]) | {s for row in repairs for s in row["stories"]}),
+                       items=sorted({ref for row in repairs for ref in row["defects"]}))
     with store.transaction():
-        target = store.record("lead2_walk_target", {"delivery": delivery, "demo": demo})
+        target = store.record("lead2_walk_target", request)
         advance(store, "walk", target, transitions=LEAD2_RUN)
 
 
@@ -101,24 +106,22 @@ def _deliveries(store, approval):
     return order, demos
 
 
-def _reviews(store, provider, pool, pending):
-    for ref, future in list(pending.items()):
-        if future.done():
-            pending.pop(ref).result()
-    for ref, chunk, verdict in chunk_review.progress(store).values():
-        if chunk.get("delivery") and verdict is None and ref not in pending:
-            pending[ref] = pool.submit(chunk_review.review, store, provider, ref, chunk)
-
-
-def _feedback(store, last):
-    sent = set(last.get("feedback", []))
-    feedback = {}
-    for _, chunk, verdict in chunk_review.progress(store).values():
-        if verdict:
-            key, assessment = verdict
-            if assessment["findings"] and key not in sent:
-                feedback[key] = chunk["feature"] + "\n" + "\n".join(assessment["findings"])
-    return feedback
+def _end_review(store, provider, snapshot, last):
+    workspace = gitwork.admit(store.root.parent, store.cursor().scratch, last["candidate"])
+    question = build_brief.question("LEAD2-CHUNK", build_brief.END_REVIEW,
+        "Review the integrated build once for concrete source, quality or documentation gaps. "
+        "Return short release-note findings. Leave the product unchanged.",
+        Candidate=last["candidate"], Stories=[node["story"] for node in snapshot.graph.nodes.values()
+                                               if node["kind"] == "story"])
+    evidence = Path(store.cursor().scratch) / "end-review"
+    evidence.mkdir(exist_ok=True)
+    question["execution"] = {"walk": workspace, "evidence": str(evidence)}
+    try:
+        inference.call(store, provider, question, consume=lambda source, answer:
+                       store.record("lead2_end_review", {"source": source, "notes": answer["notes"]}))
+    finally:
+        reconcile_call(store)
+        gitwork.git(store.root.parent, "worktree", "remove", "--force", workspace)
 
 
 def _scope_question(store, spec):
@@ -152,7 +155,7 @@ def _answer(store, spec, user, ref):
             store.record("lead2_scope_declined", {"proposal": revision, "reply": raw})
 
 
-def _task(store, provider, last, snapshot, feedback, limits):
+def _task(store, provider, last, snapshot):
     if not last or last["outcome"] == "done":
         return "finish the remaining work"
     if last["outcome"] == "partial" and not last["unchanged"]:
@@ -161,9 +164,7 @@ def _task(store, provider, last, snapshot, feedback, limits):
     if advice := next((row for _, _, row in reversed(store.records("lead2_build_direction"))
                        if row["source"] == source), None):
         return store.read(advice["reply"])["words"] if "reply" in advice else advice["direction"]
-    facts = {"Builder report": last["note"], "Chunk findings": list(feedback.values()),
-             "B access": store.read(store.read(store.cursor().B)["subject"]["plan"]).get("access", []),
-             "Checks unverified until C": limits,
+    facts = {"Builder report": last["note"], "B access": store.read(store.read(store.cursor().B)["subject"]["plan"]).get("access", []),
              "Accepted spec": [node for node in snapshot.graph.nodes.values()]}
     task = ("Answer or change approach within scope. Reserve unavailable B checks for later proof. "
             "Ask with concrete choices only when an owner decision is needed to build.")
@@ -218,15 +219,22 @@ def _returned(store, spec, source, answer, session):
                  if ref not in shown and order[ref] not in shown and ref in reported_demos]
     entries = {entry.decode().split("\t", 1)[1] for entry in gitwork.tree_entries(workspace, candidate)
                if entry.startswith((b"100644 blob ", b"100755 blob "))}
-    code_map, errors = _code_map(graph, entries, answer["code_map"],
-                                 answer["outcome"] == "done" and answer["acknowledged"])
-    inference.correct(store, source, answer, [] if store.read(source).get("interrupted") else errors)
-    _chunks(store, answer["chunks"], order, revision, candidate)
+    code_map, errors = _code_map(graph, entries, answer["code_map"])
+    story_ids = {ref for ref, node in graph.nodes.items() if node["kind"] == "story"}
+    touched = set(answer["touched"])
+    if invalid := touched - story_ids:
+        inference.correct(store, source, answer,
+                          ["Use exact story IDs in touched: " + ", ".join(sorted(invalid))])
+        touched = story_ids
+    if answer.get("correction_note"):
+        errors.append(answer["correction_note"])
     delivered = [] if store.read(source).get("interrupted") else execution["feedback"]
     body = {"candidate": candidate, "session": session, "revision": revision,
             "acknowledged": acknowledged, "outcome": answer["outcome"], "note": answer["note"],
             "unchanged": bool(last and execution["session"]) and cursor.candidate == candidate,
-            "code_map": code_map,
+            "code_map": code_map, "advice": errors,
+            "repairs": delivered or (last.get("repairs", []) if last.get("outcome") != "done" else []),
+            "touched": sorted(touched | (set(last.get("touched", [])) if last.get("outcome") != "done" else set())),
             "feedback": sorted(set(last.get("feedback", []) + delivered))}
     ref = store.record("lead2_return", body)
     for demo in new_demos:
@@ -245,7 +253,7 @@ def _capture(workspace):
     return candidate
 
 
-def _code_map(graph, files, rows, done):
+def _code_map(graph, files, rows):
     aliases = build_brief.promise_refs(graph)
     promises = set(aliases.values())
     entries, errors = {}, []
@@ -263,27 +271,8 @@ def _code_map(graph, files, rows, done):
                     errors.append(f"{ref} {key}: replace {raw!r} with a tracked repository-relative path.")
                 elif path not in entry[key]:
                     entry[key].append(path)
-    if done:
-        missing = [label for label, ref in aliases.items()
-                   if not all(entries.get(ref, {}).get(key) for key in ("modules", "tests"))]
-        if missing:
-            errors.append("Provide tracked modules and tests for " + ", ".join(missing) + ".")
     return list(entries.values()), errors
 
 
 def _delivery_refs(value):
     return DELIVERY_REF.findall(value.partition(":")[0].casefold())
-
-
-def _chunks(store, chunks, order, revision, candidate):
-    completed = {}
-    for row in chunks:
-        for ref in _delivery_refs(row["delivery"]):
-            if ref in order and row["command"] and row["command"] not in completed.setdefault(ref, []):
-                completed[ref].append(row["command"])
-    seen = chunk_review.progress(store)
-    for ref, commands in completed.items():
-        prior = seen.get(ref, (None, {}, None))[1]
-        if candidate != prior.get("candidate") or commands != prior.get("commands"):
-            store.record("lead2_chunk", {"delivery": ref, "feature": order[ref], "revision": revision,
-                                         "candidate": candidate, "commands": commands})

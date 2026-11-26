@@ -131,6 +131,17 @@ dialog button{border:1px solid var(--line);border-radius:6px;background:var(--so
   .shell aside:not(.expanded) :is(.nav-label,.plan-name,.plan-sub,.showmore){display:none}
   aside.expanded{width:min(236px,58vw)}
 }
+/* time & cost */
+.tc-head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px}
+.tc-tot{display:flex;gap:22px;flex-wrap:wrap}.tc-tot div{font-size:11px;color:var(--muted)}.tc-tot b{display:block;font:400 22px/1.1 Georgia,serif;color:var(--ink)}
+.tc-bar{display:flex;height:12px;border-radius:6px;overflow:hidden;margin:14px 0 12px;background:var(--soft)}
+.tc-bar span{height:100%}.tc-bar span+span{border-left:2px solid var(--paper)}
+.tc-rows{display:grid;grid-template-columns:auto 1fr auto auto;gap:7px 14px;align-items:center;font-size:12.5px}
+.tc-rows .sw{width:10px;height:10px;border-radius:3px}.tc-rows .sub{padding-left:12px;color:var(--muted);font-size:12px}
+.tc-rows .num{font-variant-numeric:tabular-nums;text-align:right;color:var(--muted)}.tc-rows .num b{color:var(--ink);font-weight:600}
+.tc-rows .live{color:#7a5500;font-size:10.5px;background:#fdf1d8;border-radius:4px;padding:1px 6px;margin-left:6px}
+:root[data-theme=dark] .tc-rows .live{background:#3a3014;color:var(--glow)}
+@media (max-width:520px){.tc-rows{grid-template-columns:auto 1fr auto}.tc-rows .tok{display:none}}
 </style></head><body>
 <header>
   <div class="brand">
@@ -161,10 +172,17 @@ dialog button{border:1px solid var(--line);border-radius:6px;background:var(--so
   <div class="loop" id="loop"></div>
   <div class="story" id="story"></div>
 </section>
+<section>
+  <div class="tc-head"><h2>Time &amp; cost so far</h2>
+    <div class="tc-tot"><div><b id="tcWorking"></b>Seldon working</div><div><b id="tcOwner"></b>Your time</div><div><b id="tcTokens"></b>Tokens</div></div></div>
+  <div class="tc-bar" id="tcBar" title="Time by phase"></div>
+  <div class="tc-rows" id="tcRows"></div>
+</section>
+<section id="release" hidden><h2>What works</h2><div id="releaseWorks"></div>
+<h2 id="releaseWeaker">What’s weaker</h2><div id="releaseItems"></div></section>
 <section id="buildProgress" hidden>
   <h2>Build progress</h2>
   <ul class="build-list" id="buildFeatures"></ul>
-  <div class="build-limits" id="buildLimits"></div>
 </section>
 <section>
   <h2>The trace · lights up as each piece is built, reviewed and proven</h2>
@@ -215,6 +233,7 @@ const STATUS = {
   planned: ["planned", "Planned"],
   built: ["building", "Built"],
   "proven-current": ["passed", "Passed"],
+  walked: ["passed", "Story works"],
   accepted: ["accepted", "Accepted by you"],
   failed: ["fix", "Failed"],
   fixing: ["fix", "Failed → fixing"],
@@ -384,7 +403,7 @@ function showTrace(rows) {
   requestAnimationFrame(drawLines);
 }
 
-function showBuild(frame, current) {
+function showBuild(frame) {
   byId("buildProgress").hidden = !frame.features;
   if (!frame.features) return;
   byId("buildFeatures").replaceChildren(...frame.features.map(([name, state]) => {
@@ -393,15 +412,63 @@ function showBuild(frame, current) {
     item.append(element("span", name), element("span", label, "tag"));
     return item;
   }));
-  const limits = byId("buildLimits");
-  limits.replaceChildren();
-  if (current && data.unverified.length) {
-    const details = element("details");
-    details.open = true;
-    details.append(element("summary", `Can’t verify here · ${data.unverified.length}`));
-    for (const {text} of data.unverified) details.append(element("p", text));
-    limits.append(details);
+}
+
+const phases = [
+  ["planning_pre_spec", "Planning · talking it through with you", "var(--planned)"],
+  ["planning_spec", "Writing the plan", "#6f86a0", "sub"],
+  ["planning_review", "Reviewing and fixing the plan", "var(--review)", "sub"],
+  ["build", "Building", "var(--building)"],
+  ["walk", "Walking your stories", "var(--passed)"],
+];
+const minutes = seconds => seconds ? (seconds / 60).toFixed(1) + " min" : "0 min";
+const tokenCount = n => n < 1000 ? String(n) : (n / 1000).toFixed(1) + "k";
+
+function showTime(cost) {
+  const timer = byId("tcBar"), rows = byId("tcRows");
+  timer.replaceChildren();
+  rows.replaceChildren();
+  let working = 0, tokens = 0, missing = 0;
+  for (const [key, label, color, style] of phases) {
+    const r = cost.phases[key], n = r.fresh_input_tokens + r.cached_input_tokens + r.output_tokens;
+    working += r.seconds;
+    tokens += n;
+    missing += r.usageMissing;
+    const bar = element("span"), mark = element("i", "", "sw");
+    mark.style.background = bar.style.background = color;
+    bar.style.flexGrow = r.seconds;
+    if (r.seconds) timer.append(bar);
+    const title = element("span", label, style);
+    if (key === "planning_review" && cost.reviewRounds)
+      title.append(` · ${cost.reviewRounds} ${cost.reviewRounds === 1 ? "round" : "rounds"}`);
+    if (key === cost.active) title.append(element("span", "now", "live"));
+    const duration = element("span", "", "num"), usage = element("span", tokenCount(n) + (r.usageMissing ? " +" : ""), "num tok");
+    duration.append(element("b", minutes(r.seconds)));
+    usage.title = `Fresh input ${r.fresh_input_tokens} · Cached input ${r.cached_input_tokens} · Output ${r.output_tokens}`;
+    if (r.usageMissing) usage.title += " · Usage unavailable for some calls";
+    rows.append(mark, title, duration, usage);
   }
+  byId("tcWorking").textContent = minutes(working);
+  byId("tcOwner").textContent = minutes(cost.ownerWaitSeconds);
+  byId("tcTokens").textContent = tokenCount(tokens) + (missing ? " +" : "");
+}
+
+function showRelease(notes) {
+  const section = byId("release");
+  section.hidden = !notes;
+  if (!notes) return;
+  const works = byId("releaseWorks"), items = byId("releaseItems");
+  works.replaceChildren(...notes.works.map(row => {
+    const line = element("p", row.text);
+    if (row.artifact) {
+      const link = element("a", "Screenshot");
+      link.href = "walk-shot/" + encodeURIComponent(row.artifact);
+      line.append(" ", link);
+    }
+    return line;
+  }));
+  items.replaceChildren(...notes.items.map(row => element("p", `${row.id} · ${row.label}: ${row.text}`)));
+  byId("releaseWeaker").hidden = !notes.items.length;
 }
 
 function render() {
@@ -417,7 +484,9 @@ function render() {
   byId("tlabel").textContent = `${index + 1} / ${data.frames.length}`;
   byId("live").hidden = following;
   showStages(frame);
-  showBuild(frame, index === data.frames.length - 1);
+  showBuild(frame);
+  showTime(data.timeCost);
+  showRelease(data.releaseNotes);
   const judge = frame.judgment || {};
   showTrace(data.trace[frame.revision].map(row =>
     ({...row, status: judge[row.promise] || judge["*"] || row.status})));

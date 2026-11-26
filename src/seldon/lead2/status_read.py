@@ -12,13 +12,14 @@ from .build import _deliveries
 from .chunk_review import feature_status, progress, sent_feedback
 from .evidence import promise_status
 from .store import SpecStore
-from .walk_record import current_walk, limits, read_walk
+from .timing import time_and_cost
+from .walk_record import current_walk, read_walk, release_notes
 
 BUILD_STAGES = {LEAD2_WALK: 7, "C": 8, "ACCEPTED": 8, "SCRIPTED_C": 8}
 STAGE = {"NEW": 0, "ALIGN": 1, "A": 1, "L2-STACK": 2, "L2-SPEC": 3, "L2-REVIEW": 4,
          "B": 5, LEAD2_READY: 6, LEAD2_BUILT: 6, **BUILD_STAGES}
 ACTIVITY = ["Your idea", "Asking round {round}", "Agreeing the stack", "Writing the plan",
-            "Review {review} of 3", "Preparing your approval"]
+            "Review round {review}", "Preparing your approval"]
 EVENTS = ("transition", "attempt", "answer", "attempt_end", "decision_request", "user_words",
           "lead2_chunk", "lead2_chunk_review", "lead2_return", "lead2_walk", "lead2_walk_repair")
 HOME_STAGES = ("Your idea", "Align the idea", "Agree the stack", "Write the plan", "Review & fix",
@@ -113,11 +114,14 @@ def _timeline(store, spec, revisions):
             if state == LEAD2_WALK and event["input"] == LEAD2_READY:
                 repair = False
             if state == LEAD2_READY and event["input"] == "B":
+                revision = spec.pins()["B"]
+                while history and history[0][0] <= revision:
+                    history.popleft()
                 order = _deliveries(store, store.read(event["cause"]))[0]
                 frames.append({**_frame("B", revision, rounds, reviews),
                                "activity": "Plan approved at B", "approved": True})
             if event["event"] == "trace-progress":
-                detail = f"Review {reviews} of 3 · fixing trace gaps"
+                detail = f"Review round {reviews} · fixing trace gaps"
         elif kind == "decision_request":
             gate = event["gate"]
         elif kind == "user_words" and not event.get("rejected"):
@@ -125,7 +129,7 @@ def _timeline(store, spec, revisions):
         elif kind == "attempt" and event["operation"] == "REVIEW" and not event.get("retryOf"):
             reviews += 1
         elif kind == "attempt" and state == "L2-REVIEW" and event["operation"] == "LEAD2-SPEC":
-            detail = f"Review {reviews} of 3 · applying your choice"
+            detail = f"Review round {reviews} · applying your choice"
         elif kind == "attempt" and state == LEAD2_READY and event["operation"] == "WORK":
             started = True
             feedback = store.read(event["question"])["execution"].get("feedback", [])
@@ -162,6 +166,12 @@ def _timeline(store, spec, revisions):
 def _judge_rows(run, state, repair, candidate, revision):
     if not run:
         return {"*": "under review"} if state == LEAD2_WALK else {}
+    if "results" in run:
+        states = {"works": "walked",
+                  "broken": "fixing" if repair else "failed", "can't-test-here": "not-verifiable-here"}
+        stale = (candidate and run["candidate"] != candidate) or run["revision"] != revision
+        return {promise: "stale" if stale else states[row["outcome"]]
+                for story, row in run["results"].items() for promise in run["stories"][story]["promises"]}
     if (candidate and run["candidate"] != candidate) or run["revision"] != revision:
         return {row["promise"]: "stale" for row in run["promises"]}
     statuses = {"works": "accepted" if state == "ACCEPTED" else "proven-current",
@@ -286,7 +296,7 @@ def summary(store, when):
         if build["chunk"]:
             label += f" · {build['chunk']}"
     if reviews:
-        label += f" · {reviews} of 3"
+        label += f" · round {reviews}"
     if state in TERMINAL:
         chip = "Stopped" if state == "STOPPED" else "Done"
         if state == "STOPPED":
@@ -305,7 +315,7 @@ def summary(store, when):
         chip = "Paused"
     else:
         chip = (build["activity"] if build.get("activity") in ("Fixing", "Review failed") else
-                "Building" if stage >= 6 else "Planning")
+                "Walking" if phase == LEAD2_WALK else "Building" if stage >= 6 else "Planning")
     return HomeSummary(*_home_idea(kickoff["words"].strip()), stage, label, chip, when)
 
 
@@ -347,6 +357,6 @@ def status(store):
     graph = spec.snapshot(revision).graph
     idea = _idea(words, graph)
     run = current_walk(store, revision)
-    return {"idea": idea, "frames": frames,
-            "unverified": [{"text": row["reason"]} for row in limits(store, run)] if run else [],
+    return {"idea": idea, "frames": frames, "timeCost": time_and_cost(store),
+            "releaseNotes": release_notes(store, run) if run else None,
             "trace": {ref: _rows(spec, ref, cursor.candidate) for ref in {f["revision"] for f in frames}}}

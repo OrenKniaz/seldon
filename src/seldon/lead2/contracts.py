@@ -15,11 +15,14 @@ NODE_BODIES = {
 LINK_ROWS = array(obj(source=TEXT, targets=REFS))
 TITLED = ("story", "promise", "walk")
 TITLE = {"type": "string"}
+PRIORITY = choice("must", "should", "nice")
 SPEC_EDITS = {
     **{kind: array(obj(ref=TEXT, **body["properties"], **({"title": TITLE} if kind in TITLED else {})))
        for kind, body in NODE_BODIES.items() if kind != "dream"},
     "retire": REFS, "link": LINK_ROWS, "unlink": LINK_ROWS, "replaces": LINK_ROWS,
 }
+SPEC_EDITS["story"]["items"]["properties"]["priority"] = PRIORITY
+SPEC_EDITS["story"]["items"]["required"].append("priority")
 OPTION_FIELDS = {
     f"option_{kind}": array(obj(option_id=TEXT, **(
         {"ref": TEXT} if kind == "retire" else field["items"]["properties"])))
@@ -32,6 +35,10 @@ NODE = {"anyOf": [
 for kind, contract in zip(NODE_BODIES, NODE["anyOf"], strict=True):
     if kind in TITLED:
         contract["properties"]["title"] = TITLE
+
+for contract in NODE["anyOf"]:
+    if contract["properties"]["kind"]["enum"] == ["story"]:
+        contract["properties"]["priority"] = PRIORITY
 
 BATCH_SCHEMA = obj(
     revision={"type": "integer", "minimum": 0},
@@ -53,13 +60,16 @@ def typed_reply(body, schema):
         fields = schema["properties"]["answer"]["properties"]
         answer = {key: answer.get(key, []) if field.get("type") == "array" else answer.get(key)
                   for key, field in fields.items()}
+        if "build_size" in fields and answer["build_size"] is None:
+            answer["build_size"] = "small"
         if "unresolved_issue" in fields and answer["unresolved_issue"] is None:
             answer["unresolved_issue"] = ""
         for kind in (*TITLED, *(f"option_{kind}" for kind in TITLED)):
             if (isinstance(answer.get(kind), list)
                     and "title" in fields.get(kind, {}).get("items", {}).get("properties", {})):
                 answer[kind] = [
-                    {**row, "title": row["title"] if isinstance(row.get("title"), str) else ""}
+                    {**row, "title": row["title"] if isinstance(row.get("title"), str) else "",
+                     **({"priority": row.get("priority") or "must"} if kind in ("story", "option_story") else {})}
                     if isinstance(row, dict) else row for row in answer[kind]
                 ]
     return {"answer": answer}
@@ -94,6 +104,8 @@ def normalise_edits(graph, answer, references, *, prefix=""):
                 continue
             seen.add(ref)
             node = {"kind": kind, **{key: row[key] for key in fields["properties"]}}
+            if kind == "story":
+                node["priority"] = row.get("priority", graph.nodes.get(ref, {}).get("priority", "must"))
             if kind in TITLED and (title := row.get("title", "").strip()
                                   or graph.nodes.get(ref, {}).get("title")):
                 node["title"] = title
