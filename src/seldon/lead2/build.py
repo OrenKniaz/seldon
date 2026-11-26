@@ -97,16 +97,22 @@ def _walk(store, delivery, demo, repair_refs=()):
         paths = {}
         for row in previous["code_map"] + last["code_map"]:
             paths.setdefault(row["promise"], set()).update(row["modules"] + row["tests"])
-        stories = prior["stories"]
-        complete = all(row["promises"] and all(paths.get(p) for p in row["promises"]) for row in stories.values())
-        touched = ({ref for ref, row in stories.items() if any(changed & paths[p] for p in row["promises"])}
-                   if complete and changed <= set().union(*paths.values()) else set(stories))
-        request.update(prior=repairs[-1]["prior"],
-                       stories=sorted(touched | {s for row in repairs for s in row["stories"]}),
+        mapped = {ref: set().union(*(paths.get(p, ()) for p in row["promises"]))
+                  for ref, row in prior["stories"].items()}
+        broad = changed and (not all(mapped.values()) or changed - set().union(*mapped.values())
+                             or any(_shared_setup(path) for path in changed))
+        touched = [ref for ref, files in mapped.items() if broad or changed & files]
+        request.update(prior=repairs[-1]["prior"], stories=sorted(touched),
                        items=sorted({ref for row in repairs for ref in row["defects"]}))
     with store.transaction():
         target = store.record("lead2_walk_target", request)
         advance(store, "walk", target, transitions=LEAD2_RUN)
+
+
+def _shared_setup(path):
+    parts = set(re.split(r"[/_.-]", path.casefold()))
+    return bool(parts & {"config", "settings", "schema", "schemas", "migration", "migrations", "sql",
+                         "env", "lock", "lockfile", "requirements", "package", "pyproject", "dockerfile"})
 
 
 def _deliveries(store, approval):
@@ -240,6 +246,8 @@ def _returned(store, spec, source, answer, session):
     entries = {entry.decode().split("\t", 1)[1] for entry in gitwork.tree_entries(workspace, candidate)
                if entry.startswith((b"100644 blob ", b"100755 blob "))}
     code_map, errors = _code_map(graph, entries, answer["code_map"])
+    updated = {row["promise"] for row in code_map}
+    retained, _ = _code_map(graph, entries, [row for row in last.get("code_map", []) if row["promise"] not in updated])
     if answer["outcome"] == "partial" and not new_demos:
         inference.correct(store, source, answer,
                           ["Keep going: return done, or blocked only with a question the person must answer."])
@@ -249,12 +257,13 @@ def _returned(store, spec, source, answer, session):
     body = {"candidate": candidate, "session": session, "revision": revision,
             "acknowledged": acknowledged, "outcome": answer["outcome"], "note": answer["note"],
             "demo": new_demos[0] if new_demos else None,
-            "code_map": code_map, "advice": errors,
+            "code_map": retained + code_map, "advice": errors,
             "repairs": delivered or (last.get("repairs", []) if last.get("outcome") != "done" else []),
             "feedback": sorted(set(last.get("feedback", []) + delivered))}
     ref = store.record("lead2_return", body)
-    for demo in new_demos:
-        store.record("lead2_demo_point", {"delivery": demo, "outcome": order[demo], "return": ref})
+    for index, demo in enumerate(order, 1):
+        if demo in new_demos:
+            store.record("lead2_demo_point", {"delivery": demo, "index": index, "outcome": order[demo], "return": ref})
     store.cursor(replace(cursor, leadReturn=ref, candidate=candidate, failure=""))
 
 

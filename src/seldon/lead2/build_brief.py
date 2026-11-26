@@ -23,8 +23,8 @@ startup command that accepts loopback address, port and separate sample data as 
 If a demo is the next return point, build through that delivery and return partial with its ID
 before starting the remaining work. Seldon shows the saved build and resumes you automatically.
 Report selected demos by delivery ID. Give one code_map row for each delivered promise ID, with actual
-tracked module and test paths. Repeat shared paths across rows. Include the fresh-copy guide
-and a sample job in the product.
+tracked module and test paths. Map new paths after repairs. Repeat shared paths across every
+promise they affect. Include the fresh-copy guide and sample job.
 Return done when the stories work in your own checks. Seldon walks the product independently after
 `done`. That is Seldon's job, so keep building through local checks and never wait for it. Use partial
 only for a chosen demo. Blocked requires a question the person must answer. Apply accepted changes and acknowledge them."""
@@ -45,6 +45,13 @@ def brief(graph, order, demos, kickoff):
         lines += [story, *roles, *(_details(node) for ref, node in promises.items() if ref in children)]
     linked = {ref for _, _, children in stories for ref in children}
     lines += [_details(node) for ref, node in promises.items() if ref not in linked]
+    hard = {case for ref, node in graph.nodes.items()
+            if node["kind"] == "story" and node.get("priority", "must") == "must"
+            for case in graph.follow(ref) | {b for a, b in graph.links if a == ref}
+            if graph.nodes[case]["kind"] in ("check", "walk")}
+    if hard:
+        lines += ["Test these yourself in the real app before you return done for these stories",
+                  *(_details(node) for ref, node in graph.nodes.items() if ref in hard)]
     design = {ref: n for ref, n in graph.nodes.items() if n["kind"] == "design"}
     lines += ["Design and stack", *(f"{n['decision']} — {n['words'] if 'owner_choice' in n else n['reason']}"
                                     for n in design.values()),
@@ -55,7 +62,7 @@ def brief(graph, order, demos, kickoff):
         lines += [f"{label}: {promises[ref]['result']}",
                   *(node["decision"] for key, node in design.items() if key in related),
                   *(_details(node) for key, node in graph.nodes.items()
-                    if key in related and node["kind"] == "check")]
+                    if key in related - hard and node["kind"] == "check")]
     lines += ["Build order", *(f"{ref}: {name}" for ref, name in order.items()),
               "Chosen demos", *(demos or ["None chosen."]), "How we work", GUIDE]
     return "\n\n".join(lines)

@@ -112,10 +112,8 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
                 link=[{"source": stories["Take over the live count"], "targets": ["count"]},
                       {"source": "count", "targets": ["ledger", "verify", "swap"]},
                       {"source": stories["Download the count"], "targets": ["download"]}],
-                build_order=[dict(outcome="Safe handoff", stories=[stories["Take over the live count"]],
-                                  try_alone_why="The lead can take over a shift.", would_try_before_rest=True),
-                             dict(outcome="CSV export", stories=[stories["Download the count"]],
-                                  try_alone_why="The lead can export an existing shift.", would_try_before_rest=True)],
+                build_order=[dict(outcome="Safe handoff", stories=[stories["Take over the live count"]]),
+                             dict(outcome="CSV export", stories=[stories["Download the count"]])],
             )
         else:
             answer["findings"] = "The receiving lead sees the original count."
@@ -263,6 +261,8 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
             if builds == 1:
                 assert "Keep it visible above the controls." in question["prompt"]
                 assert "Only the current lead can close." in question["prompt"]
+                hard_checks = question["prompt"].split("Test these yourself", 1)[1].split("Design and stack", 1)[0]
+                assert "Lose Wi-Fi just before the swap" in hard_checks and "Both leads see 15" in hard_checks
                 for line in question["prompt"].splitlines():
                     ref, _, result = line.partition(": ")
                     if result in ("See the same count", "The CSV contains the count"):
@@ -290,9 +290,10 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
                 encoding="utf-8")
             (workspace / "export.py").write_text("# CSV export entry point\n", encoding="utf-8")
             return json.dumps(dict(outcome="done", acknowledged=True, correction_note="",
-                code_map=[dict(promise=promises["See the same count"], modules=["index.html", "ledger.py"], tests=[]),
-                          dict(promise=promises["The CSV contains the count"],
-                               modules=["export.py"] + (["export.csv"] if builds == 4 else []), tests=[])]))
+                code_map=[dict(promise=promises["See the same count"], modules=["index.html", "ledger.py"], tests=[])] if builds == 3 else [
+                    dict(promise=promises["See the same count"], modules=["index.html", "ledger.py"], tests=[]),
+                    dict(promise=promises["The CSV contains the count"],
+                         modules=["export.py"] + (["export.csv"] if builds == 4 else []), tests=[])]))
         if question["kind"] == "LEAD2-CHUNK":
             return json.dumps(dict(notes=["Take over the count and check whether it starts at 15.",
                                           "The local checks passed."]))

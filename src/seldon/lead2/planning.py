@@ -101,7 +101,6 @@ def _propose(store, spec, snapshot, answer_ref, answer, size, references):
         return
     reviewing = cursor.state == "L2-REVIEW" and not cursor.requestedChange
     edits, errors = normalise_edits(snapshot.graph, answer, references)
-    inference.correct(store, answer_ref, answer, errors)
     updated = snapshot
     if edits:
         batch = {"revision": snapshot.revision, "reason": answer["reason"].strip() or "Plan the product",
@@ -110,14 +109,17 @@ def _propose(store, spec, snapshot, answer_ref, answer, size, references):
         references = {**references, **{name.lstrip("$"): ref for name, ref in result.names.items()}}
         updated = spec.snapshot(result.revision)
     if cursor.state == "ALIGN":
+        inference.correct(store, answer_ref, answer, errors)
         _offer_a(store, updated, answer_ref, answer, size)
         return
     plan_ref = cursor.leadPlan
     previous = store.read(plan_ref) if plan_ref else {}
-    plan = {key: answer.get(key) or previous.get(key, []) for key in ("build_order", "access")}
-    stories = {ref for ref, row in updated.graph.nodes.items() if row["kind"] == "story"}
-    if plan["build_order"]:
-        plan["build_order"] = _delivery_plan(plan["build_order"], stories, references, size)
+    plan = {"build_order": previous.get("build_order", []), "access": answer.get("access") or previous.get("access", [])}
+    if "build_order" in answer:
+        order, issues = _delivery_plan(answer["build_order"], updated.graph, references)
+        errors.extend(issues)
+        plan.update(build_order=order, delivery_issues=issues)
+    inference.correct(store, answer_ref, answer, errors)
     if plan["build_order"] and any(value != previous.get(key) for key, value in plan.items()):
         plan_ref = store.record("lead2_plan", {**plan, "source": answer_ref})
     store.cursor(replace(cursor, leadPlan=plan_ref, failure=""))
@@ -134,21 +136,25 @@ def _propose(store, spec, snapshot, answer_ref, answer, size, references):
         _finish_plan(store, updated.revision, answer_ref)
 
 
-def _delivery_plan(rows, stories, references, size):
-    deliveries, pending, assigned = [], [], set()
+def _delivery_plan(rows, graph, references):
+    stories = {ref: node["story"] for ref, node in graph.nodes.items() if node["kind"] == "story"}
+    assigned, order, issues = set(), [], []
     for row in rows:
-        refs = [references.get(ref, ref) for ref in row.get("stories", ())]
-        pending.extend(dict.fromkeys(ref for ref in refs if ref in stories and ref not in assigned))
-        assigned.update(pending)
-        if pending and row.get("would_try_before_rest", True) and size not in ("micro", "small"):
-            deliveries.append(dict(outcome=row["outcome"], stories=pending))
-            pending = []
-    pending += sorted(stories - assigned)
-    if deliveries:
-        deliveries[-1]["stories"].extend(pending)
-    else:
-        deliveries.append(dict(outcome=rows[-1]["outcome"], stories=pending))
-    return deliveries
+        refs = []
+        for label in row.get("stories", ()):
+            ref = references.get(label.lstrip("$"), label)
+            if ref not in stories or ref in assigned:
+                issues.append(f"Delivery {row['outcome']!r}: {label!r} must be an exact story ref used once.")
+            assigned.add(ref)
+            refs.append(ref)
+        if not refs:
+            issues.append(f"Delivery {row['outcome']!r} needs its story refs.")
+        order.append(dict(outcome=row["outcome"], stories=refs))
+    if missing := stories.keys() - assigned:
+        issues.append("Include these stories once in build_order: " + "; ".join(stories[ref] for ref in sorted(missing)))
+    if not rows or issues:
+        return [{"outcome": "Complete product", "stories": list(stories)}], issues or ["Give one named delivery."]
+    return order, []
 
 
 def _finish_plan(store, revision, source, answer_ref=None):
@@ -220,7 +226,13 @@ def _offer_a(store, snapshot, source, answer, chosen_size):
 
 def _offer_b(store, spec, cursor):
     snapshot = spec.snapshot()
-    plan = store.read(cursor.leadPlan)
+    plan_ref = cursor.leadPlan
+    plan = store.read(plan_ref)
+    order, issues = _delivery_plan(plan["build_order"], snapshot.graph, {})
+    if issues:
+        plan = {**plan, "build_order": order, "delivery_issues": issues}
+        plan_ref = store.record("lead2_plan", plan)
+        store.cursor(replace(cursor, leadPlan=plan_ref))
     skip, show = chat.options(("skip", "Skip demonstration", "Keep this in the build order."),
                               ("show", "Show me this working", "Demonstrate this delivery."))
     groups = [chat.group(f"delivery-{i}", f"Demonstrate this delivery? {delivery_name(delivery)}",
@@ -240,7 +252,7 @@ def _offer_b(store, spec, cursor):
     chat.request(store, "B", snapshot.revision, [*groups, chat.gate_group("B")],
                  proposal=b_summary(snapshot.graph, plan, groups, {}, changes=changes),
                  summary=changes or review.get("unresolved_issue") or "Reviewed spec",
-                 plan=cursor.leadPlan, review=cursor.review)
+                 plan=plan_ref, review=cursor.review)
 
 
 def _answer(store, spec, user, cursor):

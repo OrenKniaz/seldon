@@ -138,9 +138,9 @@ def planning_facts(graph, kickoff):
     """Render call-local handles. The corresponding IDs never leave the store."""
     prefixes = {"person": "p", "story": "s", "dream": "reply-", "promise": "v",
                 "design": "d", "interface": "i", "check": "c", "walk": "w"}
-    counts, aliases, replies, proposal = {}, {}, [], []
+    counts, aliases, replies, proposal, locked = {}, {}, [], [], []
     for ref, node in graph.nodes.items():
-        prefix = prefixes[node["kind"]]
+        prefix = "locked-" if "owner_choice" in node else prefixes[node["kind"]]
         if node.get("words") == kickoff and prefix == "reply-":
             aliases[ref] = "brief"
             continue
@@ -149,11 +149,13 @@ def planning_facts(graph, kickoff):
         if prefix == "reply-":
             replies.append(f"{handle}\n{node['words']}")
         else:
-            proposal.append(f"[{handle}] {encode(node)}")
+            (locked if prefix == "locked-" else proposal).append(f"[{handle}] {encode(node)}")
     children = {}
     for source, target in graph.links:
         children.setdefault(aliases[source], []).append(aliases[target])
     proposal.extend(f"{source} → {', '.join(targets)}" for source, targets in children.items())
+    if locked:
+        proposal.extend(["Locked choices already in the plan", *locked])
     refs = {label: ref for ref, label in aliases.items()}
     return "\n".join(proposal) or "New product.", "\n\n".join(replies), refs
 

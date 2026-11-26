@@ -10,7 +10,7 @@ QUESTION_FIELDS = dict(question=TEXT, recommended=TEXT, recommended_means=TEXT,
                        alternative=TEXT, alternative_means=TEXT)
 QUESTIONS = array(obj(**QUESTION_FIELDS))
 MOCKUPS = array(obj(id=TEXT, label=TEXT, means=TEXT))
-DELIVERY = array(obj(outcome=TEXT, stories=REFS, try_alone_why=TEXT, would_try_before_rest=YES_NO))
+DELIVERY = array(obj(outcome=TEXT, stories=REFS))
 ACCESS = array(obj(need=TEXT, supplier={"type": "string"}, deferred={"type": "boolean"}))
 ALIGN_CHOICES = array(obj(question=TEXT, default=TEXT, recommended_means=TEXT, alternative=TEXT,
                           alternative_means=TEXT, her_words_quote={"type": "string"},
@@ -39,16 +39,16 @@ Stories describe product behavior. Leave demonstrations and release decisions ou
     "LEAD2-STACK": """Recommend the stack for the accepted vision. Give each choice a plain one-line reason
 and cite the need that drove it in words. Offer alternatives only when the answer changes what is built.
 For a plain owner explain the recommendation in business language. Incorporate the owner's latest reply.""",
-    "LEAD2-SPEC": """Explain identities, state changes and design. Respect the approved stack and link it to
-the promises it serves. For each story: is it part of the app's core job (without it the app is
+    "LEAD2-SPEC": """Use the fewest stories that fully cover the owner's words. Keep connected steps, roles and
+recovery cases under the same job. Preserve their exact requirements as promises and checks.
+For each story: is it part of the app's core job (without it the app is
 pointless)? Give core_job_why and a JSON boolean, true or false. Bakery list: saving orders is core;
 search and decorative icons are not. After false, explain nice: true for icons, false for search.
 For a core story, use nice_why: "", nice: false. Include every story, using its shown ref.
-Order build_order by feature. Give each delivery a plain outcome name and its exact story refs.
-For a micro or small dream give one product delivery. For larger dreams, explain whether each
-is worth trying before the rest. Example: {"outcome":"Record bakery orders","stories":["save"],
-"try_alone_why":"Staff can record real orders now.","would_try_before_rest":true}.
-Use false for a piece that needs the next delivery to be useful (e.g. just adding customer fields). For a product with a user interface, give a few
+A small app usually needs one delivery, including when its workflows share a screen or data.
+Split only when the person could use an outcome on its own before the rest. Group every story
+exactly once, in delivery order. Example: {"outcome":"Run the bakery order list","stories":["save","pickup"]}.
+For a product with a user interface, give a few
 quick visual directions for the key screens in mockups: describe layout, interaction and appearance so
 the owner can pick or mix them. Use an empty list when there is no visual choice to make.""",
     "REVIEW": """What could disappear while this still passes? Fix missing behaviour and proof from the
@@ -56,15 +56,16 @@ brief and owner replies in this answer. If a gap needs another reviewer after yo
 unresolved_issue. Otherwise return "unresolved_issue": "". Use [] for unused arrays.
 Ask only for an unresolved material product choice. Example question IDs: id "pickup", recommended_id
 "counter", alternative_id "locker". Use those exact option_id values in option_* edits only. Link
-with exact shown refs or new refs declared in those edits. Leave build_order and access empty unless changed.""",
+with exact shown refs or new refs declared in those edits. Leave access empty unless changed.""",
 }
 SPEC_GUIDE = """Link each promise to planned code modules (design rows) and named tests with observable
 results (check rows). List build and judge access with suppliers; empty supplier means can't test here.
 Derive access from the planned walk.
 Mark deferred only for the specific venue checks the owner explicitly left for later.
 Leave access empty to keep a prior list or give the full revised list."""
-EDIT_GUIDE = """Use exact refs for edits and fresh refs like order-store for additions. Rows with
-owner_choice are locked. Use their refs directly in links. Retiring an editable node removes its links.
+EDIT_GUIDE = """Use exact refs for edits and unique new refs for additions. Locked choices are already
+in the plan. Keep their refs out of all edit arrays, except to link them to promises. To change a
+locked choice, ask the owner. Retire a node once and leave its old links alone.
 Link brief, replies and roles → stories → promises → design, checks and walks. Group by source.
 Use [] for unused arrays. Each product question names two concrete options; code adds Other."""
 PROMISE_GUIDE = """Give each product behavior its own action, result and failure condition. When a
@@ -93,9 +94,9 @@ def question(kind, words, current, *, qualification=None, **facts):
             facts["Size choices by agent effort"] = SIZES
         else:
             extra = REVIEW["properties"] if kind == "REVIEW" else {"mockups": MOCKUPS}
-            fields = {**extra, **SPEC_EDITS, "build_order": DELIVERY, "access": ACCESS}
+            fields = {**extra, **SPEC_EDITS, "access": ACCESS}
             if kind == "LEAD2-SPEC":
-                fields["story"] = SPEC_STORY
+                fields.update(story=SPEC_STORY, build_order=DELIVERY)
             prompt = "\n\n".join((prompt, SPEC_GUIDE, PROMISE_GUIDE, EDIT_GUIDE))
     return {"kind": kind, "execution": {}, "schema": obj(answer=obj(reason=TEXT, **fields)),
             "renderContext": {"lead2": True},

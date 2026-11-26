@@ -104,7 +104,8 @@ def normalise_edits(graph, answer, references, *, prefix=""):
     for kind, fields in NODE_BODIES.items():
         for row in answer.get(kind, ()):
             ref = resolve(row["ref"])
-            if ref in fixed and kinds[ref] == kind and all(row[k] == graph.nodes[ref][k] for k in fields["properties"]):
+            if ref in fixed and kinds[ref] == kind and all(
+                    row.get(k) == graph.nodes[ref].get(k) for k in fields["properties"]):
                 continue
             if ref == "$" or ref in fixed or ref in seen or kinds.get(ref, kind) != kind:
                 errors.append(f"{kind} {row['ref']!r}: use a distinct new name or an editable {kind} ID.")
@@ -151,7 +152,7 @@ def normalise_edits(graph, answer, references, *, prefix=""):
                 if pair in allowed or pair[::-1] in allowed:
                     edits.append(dict(op=op, source=source, target=target))
                 elif op == "unlink" and (source, target) in graph.links and (source not in kinds or target not in kinds):
-                    continue
+                    errors.append(f"Unlink {row['source']!r} from {label!r}: retiring the node already removes this link.")
                 elif source != target or source not in kinds:
                     errors.append(f"{op} {row['source']!r} to {label!r}: use declared IDs of compatible kinds.")
     return edits, errors

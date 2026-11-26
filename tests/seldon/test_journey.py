@@ -489,10 +489,8 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
     other = ("A volunteer can also hand off to the next shift while a coat is still out. "
              "I'll check the physical label printer later.")
     calls = []
-    draft = {"build_order": [dict(outcome="1. Check in and recover a coat: restore the claim", stories=[],
-                                  try_alone_why="A volunteer can run a claim desk.", would_try_before_rest=True),
-                             dict(outcome="2. Add a printed claim card", stories=[],
-                                  try_alone_why="It needs an active claim.", would_try_before_rest=False)]}
+    delivery = "Complete product" if loose_answer else "Check in and recover a coat"
+    draft = {"build_order": [dict(outcome="Check in and recover a coat", stories=[])]}
     access = [{"need": "Desk tablet", "supplier": "Volunteer lead", "deferred": False},
               {"need": "Check the label printer at the venue.", "supplier": "", "deferred": True}]
     qualification = "Approve, only if the CSV includes each correction reason."
@@ -636,8 +634,10 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
                               link("brief", "handover"), link(role, "handover"),
                               add("lost", "story", story="A volunteer can look for a lost claim"),
                               link("brief", "lost"), link(role, "lost")])
-            order = [{**row, "stories": [story]} for row in draft["build_order"]]
-            order[-1]["outcome"] = "Check in and recover a coat"
+            order = [{**draft["build_order"][0], "stories": [story, *(
+                row["ref"] for row in flat(edits)["story"] if row["ref"] != story)]}]
+            if loose_answer:
+                order[0]["stories"].append("unknown-story")
             answer = dict(reason="Specify the complete handoff", **flat(edits), build_order=order,
                           mockups=[dict(id="queue", label="Queue first", means="Show handoffs at the top"),
                                    dict(id="lookup", label="Lookup first", means="Lead with receipt lookup")],
@@ -655,7 +655,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
                                nice=False, nice_why="A volunteer needs this during the shift.")
         else:
             assert kind == "REVIEW"
-            assert [row["outcome"] for row in facts["Proposed build order"]] == ["Check in and recover a coat"]
+            assert [row["outcome"] for row in facts["Proposed build order"]] == [delivery]
             assert facts["Proposed access needs"] == access
             assert other in facts["Earlier replies"] and "A restart loses the receipt" in proposal
             if calls.count(kind) > 1:
@@ -858,7 +858,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
             assert run.step() == "B"
         assert run.step() == "B"
         offered = frontdoor.state(product)["waitingFor"]["ask"]["proposal"]
-        assert "1. Check in and recover a coat" in offered and "1. 1." not in offered
+        assert f"1. {delivery}" in offered and "1. 1." not in offered
         assert "### Demonstrations\nNone selected." in offered
         assert "Desk tablet — Volunteer lead" in offered
         assert "Check the label printer at the venue. — Deferred by agreement" in offered
@@ -893,10 +893,10 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         full = frontdoor.state(product, full_spec=True)
         assert "Restart the tablet before the second shift scans the receipt" in full["spec"]
         assert "Claim storage module" in full["spec"] and "Claim restart test" in full["spec"]
-        assert [row["outcome"] for row in full["buildOrder"]] == ["Check in and recover a coat"]
+        assert [row["outcome"] for row in full["buildOrder"]] == [delivery]
         expected_result = "omits any correction reason" if loose_answer else "The receipt still finds it"
         assert expected_result in b["ask"]["proposal"]
-        assert "Check in and recover a coat" in b["ask"]["proposal"]
+        assert delivery in b["ask"]["proposal"]
         assert run.step() == "B"
         assert "B" not in spec.pins()
         story = next(key for key in groups if key.startswith("priority-"))
@@ -930,13 +930,16 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         pane = read_pane(run.store)
         latest = pane["frames"][-1]
         assert pane["frames"][-2]["activity"] == "Plan approved at B"
-        assert latest["activity"] == "Ready to build" and latest["chunk"] == "Check in and recover a coat"
+        assert latest["activity"] == "Ready to build" and latest["chunk"] == delivery
         # The revised export still appears in the approved trace after the conditional B loop.
         assert any(expected_result in row["feature"]["text"] for row in pane["trace"][latest["revision"]])
         assert gitwork.git(product, "rev-parse", "HEAD") == initial_commit
         expected_calls = ["REVIEW", "REVIEW", "REVIEW", "LEAD2-SPEC"] if loose_answer else ["REVIEW"]
         if review_reply == "other":
             expected_calls.append("LEAD2-SPEC")
+        if loose_answer:
+            assert any("unknown-story" in reason for _, _, row in run.store.records("lead2_correction")
+                       for reason in row["remaining"])
         assert not any("editable design ID" in reason for _, _, row in run.store.records("lead2_correction")
                        for reason in row["remaining"])
         assert calls == ["LEAD2-ALIGN"] * 3 + ["LEAD2-STACK"] * (2 if loose_answer else 1) + [

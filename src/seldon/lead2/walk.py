@@ -108,7 +108,9 @@ def _walk(store, snapshot, provider, target, request):
     final = last["outcome"] == "done"
     if not final and (point := request["demo"]):
         plan = store.read(store.read(store.cursor().B)["subject"]["plan"])["build_order"]
-        through = int(store.read(point)["delivery"].rsplit("-", 1)[-1])
+        demo = store.read(point)
+        through = demo.get("index") or next((i for i, _ in enumerate(plan, 1)
+                                              if f"delivery-{i}" == demo.get("delivery")), 0)
         shown = {ref for row in plan[:through] for ref in row.get("stories", ())}
         mapped = {row["promise"] for row in last.get("code_map", ())}
         stories = {ref: row for ref, row in stories.items() if ref in shown or
