@@ -44,11 +44,6 @@ def _evidence(spec, snapshot, commit):
     return reopened, previous, current
 
 
-def current_observations(spec, snapshot, commit):
-    """Keep the original witness and revision for evidence on the same candidate."""
-    return {obs.id for rows in _evidence(spec, snapshot, commit)[2].values() for obs in rows}
-
-
 def promise_status(spec: SpecStore, revision: int, commit: str | None) -> dict[str, Status]:
     snapshot = spec.snapshot(revision)
     reopened, previous, current = _evidence(spec, snapshot, commit.lower() if commit else None)

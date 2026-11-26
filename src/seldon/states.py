@@ -8,7 +8,7 @@ LEAD2_BUILT = "L2-BUILT"
 LEAD2_WALK = "L2-WALK"
 LEAD2_RUN = {
     "ALIGN": {"aligned": "A"},
-    "A": {"revise": "ALIGN", "approve": "L2-STACK"},
+    "A": {"revise": "ALIGN", "approve": "L2-STACK", "approve-small": "L2-SPEC"},
     "L2-STACK": {"revise": "L2-STACK", "approve": "L2-SPEC"},
     "L2-SPEC": {"planned": "L2-REVIEW", "revise": "L2-SPEC", "resolved": "B"},
     "L2-REVIEW": {"reviewed": "B", "focus": "L2-REVIEW", "revise": "L2-SPEC"},

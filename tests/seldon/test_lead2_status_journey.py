@@ -285,7 +285,8 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
                 (workspace / "export.csv").write_text("inside\n15\n", encoding="utf-8")
             (workspace / "index.html").write_text(f"<h1>{count} places</h1>", encoding="utf-8")
             (workspace / "ledger.py").write_text(
-                "import sys\nfrom http.server import HTTPServer, SimpleHTTPRequestHandler\n"
+                "import subprocess, sys\nfrom http.server import HTTPServer, SimpleHTTPRequestHandler\n"
+                "subprocess.check_call([sys.executable, '-c', 'import sys; sys.stdout.write(\"Index ready\")'])\n"
                 "HTTPServer((sys.argv[1], int(sys.argv[2])), SimpleHTTPRequestHandler).serve_forever()\n",
                 encoding="utf-8")
             (workspace / "export.py").write_text("# CSV export entry point\n", encoding="utf-8")

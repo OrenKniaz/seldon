@@ -114,8 +114,6 @@ def _timeline(store, spec, revisions):
                          for ref, row in zip(order, plan)}
                 frames.append({**_frame("B", revision, rounds, reviews),
                                "activity": "Plan approved at B", "approved": True})
-            if event["event"] == "trace-progress":
-                detail = f"Review round {reviews} · fixing trace gaps"
         elif kind == "decision_request":
             gate = event["gate"]
         elif kind == "user_words" and not event.get("rejected"):

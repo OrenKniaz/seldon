@@ -27,27 +27,21 @@ WALK = obj(
 ACTIONS = obj(notes=array(obj(id=TEXT, sentence=TEXT, is_problem_why=TEXT, is_problem=BOOLEAN,
                               surprise_later_why=TEXT, surprise_later=BOOLEAN)))
 advance = partial(advance_run, transitions=LEAD2_RUN)
-BRIEF = """Use the real app and disposable sample data. Walk every assigned story once in this session.
-For must stories, exercise the main path and the planned tricky cases you can reproduce. For should
-and nice stories, walk the main path. Try invalid or interrupted actions that could quietly change a
-saved result, even on those stories. For handoffs, keep both roles in open sessions, act on one side,
-and record what the other side sees before reloading. Return one outcome and a specific observed
-result per story. Use can't-test-here only when you cannot exercise the story and say what is needed.
-If the main path works but a variant needs a real venue or device, record it separately as an untested
-note. For a broken story, give a short stable defect name (same as before when the same behavior fails).
-For visual paths, save one PNG with checks/kit/browser.cjs shot(name, page) per story you can capture.
-Use the supplied evidence folder as-is. Return the exact filename including the width suffix, or "".
-For other paths, describe the command or action and observed output.
-For a web app start it with checks/kit/serve.cjs and {preview: true}. Pass 127.0.0.1, {port} and
-{data}. Use the app's tracked, repo-relative Python or Node entry point directly. Keep
-SELDON_EVIDENCE_DIR as supplied so the helper saves preview-launch.json for the Open this build button.
-Report concrete rough edges, quality or trace gaps, documented setup problems and tests needing other
-conditions as notes. Do not do separate source, guide or quality proof passes. Give the tracked guide
-path if available. Try each review finding's reported action and return a note with its exact finding
-reference, affected story IDs and actual result. Return one note per recheck ID, including fixes
-that work. For a review summary, record what the review covered. Leave finding empty for new notes.
-For each verdict and note, explain whether a result was wrong or lost before answering.
-Bakery order list: yes if a saved order disappears, no if the list has cramped spacing."""
+BRIEF = """Walk every assigned story once on the real app with disposable data. For must, try the main
+path and reproducible planned tricky cases. For should and nice, try the main path. At every priority,
+try invalid or interrupted actions that could change saved results. For handoffs, keep both roles
+open and record what the other sees before reload. Give one verdict and observed result per story.
+Use can't-test-here only if the story cannot be exercised. Say what's needed. Record untested variants
+as notes when the main path works. Name defects briefly and reuse the name for the same failure.
+Save one PNG per visual story with checks/kit/browser.cjs shot(name, page). Return the exact filename
+with width suffix, or "". For other paths give the action and output. Start web apps from the tracked
+Python or Node entry point using checks/kit/serve.cjs, {preview: true}, 127.0.0.1, {port} and {data}.
+Keep SELDON_EVIDENCE_DIR so the helper records the launch for Open this build.
+Report concrete rough edges, trace gaps, setup problems and untested limits as notes, with no separate
+proof passes. Give the tracked guide path. Try each review finding's action. For each finding or recheck,
+including passing fixes, return its exact ID, stories and result. Record what review summaries covered.
+Leave finding empty for new notes. For each verdict and note, give why before wrong_or_lost_result.
+Bakery list: yes for a lost saved order, no for cramped spacing."""
 STEER_BRIEF = """Write one plain owner-facing sentence per exact ID. Say who can do what and what fails.
 Preserve observed outcomes and limits. Use everyday words for the behavior and its consequence.
 Explain before each yes/no. Bakery order list: is_problem yes if a clerk can change another
@@ -116,7 +110,7 @@ def _walk(store, snapshot, provider, target, request):
         stories = {ref: row for ref, row in stories.items() if ref in shown or
                    not shown and (not mapped or mapped.intersection(row["promises"]))}
     prior = store.read(request["prior"]) if request.get("prior") else {}
-    if prior and prior["revision"] != snapshot.revision:
+    if prior.get("revision") != snapshot.revision:
         prior = {}
     touched = set(request.get("stories", ())) if prior else stories.keys()
     chosen = {ref: row for ref, row in stories.items() if ref in touched or ref not in prior.get("results", {})}

@@ -20,9 +20,8 @@ def launch_recipe(evidence, files):
             return None
         value = json.loads(path.read_text(encoding="utf-8"))
         argv, ready = value["argv"], value["ready"]
-        if not (isinstance(argv, list) and all(isinstance(arg, str) for arg in argv)
-                and len(argv) >= 2 and isinstance(ready, str) and ready.startswith("/")
-                and not ready.startswith("//")):
+        if not (isinstance(argv, list) and argv and all(isinstance(arg, str) for arg in argv)
+                and isinstance(ready, str) and ready.startswith("/") and not ready.startswith("//")):
             return None
         runtime = Path(argv[0]).stem.casefold()
         args = [arg for arg in argv[1:] if arg not in ("-B", "-u")]
@@ -64,12 +63,13 @@ def start(project, scratch, candidate, launch):
     try:
         if not node:
             raise OSError("Node is required for the verified preview launcher.")
-        portable = {**launch, "argv": [node if runtime == "node" else sys._base_executable, *args]}
+        python = Path(sys._base_executable)
+        python = python.with_name("python.exe") if python.name.casefold() == "pythonw.exe" else python
+        portable = {**launch, "argv": [node if runtime == "node" else str(python), *args]}
         kit = Path(__file__).resolve().parents[1] / "kit" / "serve.cjs"
         env = desktop.environment({key: str(folder) for key in ("TMP", "TEMP", "TMPDIR")})
-        env.pop("SELDON_WALK_ACTIVITY", None)
-        env.pop("SELDON_EVIDENCE_DIR", None)
-        env.pop("SELDON_PREVIEW_RECIPE", None)
+        for key in ("SELDON_WALK_ACTIVITY", "SELDON_EVIDENCE_DIR", "SELDON_PREVIEW_RECIPE"):
+            env.pop(key, None)
         with (folder / "startup.log").open("ab") as log:
             process = subprocess.Popen(
                 [node, str(kit), json.dumps(portable), str(folder / "url")], cwd=workspace, env=env,

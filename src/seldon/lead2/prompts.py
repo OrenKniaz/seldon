@@ -26,14 +26,17 @@ TASK = {
     "LEAD2-ALIGN": """Start with one real job in the owner's world from start to finish.
 Use the walk to cover functions, operation (hosting, users, roles, logins, backups, offline, connections,
 cost) and appearance (device, style, key screen, language, direction, accessibility, reference).
-Preserve exact values, handoffs, races and recovery. Ask what happens to incomplete records when it
-matters. Default to the permissions each role needs for its stated work. Omit immaterial choices.
+Preserve exact values, handoffs, races and recovery. Default to the permissions each role needs.
+For micro and small dreams, also include the simplest stack as a choice here. Use the same doubt rule
+for it: ask only if a wrong guess is costly and her words don't settle it. Put it in questions even
+when assumed so it becomes a correctable assumption at B. Use words the owner understands.
 Use the recommendation as default. In her_words_quote, quote the owner's exact words that settle
 this specific default. Leave it empty when in doubt. Give a one-line why before each yes/no.
 Bakery order list: would_bet yes when the owner said "show today's pickups first"; no when she
 said nothing about who can cancel orders. Wrong_costly yes if guessing could let clerks cancel
 paid orders; no if guessing changes the button color.
-Size by agent effort, including local checks. Several connected stories can fit one session. Honor the chosen size.
+Size by builder effort. A local bakery queue with two staff phones, one database, safe retries,
+restart recovery and CSV reports is small. Medium needs several days of build work. Honor the owner's size.
 Use short story refs and links brief/reply → story and person → story, e.g. {"source":"brief","targets":["save"]}.
 Stories describe product behavior. Leave demonstrations and release decisions out of the spec.""",
     "LEAD2-STACK": """Recommend the stack for the accepted vision. Give each choice a plain one-line reason
@@ -41,37 +44,31 @@ and cite the need that drove it in words. Offer alternatives only when the answe
 For a plain owner explain the recommendation in business language. Incorporate the owner's latest reply.""",
     "LEAD2-SPEC": """Use the fewest stories that fully cover the owner's words. Keep connected steps, roles and
 recovery cases under the same job. Preserve their exact requirements as promises and checks.
-For each story: is it part of the app's core job (without it the app is
-pointless)? Give core_job_why and a JSON boolean, true or false. Bakery list: saving orders is core;
+For each story: is it part of the app's core job (without it the app is pointless)?
+Give core_job_why and a JSON boolean. Bakery list: saving orders is core;
 search and decorative icons are not. After false, explain nice: true for icons, false for search.
 For a core story, use nice_why: "", nice: false. Include every story, using its shown ref.
 A small app usually needs one delivery, including when its workflows share a screen or data.
 Split only when the person could use an outcome on its own before the rest. Group every story
 exactly once, in delivery order. Example: {"outcome":"Run the bakery order list","stories":["save","pickup"]}.
-For a product with a user interface, give a few
-quick visual directions for the key screens in mockups: describe layout, interaction and appearance so
-the owner can pick or mix them. Use an empty list when there is no visual choice to make.""",
-    "REVIEW": """What could disappear while this still passes? Fix missing behaviour and proof from the
-brief and owner replies in this answer. If a gap needs another reviewer after your edits, name it in
-unresolved_issue. Otherwise return "unresolved_issue": "". Use [] for unused arrays.
-Ask only for an unresolved material product choice. Example question IDs: id "pickup", recommended_id
-"counter", alternative_id "locker". Use those exact option_id values in option_* edits only. Link
-with exact shown refs or new refs declared in those edits. Leave access empty unless changed.""",
+Use mockups for distinct visual choices the owner can pick or mix. Give [] if the look is settled.""",
+    "REVIEW": """Fix behaviour and proof gaps now. Put future build and venue verification in checks or access.
+Use unresolved_issue only for a plan gap still preventing the build after your edits. If ready, give "".
+Ask only a material choice. Example: id "pickup", recommended_id "counter", alternative_id "locker".
+Use "counter" or "locker" as option_id. New refs belong to their option. Keep access [] unless changed.""",
 }
-SPEC_GUIDE = """Link each promise to planned code modules (design rows) and named tests with observable
-results (check rows). List build and judge access with suppliers; empty supplier means can't test here.
-Derive access from the planned walk.
-Mark deferred only for the specific venue checks the owner explicitly left for later.
-Leave access empty to keep a prior list or give the full revised list."""
-EDIT_GUIDE = """Use exact refs for edits and unique new refs for additions. Locked choices are already
-in the plan. Keep their refs out of all edit arrays, except to link them to promises. To change a
-locked choice, ask the owner. Retire a node once and leave its old links alone.
-Link brief, replies and roles → stories → promises → design, checks and walks. Group by source.
-Use [] for unused arrays. Each product question names two concrete options; code adds Other."""
-PROMISE_GUIDE = """Give each product behavior its own action, result and failure condition. When a
-story or promise describes Seldon's demos, independent walk or release readiness, retire it.
-Keep the product behavior and its expected result. Put proof under each behavior it verifies. Preserve exact choices and
-walk what each affected person sees through changes, interruptions and recovery. Exercise each usable output."""
+SPEC_GUIDE = """Link each promise to planned modules and observable checks. Derive access from the walk:
+give the full list with suppliers ("" means unavailable), or [] to keep it. Defer only by agreement."""
+EDIT_GUIDE = """Use exact refs to edit and new refs to add. Keep Seldon's process out of stories.
+Link brief/replies/roles → stories → promises → design/checks/walks. Locked refs go only in links.
+Retire once and leave old links alone. Each product question names two options; code adds Other.
+For an existing story s1, revise it in story or retire s1 and link the new story to its promises.
+Use replaces only to copy proof links from a shown promise: {"source":"v1","targets":["new-save"]}.
+Declare new-save in promise. Never invent v1 if the proposal shows no such promise. Otherwise use []."""
+PROMISE_GUIDE = """Give each behavior an action, result and failure condition. Walk each role through interruptions.
+For handoffs, check the other open session before reload. On phones, fit the result and 44px tap targets
+at 390 × 844 after a message. For an interrupted device action, plan a real restart and account switch:
+the next person can sign out, and only the original person can resolve the pending action once."""
 
 
 def question(kind, words, current, *, qualification=None, **facts):

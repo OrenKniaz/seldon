@@ -571,7 +571,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
                     role_refs.append(story)  # A redundant self-link is discarded before the batch is applied.
             else:
                 owner_reply = "Share a live list" if count == 2 else other
-                assert facts["Owner's chosen size"] == "small"
+                assert facts["Owner's chosen size"] == ("medium" if loose_answer else "small")
                 assert owner_reply in facts["Earlier replies"]
                 assert any(row["alternative"] == "Use a separate list"
                            for row in facts["Previous questions and options"])
@@ -585,9 +585,13 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
             questions[2].update(wrong_costly=False, wrong_costly_why="Only the display changes.")
             edits.extend(link(ref, story) for ref in role_refs + sources)
             rows = flat(edits)
+            if count == 3 and not loose_answer:
+                stack = material_question("Where should claims be stored?", "Keep claims in a local database")
+                stack.update(wrong_costly=False, wrong_costly_why="Both choices work on the tablet.")
             answer = dict(reason="A volunteer checks in a coat, hands off the claim, then retrieves it.",
                           **{kind: rows[kind] for kind in ("person", "story", "retire", "link", "unlink")},
-                          questions=[questions[count - 1]],
+                          questions=[questions[count - 1], stack] if count == 3 and not loose_answer
+                          else [questions[count - 1]],
                           aligned=count != 2, size="micro", size_reason="One coat desk")
             if count == 1 and loose_answer:
                 return json.dumps({**answer, "build_order": draft["build_order"]})
@@ -783,7 +787,8 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         assert run.step() == "A"
         spec = SpecStore(run.store)
         assert not spec.pins()  # Planner recommended alignment in the first round.
-        first = reply("list", ("q1", "o1", {}), ("size", "small", {}), words="Share a live list")
+        first = reply("list", ("q1", "o1", {}), ("size", "medium" if loose_answer else "small", {}),
+                      words="Share a live list")
         assert first["ask"]["groups"][0]["options"][-1]["label"] == "Other"
         assert [o["label"] for o in first["ask"]["groups"][0]["options"]] == [
             "Share a live list", "Use a separate list", "Other"]
@@ -811,21 +816,21 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         assert not spec.pins()
         a = reply("vision lock", ("round", "approve", {}))
         assert [g["id"] for g in a["ask"]["groups"]] == ["round"]
-        assert a["subject"]["size"] == "small"  # The scripted planner kept recommending micro.
-        assert run.step() == "L2-STACK"
+        assert a["subject"]["size"] == ("medium" if loose_answer else "small")
+        assert run.step() == ("L2-STACK" if loose_answer else "L2-SPEC")
         run.close()
         run = Run.reopen(product, provider, stale_user)
         spec = SpecStore(run.store)
-        assert run.step() == "L2-STACK"
-        with pytest.raises(decisions.Waiting):
-            run.step()
         if loose_answer:
+            assert run.step() == "L2-STACK"
+            with pytest.raises(decisions.Waiting):
+                run.step()
             stack = reply("change stack", ("q1", "o2", {}), ("round", "approve", {}))
             assert stack["ask"]["groups"][0]["options"][0]["label"] == "SQLite"
             assert run.step() == "L2-STACK" and run.step() == "L2-STACK"
-        stack = reply("stack", ("round", "approve", {}))
-        assert stack["gate"] == "Stack" and "Reopen claims without internet" in stack["ask"]["proposal"]
-        assert run.step() == "L2-SPEC"
+            stack = reply("stack", ("round", "approve", {}))
+            assert stack["gate"] == "Stack" and "Reopen claims without internet" in stack["ask"]["proposal"]
+            assert run.step() == "L2-SPEC"
         assert run.step() == "L2-SPEC"
         mockup = reply("visual", ("mockup", "queue", {}))
         assert mockup["gate"] == "Mockups"
@@ -863,6 +868,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         assert "Desk tablet — Volunteer lead" in offered
         assert "Check the label printer at the venue. — Deferred by agreement" in offered
         if not loose_answer:
+            assert "Keep claims in a local database" in offered.split("### Assumptions")[1]
             assert ("- **Claims** · pickup time and claim ID,\n"
                     "  - CSV · CSV rows\n  - print · print rows\n  - screen · screen rows") in offered
         assert "### Trace gaps" in offered
@@ -942,7 +948,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
                        for reason in row["remaining"])
         assert not any("editable design ID" in reason for _, _, row in run.store.records("lead2_correction")
                        for reason in row["remaining"])
-        assert calls == ["LEAD2-ALIGN"] * 3 + ["LEAD2-STACK"] * (2 if loose_answer else 1) + [
+        assert calls == ["LEAD2-ALIGN"] * 3 + ["LEAD2-STACK"] * (2 if loose_answer else 0) + [
             "LEAD2-SPEC", *expected_calls]
     finally:
         run.close()

@@ -1,5 +1,6 @@
 """C1/C8/C23/C27: fresh Lead from kickoff through the reviewed, approved spec."""
 
+from collections import Counter
 from dataclasses import replace
 from functools import partial
 
@@ -138,23 +139,15 @@ def _propose(store, spec, snapshot, answer_ref, answer, size, references):
 
 def _delivery_plan(rows, graph, references):
     stories = {ref: node["story"] for ref, node in graph.nodes.items() if node["kind"] == "story"}
-    assigned, order, issues = set(), [], []
-    for row in rows:
-        refs = []
-        for label in row.get("stories", ()):
-            ref = references.get(label.lstrip("$"), label)
-            if ref not in stories or ref in assigned:
-                issues.append(f"Delivery {row['outcome']!r}: {label!r} must be an exact story ref used once.")
-            assigned.add(ref)
-            refs.append(ref)
-        if not refs:
-            issues.append(f"Delivery {row['outcome']!r} needs its story refs.")
-        order.append(dict(outcome=row["outcome"], stories=refs))
+    order = [dict(outcome=row["outcome"], stories=[references.get(label.lstrip("$"), label)
+                  for label in row.get("stories", ())]) for row in rows]
+    assigned = Counter(ref for row in order for ref in row["stories"])
+    issues = [f"{ref!r}: use an exact story ref once." for ref, n in assigned.items() if ref not in stories or n != 1]
+    issues += [f"Delivery {row['outcome']!r} needs its story refs." for row in order if not row["stories"]]
     if missing := stories.keys() - assigned:
         issues.append("Include these stories once in build_order: " + "; ".join(stories[ref] for ref in sorted(missing)))
-    if not rows or issues:
-        return [{"outcome": "Complete product", "stories": list(stories)}], issues or ["Give one named delivery."]
-    return order, []
+    issues = issues or ([] if order else ["Give one named delivery."])
+    return ([dict(outcome="Complete product", stories=list(stories))] if issues else order), issues
 
 
 def _finish_plan(store, revision, source, answer_ref=None):
@@ -360,7 +353,8 @@ def _answer(store, spec, user, cursor):
                 else:
                     _finish_plan(store, revision, approval, subject.get("plan_answer"))
             elif gate == "A":
-                advance(store, "approve", approval, A=approval, leadPlan=None)
+                event = "approve-small" if receipt["size"] in ("micro", "small") else "approve"
+                advance(store, event, approval, A=approval, leadPlan=None)
             else:
                 advance(store, "approve", approval, B=approval)
         else:

@@ -240,7 +240,8 @@ def _returned(store, spec, source, answer, session):
                     last.get("acknowledged") or spec.pins()["B"])
     order, demos = _deliveries(store, store.read(cursor.B))
     shown = {row.get("delivery", row["outcome"]) for _, _, row in store.records("lead2_demo_point")}
-    reported_demos = {ref for value in answer["demos"] for ref in _delivery_refs(value)}
+    reported_demos = {ref for value in answer["demos"]
+                      for ref in DELIVERY_REF.findall(value.partition(":")[0].casefold())}
     new_demos = [ref for ref in demos
                  if ref not in shown and order[ref] not in shown and ref in reported_demos]
     entries = {entry.decode().split("\t", 1)[1] for entry in gitwork.tree_entries(workspace, candidate)
@@ -251,9 +252,9 @@ def _returned(store, spec, source, answer, session):
     if answer["outcome"] == "partial" and not new_demos:
         inference.correct(store, source, answer,
                           ["Keep going: return done, or blocked only with a question the person must answer."])
+    delivered = [] if store.read(source).get("interrupted") else execution["feedback"]
     if answer.get("correction_note"):
         errors.append(answer["correction_note"])
-    delivered = [] if store.read(source).get("interrupted") else execution["feedback"]
     body = {"candidate": candidate, "session": session, "revision": revision,
             "acknowledged": acknowledged, "outcome": answer["outcome"], "note": answer["note"],
             "demo": new_demos[0] if new_demos else None,
@@ -297,7 +298,3 @@ def _code_map(graph, files, rows):
                 elif path not in entry[key]:
                     entry[key].append(path)
     return list(entries.values()), errors
-
-
-def _delivery_refs(value):
-    return DELIVERY_REF.findall(value.partition(":")[0].casefold())
