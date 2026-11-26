@@ -11,7 +11,7 @@ QUESTION_FIELDS = dict(question=TEXT, recommended=TEXT, recommended_means=TEXT,
 QUESTIONS = array(obj(**QUESTION_FIELDS))
 MOCKUPS = array(obj(id=TEXT, label=TEXT, means=TEXT))
 DELIVERY = array(obj(outcome=TEXT, recommend_demo={"type": "boolean"}))
-ACCESS = array(obj(need=TEXT, supplier={"type": "string"}))
+ACCESS = array(obj(need=TEXT, supplier={"type": "string"}, deferred={"type": "boolean"}))
 ALIGN = obj(aligned={"type": "boolean"}, size=choice(*SIZES), size_reason=TEXT, questions=QUESTIONS,
             **{kind: SPEC_EDITS[kind] for kind in ("person", "story", "retire", "link", "unlink")})
 STACK = obj(stack=SPEC_EDITS["design"], questions=QUESTIONS)
@@ -24,8 +24,8 @@ Use the walk to cover functions, operation (hosting, users, roles, logins, backu
 cost) and appearance (device, style, key screen, language, direction, accessibility, reference).
 Preserve exact values, handoffs, races and recovery. Ask only unanswered consequential choices.
 Use the size fields, never a product question about size. Honor the chosen size and scope.
-Link brief and relevant earlier reply refs to each short-titled story. Link people to their stories.
-The owner decides readiness.""",
+Link brief and earlier replies to each short-titled product story. Link people to their stories.
+Keep demos and the owner's readiness decision as delivery choices.""",
     "LEAD2-STACK": """Recommend the stack for the accepted vision. Give each choice a plain one-line reason
 and cite the need that drove it in words. For a technical owner offer concrete alternatives with defaults.
 For a plain owner explain the recommendation in business language. Incorporate the owner's latest reply.""",
@@ -43,16 +43,17 @@ out of common edits. Leave build_order and access empty unless changed.""",
 SPEC_GUIDE = """Link each promise to planned code modules (design rows) and named tests with observable
 results (check rows). List build and judge access with suppliers; empty supplier means can't test here.
 Derive access from the planned walk.
+Mark deferred only for the specific venue checks the owner explicitly left for later.
 Leave access empty to keep a prior list or give the full revised list."""
 EDIT_GUIDE = """Use a short new ref to add or a shown ref to amend, one row per changed node.
 Retire only superseded nodes. Group links by source; replacements inherit old proof unless unlinked.
 Link brief, relevant earlier replies and roles to stories.
 Link stories to promises and promises to design and proof.
 Leave unused arrays empty. Each question names two concrete options; code adds Other."""
-PROMISE_GUIDE = """Give each promised outcome its own action, result and failure condition. Preserve exact
-owner choices. Plan concrete walks that show what each affected person can see and do through relevant
-interruptions and recovery. Exercise separately usable outputs individually. When one person changes a
-setting, have the affected person verify what changes downstream."""
+PROMISE_GUIDE = """Give each product behavior its own action, result and failure condition. When a
+story or promise is only about showing the build or making an acceptance decision, move it to delivery
+and retire the redundant rows. Put proof under each behavior it verifies. Preserve exact choices and
+walk what each affected person sees through changes, interruptions and recovery. Exercise each usable output."""
 
 
 def question(kind, words, current, *, qualification=None, **facts):
@@ -76,6 +77,9 @@ def question(kind, words, current, *, qualification=None, **facts):
             extra = REVIEW["properties"] if kind == "REVIEW" else {"mockups": MOCKUPS}
             fields = {**extra, **SPEC_EDITS, "build_order": DELIVERY, "access": ACCESS}
             prompt = "\n\n".join((prompt, SPEC_GUIDE, PROMISE_GUIDE, EDIT_GUIDE))
+    if kind in ("LEAD2-SPEC", "REVIEW") and not qualification:
+        facts["Delivery and acceptance"] = ("Build order carries the demonstrations. The independent walk checks "
+            "delivered behavior and records venue checks separately. The owner makes the readiness decision at C.")
     return {"kind": kind, "execution": {}, "schema": obj(answer=obj(reason=TEXT, **fields)),
             "renderContext": {"lead2": True},
             "prompt": prompt,

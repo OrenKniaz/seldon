@@ -7,7 +7,8 @@ from urllib.parse import quote
 
 from .. import gitwork
 from .owner_guide import owner_steps, owner_text
-from .walk import ASSESSMENTS, _issues, _unverified, verdict
+from .store import SpecStore
+from .walk_record import ASSESSMENTS, current_walk, limits, open_defects, read_walk
 
 LABEL = {"works": ("ok", "Works"), "broken": ("bad", "Broken"),
          "can't-test-here": ("cant", "Couldn’t test here"), "pending": ("cant", "Awaiting proof")}
@@ -47,7 +48,7 @@ def _story(story, steps, results, feedback, sent, failures):
     if failures:
         states.add("broken")
     state = next((key for key in ("broken", "pending", "can't-test-here") if key in states),
-                 "works" if steps else "pending")
+                 "works" if states else "pending")
     tone, label = LABEL[state]
     css = {"works": "pass", "broken": "fail"}.get(state, "")
     roles = "".join(f'<span class="role">{escape(role.partition(":")[0].replace(", ", " · ", 1))}</span>'
@@ -68,18 +69,15 @@ def _story(story, steps, results, feedback, sent, failures):
     return state, body
 
 
-def _contents(run, sent, name, scratch, current):
+def _contents(run, sent, name, scratch, current, limits):
     results = {row["promise"]: row["outcome"] for row in run["promises"]}
-    findings = _issues(run)
+    findings = run["open_defects"]
     cards = [_story(story, [s for s in run["steps"] if s["story"] == ref], results,
                     [f["note"] for f in run["feedback"] if f["story"] == ref],
                     sent and (not sent.get("stories") or ref in sent["stories"] or
                               set(story["promises"]).intersection(sent.get("promises", []))),
                     [f["finding"] for f in findings if f["story"] == ref and f["owner"] != "planner"])
              for ref, story in run["stories"].items()]
-    limits = [row["reason"] for row in _unverified(run)]
-    limits += [f["finding"] for f in run["findings"] if f["owner"].lower() == "access"]
-    limits = list(dict.fromkeys(limits))
     counts = [sum(state == key for state, _ in cards) for key in LABEL]
     counts[2] = len(limits)
     roles = list(dict.fromkeys(view["role"] for step in run["steps"] for view in step_views(step)))
@@ -106,14 +104,14 @@ def _contents(run, sent, name, scratch, current):
     overview = "".join(f'<div class="limits verification"><b>✗ Verification failed</b> {escape(f["finding"])}'
                        f'{" <b>Sent to the builder.</b>" if sent else ""}</div>'
                        for f in findings if not f["story"] and f["owner"] != "planner")
-    guide_worked = verdict(run, "guide")["outcome"] == "works"
+    guide_worked = run["verdicts"]["guide"]["outcome"] == "works"
     intro = ("A fresh tester opened the real app from a clean copy. Here is what happened, step by step."
              if guide_worked else "Here is what the independent tester observed.")
     hero = (f'<div class="hero"><div><h1>{escape(title)}</h1><p>{intro}</p>'
             f'<div class="score">{pills}</div></div>{launch}</div>')
     stale = ('<p class="limits">These results describe an earlier build.</p>' if not current else "")
     checks = "".join(f'<p><b>{label}:</b> {escape(assessment["reason"])}</p>'
-                     for key, label in ASSESSMENTS.items() if (assessment := verdict(run, key))["reason"]
+                     for key, label in ASSESSMENTS.items() if (assessment := run["verdicts"][key])["reason"]
                      and assessment["outcome"] == "works")
     unassigned = "".join(_step(row) for row in run["steps"] if not row["story"] and row["action"])
     pending = (f'<section class="story"><h2>Observations awaiting a story</h2>{unassigned}</section>'
@@ -124,14 +122,18 @@ def _contents(run, sent, name, scratch, current):
 def render(template, store, name, owner):
     runs = store.records("lead2_walk")
     if runs:
-        run = runs[-1][2]
+        current = current_walk(store, SpecStore(store, readonly=True).snapshot().revision)
+        ref, _, raw = runs[-1]
+        run = current or read_walk(store, ref, raw)
+        active = open_defects(store, run)
+        run["open_defects"] = [row for row in run.get("issues", []) if row.get("ref") in active]
         sent = next((row for _, _, row in reversed(store.records("lead2_walk_repair"))
                      if row["target"] == run["target"]), None)
         cursor = store.cursor()
         scratch = cursor.scratch
-        current = run["candidate"] == cursor.candidate
-        body = _contents(_owner_projection(run, scratch), sent, name, scratch, current)
-        if "verdicts" not in run:
+        unverified = [row["reason"] for row in limits(store, current)] if current else []
+        body = _contents(_owner_projection(run, scratch), sent, name, scratch, current, unverified)
+        if "verdicts" not in raw:
             answer = store.read(run["source"])["answer"]
             body += "".join(f'<p><b>{label}:</b> {escape(owner_text(answer[key], scratch))}</p>'
                             for key, label in ASSESSMENTS.items() if answer.get(key))
@@ -154,8 +156,8 @@ def _owner_projection(value, scratch):
 
 
 def shot(store, artifact):
-    if not any(view["artifact"] == artifact for _, _, run in store.records("lead2_walk")
-               for step in run["steps"] for view in step_views(step)):
+    if not any(view["artifact"] == artifact for ref, _, run in store.records("lead2_walk")
+               for step in read_walk(store, ref, run)["steps"] for view in step_views(step)):
         return None
     root = (Path(store.cursor().scratch) / "walk").resolve()
     path = (root / artifact).resolve()

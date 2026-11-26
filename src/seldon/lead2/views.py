@@ -107,7 +107,7 @@ def b_summary(graph, plan, groups, picked, *, changes=""):
                 if node.get("reason") == "accepted default"]
     gaps = review_issues(graph)
     limit = "Can't test here"
-    access = [f"- {row['need']} — {row['supplier'].strip() or limit}"
+    access = [f"- {row['need']} — {'Deferred by agreement' if row.get('deferred') else row['supplier'].strip() or limit}"
               for row in plan.get("access", [])]
     return "\n".join(["### Promises", *promises, "", "### Build order",
                       *(f"{i}. {delivery_name(item)}" for i, item in enumerate(order, 1)),

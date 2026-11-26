@@ -5,10 +5,10 @@ from itertools import pairwise
 from typing import Literal
 
 from .graph import PROOF, Delta, Graph
-from .store import Observation, Snapshot, SpecStore
+from .store import Observation, Snapshot, SpecStore, promise_changes
 
 Status = Literal["planned", "built", "proven-current", "failed", "stale",
-                 "not-verifiable-here", "changed-by-person"]
+                 "not-verifiable-here", "changed-by-person", "under review"]
 
 
 @dataclass(frozen=True)
@@ -27,49 +27,51 @@ def _history(spec: SpecStore, snapshot: Snapshot) -> list[Snapshot]:
     return history[::-1]
 
 
-def promise_status(spec: SpecStore, revision: int, commit: str | None) -> dict[str, Status]:
-    if commit is not None:
-        commit = commit.lower()
-    snapshot = spec.snapshot(revision)
+def _evidence(spec, snapshot, commit):
     history = _history(spec, snapshot)
-    position = {item.revision: index for index, item in enumerate(history)}
-    reopened: dict[str, Snapshot] = {}
-    for before, after in pairwise(history):
-        if after.mode != "wording-only":
-            for promise in Delta(before.graph, after.graph).reopens():
-                reopened[promise] = after
+    lineage = {item.revision for item in history}
+    reopened = {promise: after for before, after in pairwise(history)
+                for promise in promise_changes(Delta(before.graph, after.graph))}
+    previous, current = set(), {}
+    for obs in spec.observations():
+        if obs.revision not in lineage:
+            continue
+        for ref in obs.promises:
+            previous.add(ref)
+            if (ref in snapshot.graph.nodes and obs.commit == commit
+                    and obs.revision >= reopened.get(ref, history[0]).revision):
+                current.setdefault(ref, []).append(obs)
+    return reopened, previous, current
 
-    by_promise: dict[str, list[Observation]] = {}
-    for observation in spec.observations():
-        if observation.revision in position:
-            for promise in observation.promises:
-                by_promise.setdefault(promise, []).append(observation)
 
+def current_observations(spec, snapshot, commit):
+    """Keep the original witness and revision for evidence on the same candidate."""
+    return {obs.id for rows in _evidence(spec, snapshot, commit)[2].values() for obs in rows}
+
+
+def promise_status(spec: SpecStore, revision: int, commit: str | None) -> dict[str, Status]:
+    snapshot = spec.snapshot(revision)
+    reopened, previous, current = _evidence(spec, snapshot, commit.lower() if commit else None)
     result: dict[str, Status] = {}
     graph = snapshot.graph
     for promise, node in graph.nodes.items():
         if node["kind"] != "promise":
             continue
-        change = reopened.get(promise, history[0])
-        links = graph.follow(promise, PROOF)
-        previous = by_promise.get(promise, [])
-        current = [obs for obs in previous if obs.commit == commit and obs.witness in links
-                   and position[obs.revision] >= position[change.revision]]
-        # Re-observing a witness supersedes its old result. Build records carry no verdict.
-        latest = {obs.witness: obs.outcome for obs in current if obs.outcome != "built"}
-        outcomes = set(latest.values())
-        if "failed" in outcomes:
-            result[promise] = "failed"
-        elif "passed" in outcomes:
-            result[promise] = "proven-current"
-        elif "not-verifiable-here" in outcomes:
-            result[promise] = "not-verifiable-here"
-        elif previous and not current:
+        change = reopened.get(promise)
+        observations = current.get(promise, [])
+        walk = next((obs for obs in reversed(observations) if obs.walk_verdict), None)
+        outcomes = ({walk.outcome} if walk else
+                    set({obs.witness: obs.outcome for obs in observations if obs.outcome != "built"}.values()))
+        statuses = (("pending", "under review"), ("failed", "failed"), ("passed", "proven-current"),
+                    ("not-verifiable-here", "not-verifiable-here"))
+        if observed := next((status for outcome, status in statuses if outcome in outcomes), None):
+            result[promise] = observed
+        elif promise in previous and not observations:
             result[promise] = "stale"
-        elif change.mode == "scope-proposal" and change.accepted:
+        elif change and change.mode == "scope-proposal" and change.accepted:
             result[promise] = "changed-by-person"
         else:
-            result[promise] = "built" if current else "planned"
+            result[promise] = "built" if observations else "planned"
     return result
 
 
@@ -84,7 +86,7 @@ def _trace(spec: SpecStore, observation: Observation) -> Trace:
     history = _history(spec, snapshot)
     approvals = {}
     for before, after in pairwise(history):
-        if after.mode == "scope-proposal" and Delta(before.graph, after.graph).reopens() & refs:
+        if after.mode == "scope-proposal" and promise_changes(Delta(before.graph, after.graph)) & refs:
             approval = spec.decision("scope", after.revision)
             if approval:
                 approvals["scope", after.revision] = approval

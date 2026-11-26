@@ -30,7 +30,8 @@ OBSERVATIONS = """
 
 OBSERVATION_BODY = obj(
     promises=array(TEXT, 1), witness=TEXT, commit=TEXT, session=TEXT,
-    outcome=choice("built", "passed", "failed", "not-verifiable-here"), result=TEXT,
+    outcome=choice("built", "passed", "failed", "not-verifiable-here", "pending"), result=TEXT,
+    walk_verdict={"type": "boolean"},
 )
 
 
@@ -63,6 +64,7 @@ class Observation:
     session: str
     outcome: str
     result: str
+    walk_verdict: bool = False
 
 
 class Conflict(ValueError):
@@ -136,7 +138,7 @@ class SpecStore:
             mode = batch["mode"]
             if graph == current.graph:
                 return EditResult(current.revision, True)
-            mode = ("scope-proposal" if self.scope_changes(delta) else
+            mode = ("scope-proposal" if mode == "scope-proposal" or self.scope_changes(delta) else
                     "wording-only" if mode == "wording-only" and _wording_only(delta) else "substantive")
             row = self._store.db.execute("""
                 INSERT INTO lead2_spec(parent, graph, mode, author, reason, time) VALUES (?, ?, ?, ?, ?, ?)
@@ -236,9 +238,9 @@ class SpecStore:
             return result.revision
 
     def observe(self, revision: int, *, promises: list[str], witness: str, commit: str,
-                session: str, outcome: str, result: str) -> Observation:
+                session: str, outcome: str, result: str, walk_verdict=False) -> Observation:
         body = dict(promises=promises, witness=witness, commit=commit, session=session,
-                    outcome=outcome, result=result)
+                    outcome=outcome, result=result, walk_verdict=walk_verdict)
         validate(body, OBSERVATION_BODY, "observation")
         if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit, re.IGNORECASE):
             raise ValueError("Use the observed candidate's full Git commit ID.")
@@ -278,9 +280,7 @@ class SpecStore:
         if "A" not in pins:
             return set()
         locked = self.snapshot(pins["A"]).graph.nodes if "B" not in pins else None
-        return {ref for ref in delta.nodes if (locked is None or ref in locked)
-                and (delta.after.nodes.get(ref) or delta.before.nodes[ref])["kind"] == "promise"
-                and not _presentation_only(delta.before.nodes.get(ref), delta.after.nodes.get(ref))}
+        return promise_changes(delta) & locked.keys() if locked is not None else promise_changes(delta)
 
     def _check_approval(self, gate: str, revision: int, approval: str) -> dict:
         receipt = self._record("approval", approval)
@@ -316,6 +316,12 @@ def _accepted_defaults(request):
             words=option["means"],
         )))
     return edits
+
+
+def promise_changes(delta):
+    return {ref for ref in delta.nodes
+            if (delta.after.nodes.get(ref) or delta.before.nodes[ref])["kind"] == "promise"
+            and not _presentation_only(delta.before.nodes.get(ref), delta.after.nodes.get(ref))}
 
 
 def _wording_only(delta: Delta) -> bool:

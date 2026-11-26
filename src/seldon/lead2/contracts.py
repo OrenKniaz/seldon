@@ -66,7 +66,7 @@ def typed_reply(body, schema):
 
 
 def normalise_edits(graph, answer, references, *, prefix=""):
-    """Resolve shown references and omit unsupported relations."""
+    """Resolve shown references and identify edits that cannot be applied."""
     from .graph import CONTEXT, LINEAGE, PROOF
 
     def resolve(label):
@@ -78,18 +78,19 @@ def normalise_edits(graph, answer, references, *, prefix=""):
         edits = [dict(op="amend", id=ref,
                       node={**graph.nodes[ref], "result": row["result"], "not_met_if": row["not_met_if"]})
                  for ref, row in rows.items() if graph.nodes.get(ref, {}).get("kind") == "promise"]
-        return edits, len(answer["amendments"]) - len(edits)
+        return edits, [f"Amendment {ref!r}: use an existing promise ID." for ref in rows
+                       if graph.nodes.get(ref, {}).get("kind") != "promise"]
 
     kinds = {ref: node["kind"] for ref, node in graph.nodes.items()}
     fixed = {ref for ref, node in graph.nodes.items()
              if node["kind"] == "dream" or node.get("reason") == "accepted default"}
-    edits, seen, ignored = [], set(), 0
+    edits, seen, errors = [], set(), []
     for kind, fields in NODE_BODIES.items():
         for row in answer.get(kind, ()):
             ref = resolve(row["ref"])
             if (ref == "$" or ref in fixed or ref in seen or kinds.get(ref, kind) != kind
                     or (kind == "design" and row["reason"] == "accepted default")):
-                ignored += 1
+                errors.append(f"{kind} {row['ref']!r}: use a distinct new name or an editable {kind} ID.")
                 continue
             seen.add(ref)
             node = {"kind": kind, **{key: row[key] for key in fields["properties"]}}
@@ -105,10 +106,11 @@ def normalise_edits(graph, answer, references, *, prefix=""):
             edits.append(dict(op="retire", id=ref))
             del kinds[ref]
         else:
-            ignored += 1
+            errors.append(f"Retire {label!r}: use an existing editable ID.")
     for row in answer.get("replaces", ()):
         original = resolve(row["source"])
         if graph.nodes.get(original, {}).get("kind") != "promise":
+            errors.append(f"Replace {row['source']!r}: use an existing promise ID.")
             continue
         for label in row["targets"]:
             replacement = resolve(label)
@@ -116,6 +118,8 @@ def normalise_edits(graph, answer, references, *, prefix=""):
                 edits.extend(dict(op="link", source=replacement, target=target)
                              for source, target in graph.links if source == original and target in kinds
                              and graph.kinds((source, target)) in PROOF)
+            else:
+                errors.append(f"Replacement {label!r}: use a declared promise ID.")
     allowed = LINEAGE | CONTEXT
     for op in ("unlink", "link"):
         for row in answer.get(op, ()):
@@ -125,6 +129,6 @@ def normalise_edits(graph, answer, references, *, prefix=""):
                 pair = kinds.get(source), kinds.get(target)
                 if pair in allowed or pair[::-1] in allowed:
                     edits.append(dict(op=op, source=source, target=target))
-                else:
-                    ignored += 1
-    return edits, ignored
+                elif source != target or source not in kinds:
+                    errors.append(f"{op} {row['source']!r} to {label!r}: use declared IDs of compatible kinds.")
+    return edits, errors

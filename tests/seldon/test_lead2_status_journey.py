@@ -228,6 +228,7 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
     from seldon.lead2 import SpecStore
 
     builds = walks = 0
+    limit_requests = []
     added_words = "Both doors should see the shared count without asking the lead."
 
     def build_and_walk(question):
@@ -249,14 +250,23 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
             return json.dumps(dict(outcome="done", acknowledged=True,
                                    code_map=[dict(promise=promise, modules=["index.html"], tests=["ledger.py"])]))
         if question["kind"] == "LEAD2-WALK-STEER":
+            if builds == 2:
+                subject, = question["facts"]["Uncovered"]
+                assert any(row.get("promise") == subject for row in question["facts"]["Findings"])
+                return json.dumps(dict(limit="Venue Wi-Fi was unavailable.", owner_decision="access",
+                                       owner_promises=[subject]))
             spec = SpecStore(run.store)
             spec.apply(dict(revision=spec.snapshot().revision, mode="substantive", reason="Record the owner note",
                             edits=[dict(op="add", name="context", node=dict(kind="dream", words=added_words))]),
                        author="owner")
-            return json.dumps(dict(direction="Complete the owner guide and verification evidence."))
+            return json.dumps(dict(direction="Complete the owner guide and verification evidence.",
+                                   repair=question["facts"]["Repairable"]))
         walks += 1
         facts = question["facts"]
-        evidence = facts["Evidence directory"]
+        if saved := facts.get("Saved observations"):
+            assert any(row.get("reason") == "Both browsers saw 15" for row in saved.values())
+            return "{}"
+        evidence = question["execution"]["evidence"]
         workspace = question["execution"]["walk"]
         check = '''
 const serve = require('./checks/kit/serve.cjs');
@@ -277,28 +287,39 @@ serve([process.argv[1], 'ledger.py', '127.0.0.1', '{port}'], url => browser(url.
         story = next(iter(facts["Stories to walk"]))
         promise = next(iter(facts["Promises to judge"]))
         action = "Compare both door counts"
-        if builds == 2:
+        if builds == 2 and walks == 2:
             spec = SpecStore(run.store)
             head = spec.snapshot()
             words = next(ref for ref, node in head.graph.nodes.items() if node.get("words") == added_words)
             spec.apply(dict(revision=head.revision, mode="substantive", reason="Link the owner note to the story",
                             edits=[dict(op="link", source=words, target=story)]), author="planner")
         return json.dumps(dict(
-            steps=[dict(story="" if builds == 2 else story, role=role, action=action,
+            steps=[dict(story=story, role=role, action=action,
                         expected="See 15", actual="Saw 15", outcome="works", screenshot=filename)
                    for role, filename in (("Jo", "jo-390.png"), ("Ben", "ben-1280.png"))],
-            promises=[dict(promise=promise, outcome="works", reason="Both browsers saw 15")],
-            limits=[dict(story=story, reason="Venue Wi-Fi was unavailable.")],
-            findings=([dict(story=story, owner="Browser verification",
-                            finding=f"The verification failed in {evidence}/walk.cjs.")] if builds == 1 else []),
-            guide="works", guide_path="OWNER WALK.md", code_map="works",
-            quality="broken" if builds == 1 else "works",
+            promises=[dict(promise=promise, outcome="broken" if builds == 1 else "pending",
+                           reason="Both browsers saw 15", evidence=["jo-390.png"])] + [
+                dict(promise=key, outcome="broken" if key == "quality" and builds == 1 else "works",
+                     reason="Checked the local walk and source.", evidence=["jo-390.png"])
+                for key in ("guide", "code_map", "quality")],
+            rechecks=[dict(ref=ref, outcome="resolved", reason="Both browsers saw 15 and the guide opened",
+                           evidence=["jo-390.png"])
+                      for ref in facts["Defects to recheck"]],
+            findings=([dict(story=story, promise=promise, owner="Browser verification",
+                            finding=f"The verification failed in {evidence}/walk.cjs.", must_fix=True)] if builds == 1 else []),
+            guide_path="OWNER WALK.md",
             sample_job=f"Open two browser views in {evidence}."))
 
     from seldon.decisions import Waiting
 
     def wait(item):
         if item["gate"] == "Walk decision" and "limits" in item["subject"]:
+            assert "Venue Wi-Fi was unavailable." in item["ask"]["proposal"]
+            subject = item["subject"]
+            expected, = (ref for ref, node in SpecStore(run.store).snapshot().graph.nodes.items()
+                         if node["kind"] == "promise")
+            assert subject["promises"] == subject["limits"][0]["promises"] == [expected]
+            limit_requests.append(expected)
             return {"request": item["request"], "replyId": "venue-limit",
                     "selections": [{"groupId": "limits", "optionId": "allow"}]}
         raise Waiting()
@@ -316,7 +337,13 @@ serve([process.argv[1], 'ledger.py', '127.0.0.1', '{port}'], url => browser(url.
                 assert "ledger.py" in archive.namelist()
                 assert "OWNER WALK.md" not in archive.namelist()
         assert run.run().state == "C"
-        assert builds == walks == 2
+        assert builds == 2 and walks == 3
+        assert len(limit_requests) == 1
+        limit, = tool("state", run=str(product))["build"]["unverified"]
+        assert limit["agreed"] and limit["promises"] == limit_requests
+        assert read_status()["unverified"] == [{"text": "Venue Wi-Fi was unavailable."}]
+        assert tool("state", run=str(product))["waitingFor"]["ask"]["proposal"].count(
+            "Venue Wi-Fi was unavailable.") == 1
     browser = Path(frontdoor.__file__).with_name("kit") / "browser.cjs"
     check = '''
 const assert = require('node:assert/strict');
@@ -357,3 +384,10 @@ browser(process.argv[2], async ({page}) => {
 }).catch(error => {console.error(error);process.exitCode=1;});
 '''
     subprocess.run(["node", "-e", check, str(browser), urljoin(page, "walk")], check=True)
+    request = tool("state", run=str(product))["waitingFor"]["request"]
+    tool("answer", run=str(product), request=request, replyId="person-tried-the-build",
+         selections=[{"groupId": "round", "optionId": "approve"}])
+    with closing(Run.reopen(product, build_and_walk, lambda _: frontdoor.read_answer(
+            frontdoor.side(product) / "answer.json"))) as run:
+        assert run.run().state == "ACCEPTED"
+    assert tool("state", run=str(product))["outcome"]["acceptedByPerson"] is True

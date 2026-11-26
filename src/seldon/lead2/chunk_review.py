@@ -43,7 +43,7 @@ def sent_feedback(store, last):
     return set(last.get("feedback", [])) | set(json.loads(current[0]) if current and current[0] else [])
 
 
-def venue_limits(store):
+def review_limits(store):
     refs = {ref for ref, _, _ in progress(store).values()}
     limits = []
     for _, _, row in store.records("lead2_chunk_review"):

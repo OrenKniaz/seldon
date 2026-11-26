@@ -100,9 +100,8 @@ def _propose(store, spec, snapshot, answer_ref, answer, size, references):
                      summary=answer["reason"], stack=answer_ref)
         return
     reviewing = cursor.state == "L2-REVIEW" and not cursor.requestedChange
-    edits, ignored = normalise_edits(snapshot.graph, answer, references)
-    if ignored:
-        store.record("lead2_normalisation", {"answer": answer_ref, "ignoredEdits": ignored})
+    edits, errors = normalise_edits(snapshot.graph, answer, references)
+    inference.correct(store, answer_ref, answer, errors)
     updated = snapshot
     if edits:
         batch = {"revision": snapshot.revision, "reason": answer["reason"].strip() or "Plan the product",

@@ -33,18 +33,14 @@ def step(store, spec, provider, user, pool, pending):
     before = spec.snapshot(last.get("acknowledged") or approval["subject"]["lead2_revision"])
     snapshot = spec.snapshot()
     feedback = _feedback(store, last)
-    repairs = {ref: row["direction"] for ref, _, row in store.records("lead2_walk_repair")
+    repairs = {ref: row for ref, _, row in store.records("lead2_walk_repair")
                if ref not in last.get("feedback", [])}
-    feedback.update(repairs)
+    feedback.update({ref: row["direction"] for ref, row in repairs.items()})
     offered = {row["demo"] for _, _, row in store.records("lead2_walk_target")}
-    demo = next((ref for ref, _, _ in store.records("lead2_demo_point") if ref not in offered), None)
-    if demo and not pending and not feedback:
-        delivery = store.read(demo)
-        ref = next((ref for ref, _, row in reversed(store.records("lead2_return"))
-                    if row["code_map"] and row["candidate"] == delivery["candidate"]
-                    and row["revision"] == delivery["revision"]),
-                   cursor.leadReturn)
-        return _walk(store, ref, demo)
+    points = store.records("lead2_demo_point")
+    demo = next((ref for ref, _, _ in points if ref not in offered), None)
+    if demo and not repairs:
+        return _walk(store, store.read(demo).get("return", cursor.leadReturn), demo)
     limits = [obs.result for obs in spec.observations() if obs.outcome == "not-verifiable-here"]
     if last.get("outcome") == "done" and not feedback and pending:
         next(iter(pending.values())).result()
@@ -59,21 +55,22 @@ def step(store, spec, provider, user, pool, pending):
     if task is None:
         return
     order, demos = _deliveries(store, approval)
+    next_demo = next((ref for ref in demos if ref not in {row.get("delivery") for _, _, row in points}), None)
     prompt = (f"Continue: {task}" if session else
               build_brief.brief(snapshot.graph, order, demos, store.read(cursor.kickoff)["words"]))
     facts = {"Delivery references": order, "Chosen demo references": demos,
-             "Delivery": "Return done when the implementation and locally runnable checks are complete."}
+             "Next return": (f"Return partial at {next_demo}, with that ID in demos, before building later work."
+                             if next_demo else "Return done when the product and local checks are complete.")}
+    if repairs:
+        facts["Repair records"] = {ref: {**row, "findings": {key: store.read(key) for key in row["defects"]}}
+                                   for ref, row in repairs.items()}
     if snapshot.revision != before.revision:
         facts["Accepted changes since your last acknowledgement"] = Delta(
             before.graph, snapshot.graph).describe(references=True) or ["Apply the owner's current wording."]
     if feedback:
         facts["Review follow-up"] = list(feedback.values())
     if limits:
-        facts["Owner direction for acceptance"] = [
-            "Keep building. Return done once the implementation and locally runnable checks are complete.",
-            "The following checks remain unverified until C. Do not wait for them or change the agreed spec.",
-            *limits,
-        ]
+        facts["Earlier checks still to verify"] = limits
     question = build_brief.question("WORK", build_brief.WORK, prompt, **facts)
     question["execution"] = {"cwd": str(workspace), "session": session, "lead": cursor.B,
                              "revision": snapshot.revision, "feedback": list(feedback)}
@@ -219,12 +216,11 @@ def _returned(store, spec, source, answer, session):
     reported_demos = {ref for value in answer["demos"] for ref in _delivery_refs(value)}
     new_demos = [ref for ref in demos
                  if ref not in shown and order[ref] not in shown and ref in reported_demos]
-    for ref in new_demos:
-        store.record("lead2_demo_point", {"delivery": ref, "outcome": order[ref],
-                                        "candidate": candidate, "revision": revision})
     entries = {entry.decode().split("\t", 1)[1] for entry in gitwork.tree_entries(workspace, candidate)
                if entry.startswith((b"100644 blob ", b"100755 blob "))}
-    code_map = _code_map(graph, entries, answer["code_map"])
+    code_map, errors = _code_map(graph, entries, answer["code_map"],
+                                 answer["outcome"] == "done" and answer["acknowledged"])
+    inference.correct(store, source, answer, [] if store.read(source).get("interrupted") else errors)
     _chunks(store, answer["chunks"], order, revision, candidate)
     delivered = [] if store.read(source).get("interrupted") else execution["feedback"]
     body = {"candidate": candidate, "session": session, "revision": revision,
@@ -233,6 +229,8 @@ def _returned(store, spec, source, answer, session):
             "code_map": code_map,
             "feedback": sorted(set(last.get("feedback", []) + delivered))}
     ref = store.record("lead2_return", body)
+    for demo in new_demos:
+        store.record("lead2_demo_point", {"delivery": demo, "outcome": order[demo], "return": ref})
     store.cursor(replace(cursor, leadReturn=ref, candidate=candidate, failure=""))
 
 
@@ -247,17 +245,30 @@ def _capture(workspace):
     return candidate
 
 
-def _code_map(graph, files, rows):
-    entries = {}
+def _code_map(graph, files, rows, done):
+    aliases = build_brief.promise_refs(graph)
+    promises = set(aliases.values())
+    entries, errors = {}, []
     for row in rows:
-        ref = row["promise"]
-        if graph.nodes.get(ref, {}).get("kind") != "promise":
+        label = row["promise"]
+        ref = aliases.get(label, label)
+        if ref not in promises:
+            errors.append(f"Map row {label!r}: give one shown promise ID for those files.")
             continue
         entry = entries.setdefault(ref, {"promise": ref, "modules": [], "tests": []})
         for key in ("modules", "tests"):
-            paths = (path.replace("\\", "/").removeprefix("./") for path in row[key])
-            entry[key] = list(dict.fromkeys([*entry[key], *(path for path in paths if path in files)]))
-    return [entry for entry in entries.values() if entry["modules"] or entry["tests"]]
+            for raw in row[key]:
+                path = raw.replace("\\", "/").removeprefix("./")
+                if path not in files:
+                    errors.append(f"{ref} {key}: replace {raw!r} with a tracked repository-relative path.")
+                elif path not in entry[key]:
+                    entry[key].append(path)
+    if done:
+        missing = [label for label, ref in aliases.items()
+                   if not all(entries.get(ref, {}).get(key) for key in ("modules", "tests"))]
+        if missing:
+            errors.append("Provide tracked modules and tests for " + ", ".join(missing) + ".")
+    return list(entries.values()), errors
 
 
 def _delivery_refs(value):

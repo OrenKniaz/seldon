@@ -7,6 +7,19 @@ from dataclasses import replace
 from . import answers, features, questions
 from .answers import ConsumptionFailure, Mismatch, normalised, recorder
 from .providers import Deadline, Frozen, ProviderFailure, ResumeUnavailable, lead2_call, role_for
+from .schema import obj
+
+
+def correct(store, source, answer, errors):
+    """Return mechanical errors once, retaining the model's explanation and unchecked evidence."""
+    attempt = store.read(source)["attempt"]
+    if errors and "correction_note" not in answer and any(
+        row["attempt"] == attempt for _, _, row in store.records("call_session")
+    ):
+        raise Mismatch("answer", "\n".join(dict.fromkeys(errors)))
+    if errors or "correction_note" in answer:
+        store.record("lead2_correction", {"answer": source, "remaining": errors,
+                                          "note": answer.get("correction_note", "")})
 
 
 def call(store, provider, question, unit=None, check=lambda answer: None, retries=2, binding=None,
@@ -26,7 +39,7 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
         nonlocal attempt, session
         if unit:
             current = {**current, "execution": {**current["execution"], "session": store.unit(unit).thread}}
-        previous, resumed_frozen = None, False
+        previous, resumed_frozen = attempt if correction is not None and fresh else None, False
         for recovery in range(4 if fresh else 3):
             if lead or walk or fresh:
                 current = {**current, "execution": {**current["execution"], "session": session}}
@@ -79,7 +92,7 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                     if resumed_frozen:
                         raise
                     resumed_frozen = True
-                    if session and kind == "WORK":
+                    if session and kind == "WORK" and correction is None:
                         current = {**current,
                                    "prompt": "Continue from the existing files and your last step."}
                     previous = attempt
@@ -183,6 +196,18 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
             store.record("consumption_failure", {"attempt": attempt, "kind": kind,
                 "field": failed_field, "reason": reason, "exceptionType": type(error).__name__,
                 "answer": answer})
+            if fresh and isinstance(error, Mismatch) and correction is None and session:
+                schema = original["schema"]
+                flat = original["renderContext"].get("flatAnswer")
+                fields = (schema if flat else schema["properties"]["answer"])["properties"]
+                corrected = obj(**fields, correction_note={"type": "string"})
+                prompt = (f"{reason}\nReturn your previous answer with those fixes. If a fix cannot be made, "
+                          "omit that item and give the reason and what you observed in correction_note. "
+                          "Otherwise leave correction_note empty.")
+                correction, retained = reason, None
+                question = {**original, "prompt": prompt, "schema": corrected if flat else obj(answer=corrected),
+                            "facts": {} if flat else {"Owner's words": ""}}
+                continue
             if (normalise is not None or correction is not None or not features.enabled("answerRepair")
                     or (walk or kind == "RECEIPT") and features.enabled("leadPlausibleGuard")):
                 raise ConsumptionFailure(f"Seldon's fault using {kind}.{failed_field}: {reason}") from error

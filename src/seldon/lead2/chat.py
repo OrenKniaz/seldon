@@ -1,7 +1,7 @@
 """C8/C20: present fresh Lead choices through the existing bound chat records."""
 
 import time
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 
 from .. import decisions
@@ -60,8 +60,10 @@ def state(store, cursor, run, active, submitted=False, full_spec=False):
         })
         spec = SpecStore(store)
         result["build"] = spec.build_status()
-        result["build"]["unverified"] = [asdict(obs) for obs in spec.observations()
-                                         if obs.outcome == "not-verifiable-here"]
+        from .walk_record import current_walk, limits
+
+        walk = current_walk(store, spec.snapshot().revision)
+        result["build"]["unverified"] = limits(store, walk) if walk else []
     if cursor.state == BUILT:
         result.update(status="BUILT", next="The builder returned the candidate and its code map.")
     elif cursor.state in ("ACCEPTED", "SCRIPTED_C"):

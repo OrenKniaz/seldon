@@ -63,6 +63,8 @@ def test_chat_controls_and_continuity_golden(tmp_path, scalar_align, capsys):
         (slot / 'fake.py').write_text(FAKE.replace('SOURCE_PATHS', repr(paths)), encoding='utf-8')
         setup = Scripted(slot, 'kill-work', 2).setup
         setup['codexCommand'] = [sys.executable, '-B', str(slot / 'fake.py'), str(slot)]
+        setup['scriptedUser'] = False  # This fixture relays a person's choices over MCP.
+        setup.pop('userOrigin', None)
         return setup
 
     async def journey():

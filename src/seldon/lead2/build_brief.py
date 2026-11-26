@@ -1,5 +1,7 @@
 """C1/C9/C13: the plain builder brief and flat build answers."""
 
+from collections import Counter
+
 from ..schema import REFS, TEXT, array, choice, obj
 from .graph import PROOF
 from .views import _details, _stories
@@ -18,15 +20,22 @@ GUIDE = """Build the whole product in this folder.
 Keep the implementation readable, with one clear way to use and run it.
 Write and run the planned tests through real behavior. Git-ignore runtime data, caches and test artifacts.
 Use local sample data for ordinary interruption, restart and restore checks. For web checks,
-use the headless browser and local app helpers in checks/kit. Give the guide the standard
-startup command and explain how to choose a loopback address, port and separate sample data location.
-Continue through the build order without waiting for a review or demo.
+use the headless browser and local app helpers in checks/kit. Give the guide a tracked Python or Node
+startup command that accepts loopback address, port and separate sample data as command-line arguments.
+If a demo is the next return point, build through that delivery and return partial with its ID
+before starting the remaining work. Seldon shows the saved build and resumes you automatically.
 When a delivery is newly finished or fixed, report its delivery ID and runnable check argv, one row per check.
 Report selected demos by delivery ID when ready. On done or a selected demo, give the full map of actual
 module and test paths for the delivered promises, keyed by promise ID. Include the fresh-copy guide
 and a sample job in the product.
 Return done on completion, partial with the next step, or blocked with the actual question.
 Apply any accepted changes in the message and set acknowledged to true when you have taken them on."""
+
+
+def promise_refs(graph):
+    refs = [ref for ref, node in graph.nodes.items() if node["kind"] == "promise"]
+    prefixes = Counter(ref[:8] for ref in refs)
+    return {ref[:8] if prefixes[ref[:8]] == 1 else ref: ref for ref in refs}
 
 
 def brief(graph, order, demos, kickoff):
@@ -42,13 +51,13 @@ def brief(graph, order, demos, kickoff):
     lines += ["Design and stack", *(f"{c} — {graph.nodes[ref]['reason']}" for ref, c in design.items()),
               *(n["contract"] for n in graph.nodes.values() if n["kind"] == "interface"),
               "Planned code and tests"]
-    for ref, promise in promises.items():
+    for label, ref in promise_refs(graph).items():
         related = graph.follow(ref, PROOF)
-        lines += [f"{ref}: {promise['result']}",
+        lines += [f"{label}: {promises[ref]['result']}",
                   *(decision for key, decision in design.items() if key in related),
                   *(_details(node) for key, node in graph.nodes.items()
                     if key in related and node["kind"] == "check")]
-    lines += ["Build order", *order,
+    lines += ["Build order", *(f"{ref}: {name}" for ref, name in order.items()),
               "Chosen demos", *(demos or ["None chosen."]), "How we work", GUIDE]
     return "\n\n".join(lines)
 

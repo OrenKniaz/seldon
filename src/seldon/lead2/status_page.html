@@ -399,9 +399,7 @@ function showBuild(frame, current) {
     const details = element("details");
     details.open = true;
     details.append(element("summary", `Can’t verify here · ${data.unverified.length}`));
-    for (const {label, text} of data.unverified) {
-      details.append(element("strong", label), element("p", text));
-    }
+    for (const {text} of data.unverified) details.append(element("p", text));
     limits.append(details);
   }
 }

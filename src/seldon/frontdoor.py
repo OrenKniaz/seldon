@@ -223,7 +223,7 @@ def drive(run):
         loop.close()
 
 
-def server(setup=providers.setup_facts):
+def server(setup=None):
     from mcp.server import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError
 
@@ -264,8 +264,9 @@ def server(setup=providers.setup_facts):
         root = side(project)
         for name in ("calls", "evidence", "temp"):
             (root / name).mkdir(parents=True, exist_ok=True)
-        facts = {**setup(), "scriptedUser": False, "userOrigin": "user's words relayed by the provider chat",
-                 "evidenceDirectory": str(root / "evidence")}
+        person = {"scriptedUser": False, "userOrigin": "user's words relayed by the provider chat"}
+        facts = {**providers.setup_facts(), **person} if setup is None else {**person, **setup()}
+        facts["evidenceDirectory"] = str(root / "evidence")
         Run(project, root / "workers", dream, facts, None, None).close()
         result = spawn(project)
         if result.get("mode") == chat.MODE:

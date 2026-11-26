@@ -12,7 +12,7 @@ from .build import _deliveries
 from .chunk_review import feature_status, progress, sent_feedback
 from .evidence import promise_status
 from .store import SpecStore
-from .walk import _unverified
+from .walk_record import current_walk, limits, read_walk
 
 BUILD_STAGES = {LEAD2_WALK: 7, "C": 8, "ACCEPTED": 8, "SCRIPTED_C": 8}
 STAGE = {"NEW": 0, "ALIGN": 1, "A": 1, "L2-STACK": 2, "L2-SPEC": 3, "L2-REVIEW": 4,
@@ -60,7 +60,7 @@ def _build_frame(state, order, chunks, sent, started):
                 activity=activity, built=complete)
 
 
-def _timeline(store, revisions):
+def _timeline(store, spec, revisions):
     state, gate, revision, rounds, reviews = "NEW", "", 0, 1, 0
     frames = [_frame(state, revision, rounds, reviews)]
     history = deque((ref, datetime.fromisoformat(when).timestamp()) for ref, when in revisions)
@@ -69,6 +69,7 @@ def _timeline(store, revisions):
                 if kind == "attempt_end" and "finishedAt" in body}
     order, chunks, reviews_by_chunk, feedback, last = {}, {}, {}, [], {}
     started, walking, repair = False, None, False
+    judgments = {}
 
     def frame(detail=""):
         projected = _frame(state, revision, rounds, reviews, gate, detail)
@@ -83,7 +84,14 @@ def _timeline(store, revisions):
                 build["activity"] = "Fixing walk findings"
             projected.update(build)
         if walking or state == LEAD2_WALK:
-            projected["judgment"] = _judge_rows(walking, state, repair, last.get("candidate"), revision)
+            candidate = last.get("candidate")
+            rows = _judge_rows(walking, state, repair, candidate, revision)
+            if walking and walking["candidate"] == candidate and walking["revision"] != revision:
+                key = revision, candidate
+                if key not in judgments:
+                    judgments[key] = promise_status(spec, revision, candidate)
+                rows = {ref: judgments[key].get(ref, value) for ref, value in rows.items()}
+            projected["judgment"] = rows
         return projected
 
     for number, kind, event in records:
@@ -135,7 +143,7 @@ def _timeline(store, revisions):
         elif kind == "lead2_return":
             last = event
         elif kind == "lead2_walk":
-            walking = event
+            walking = read_walk(store, f"r{number}", event)
         elif kind == "lead2_walk_repair":
             repair = True
         projected = frame(detail)
@@ -315,7 +323,7 @@ def last_activity(database):
 def status(store):
     spec = SpecStore(store, readonly=True)
     revisions = spec.revisions()
-    state, frames = _timeline(store, revisions)
+    state, frames = _timeline(store, spec, revisions)
     cursor = store.cursor()
     decision = store.read(cursor.decision) if cursor.decision else {}
     revision = decision.get("subject", {}).get("lead2_revision")
@@ -338,17 +346,7 @@ def status(store):
     words = store.read(cursor.kickoff)["words"].strip()
     graph = spec.snapshot(revision).graph
     idea = _idea(words, graph)
-    limits = {}
-    for obs in spec.observations() if cursor.B else ():
-        if obs.outcome == "not-verifiable-here" and (node := graph.nodes.get(obs.witness)):
-            cell = _cell(node, "action", "expected") if node["kind"] == "check" else (
-                _cell(node, "scenario", "interruption"))
-            limits[obs.witness] = {"label": cell["label"], "text": obs.result}
-    if walks := store.records("lead2_walk"):
-        run = walks[-1][2]
-        if run["candidate"] == cursor.candidate and run["revision"] == revision:
-            for row in _unverified(run):
-                limits.setdefault(row["promise"], {"label": _label(row["reason"]), "text": row["reason"]})
+    run = current_walk(store, revision)
     return {"idea": idea, "frames": frames,
-            "unverified": list(limits.values()),
+            "unverified": [{"text": row["reason"]} for row in limits(store, run)] if run else [],
             "trace": {ref: _rows(spec, ref, cursor.candidate) for ref in {f["revision"] for f in frames}}}

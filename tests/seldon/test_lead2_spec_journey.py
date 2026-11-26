@@ -104,10 +104,10 @@ def states(spec, revision, names, commit=COMMIT):
 
 
 def test_door_spec_proof_tracks_the_current_graph_and_candidate(tmp_path):
-    """A shared check edit reopens both promises, while another story and historical trace survive.
+    """Same-candidate evidence survives trace edits and retains its original witness and revision.
 
-    This catches invalidation that follows just the first or current link, or reuses a pass on
-    another commit. The existing Lead journeys do not exercise a revisioned spec graph.
+    This catches lost evidence during graph edits and reused passes on another candidate. The build
+    journey exercises the active walk, while this checks the proof history exposed by the spec.
     """
     with closing(Store(tmp_path)) as store:
         spec, names, revision, a, b = grow(store)
@@ -134,16 +134,16 @@ def test_door_spec_proof_tracks_the_current_graph_and_candidate(tmp_path):
                        amend(handoff, **{**label, "action": "Reset after midnight, then admit one guest"}),
                        mode="wording-only")
         spec = SpecStore(store)
-        assert states(spec, changed.revision, names) == ("stale", "stale", "proven-current")
+        assert states(spec, changed.revision, names) == ("proven-current",) * 3
 
         view = render_person(spec, commit=COMMIT, since=wording)
         assert "Door lead · Volunteer" in view or "Volunteer · Door lead" in view
         assert "Reset after midnight" in view
-        assert view.count("(stale)") == 2
+        assert "(stale)" not in view
         read_revision, section = spec.read_slice(enter)
         assert read_revision == changed.revision and hand not in section.nodes
         prompt = render_prompt(spec, node=enter, commit=COMMIT)
-        assert WORDS in prompt.splitlines()[1] and "[stale]" in prompt and handoff in prompt
+        assert WORDS in prompt.splitlines()[1] and "[proven-current]" in prompt and handoff in prompt
 
         observe(spec, changed.revision, names, "$handoff", "$enter", outcome="failed")
         observe(spec, changed.revision, names, "$handoff", "$hand", outcome="not-verifiable-here")
@@ -151,7 +151,7 @@ def test_door_spec_proof_tracks_the_current_graph_and_candidate(tmp_path):
         observe(spec, changed.revision, names, "$handoff", "$enter", "$hand")
         unlinked = edit(spec, changed.revision, "Replace the volunteer's witness in a later edit",
                         link(names["$ledger"], handoff, "unlink"), mode="wording-only").revision
-        assert states(spec, unlinked, names) == ("stale", "proven-current", "proven-current")
+        assert states(spec, unlinked, names) == ("proven-current",) * 3
         with pytest.raises(ValueError, match="Link"):
             observe(spec, unlinked, names, "$handoff", "$enter")
 
@@ -168,7 +168,7 @@ def test_door_spec_proof_tracks_the_current_graph_and_candidate(tmp_path):
         assert {proof.id, close.id} <= down
         retired = edit(spec, unlinked, "Retire the old handoff check", dict(op="retire", id=handoff))
         assert handoff not in spec.read_slice(hand)[1].nodes
-        assert states(spec, retired.revision, names) == ("stale", "stale", "proven-current")
+        assert states(spec, retired.revision, names) == ("proven-current",) * 3
 
 
 def test_door_spec_keeps_conflicting_and_unapproved_edits_out_of_the_head(tmp_path):
