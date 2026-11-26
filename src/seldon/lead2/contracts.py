@@ -17,16 +17,13 @@ TITLED = ("story", "promise", "walk")
 TITLE = {"type": "string"}
 PRIORITY = choice("must", "should", "nice")
 YES_NO = {"type": "boolean"}
-# Checkpoint decisions are derived from the answers in column order.
-PRIORITIES = {(True, False): "must", (True, True): "must",
-              (False, False): "should", (False, True): "nice"}
 SPEC_EDITS = {
     **{kind: array(obj(ref=TEXT, **body["properties"], **({"title": TITLE} if kind in TITLED else {})))
        for kind, body in NODE_BODIES.items() if kind != "dream"},
     "retire": REFS, "link": LINK_ROWS, "unlink": LINK_ROWS, "replaces": LINK_ROWS,
 }
 SPEC_STORY = array(obj(**SPEC_EDITS["story"]["items"]["properties"],
-                       stop_using_why=TEXT, stop_using_if_broken=YES_NO, nice_why=TEXT, nice=YES_NO))
+                       core_job_why=TEXT, core_job=YES_NO, nice_why=TITLE, nice=YES_NO))
 OPTION_FIELDS = {
     f"option_{kind}": array(obj(option_id=TEXT, **(
         {"ref": TEXT} if kind == "retire" else field["items"]["properties"])))
@@ -64,8 +61,9 @@ def typed_reply(body, schema):
         fields = schema["properties"]["answer"]["properties"]
         answer = {key: answer.get(key, []) if field.get("type") == "array" else answer.get(key)
                   for key, field in fields.items()}
-        if "build_size" in fields and answer["build_size"] is None:
-            answer["build_size"] = "small"
+        for row in answer.get("story", []) if isinstance(answer.get("story"), list) else ():
+            if isinstance(row, dict) and row.get("core_job") is True:
+                row.update(nice=False, nice_why="")
         if "unresolved_issue" in fields and answer["unresolved_issue"] is None:
             answer["unresolved_issue"] = ""
         for kind in (*TITLED, *(f"option_{kind}" for kind in TITLED)):
@@ -106,15 +104,17 @@ def normalise_edits(graph, answer, references, *, prefix=""):
     for kind, fields in NODE_BODIES.items():
         for row in answer.get(kind, ()):
             ref = resolve(row["ref"])
+            if ref in fixed and kinds[ref] == kind and all(row[k] == graph.nodes[ref][k] for k in fields["properties"]):
+                continue
             if ref == "$" or ref in fixed or ref in seen or kinds.get(ref, kind) != kind:
                 errors.append(f"{kind} {row['ref']!r}: use a distinct new name or an editable {kind} ID.")
                 continue
             seen.add(ref)
             node = {"kind": kind, **{key: row[key] for key in fields["properties"]}}
             if kind == "story":
-                existing = graph.nodes.get(ref, {}).get("priority", "must")
-                node["priority"] = (PRIORITIES[row["stop_using_if_broken"], row["nice"]]
-                                    if "stop_using_if_broken" in row else existing)
+                node["priority"] = graph.nodes.get(ref, {}).get("priority", "must")
+                if "core_job" in row:
+                    node["priority"] = "must" if row["core_job"] else "nice" if row["nice"] else "should"
             if kind in TITLED and (title := row.get("title", "").strip()
                                   or graph.nodes.get(ref, {}).get("title")):
                 node["title"] = title
@@ -150,6 +150,8 @@ def normalise_edits(graph, answer, references, *, prefix=""):
                 pair = kinds.get(source), kinds.get(target)
                 if pair in allowed or pair[::-1] in allowed:
                     edits.append(dict(op=op, source=source, target=target))
+                elif op == "unlink" and (source, target) in graph.links and (source not in kinds or target not in kinds):
+                    continue
                 elif source != target or source not in kinds:
                     errors.append(f"{op} {row['source']!r} to {label!r}: use declared IDs of compatible kinds.")
     return edits, errors

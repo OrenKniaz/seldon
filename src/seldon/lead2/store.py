@@ -163,8 +163,7 @@ class SpecStore:
         from pathlib import Path
 
         from ..states import LEAD2_BUILT, LEAD2_WALK
-        from .build import _deliveries
-        from .chunk_review import feature_status, progress, sent_feedback
+        from .build import _deliveries, delivery_progress
 
         store = self._store
         cursor = store.cursor()
@@ -172,9 +171,11 @@ class SpecStore:
             return {}
         order, _ = _deliveries(store, store.read(cursor.B))
         last = store.read(cursor.leadReturn) if cursor.leadReturn else {}
-        features = feature_status(order, progress(store), sent_feedback(store, last))
         head, workspace = self.snapshot(), Path(cursor.scratch) / "builder"
-        demos = [row["outcome"] for _, _, row in store.records("lead2_demo_point")]
+        points = [row for _, _, row in store.records("lead2_demo_point")]
+        features = {order[ref]: state for ref, state in delivery_progress(
+            order, last, {row.get("delivery") for row in points}, cursor.state, workspace.is_dir()).items()}
+        demos = [row["outcome"] for row in points]
         stages = {LEAD2_BUILT: "built", LEAD2_WALK: "walking", "C": "awaiting acceptance",
                   "ACCEPTED": "accepted", "SCRIPTED_C": "scripted acceptance", "STOPPED": "stopped"}
         return {"stage": stages.get(cursor.state, "building"),

@@ -55,7 +55,9 @@ def _plan(store, spec, provider, cursor):
         facts["Previous questions and options"] = store.read(cursor.vision)["answer"]["questions"]
     elif cursor.leadPlan and kind != "LEAD2-ALIGN":
         plan = store.read(cursor.leadPlan)
-        facts["Proposed build order"] = plan["build_order"]
+        handles = {ref: label for label, ref in refs.items()}
+        facts["Proposed build order"] = [{"outcome": row["outcome"], "stories": [handles[ref]
+            for ref in row.get("stories", ()) if ref in handles]} for row in plan["build_order"]]
         facts["Proposed access needs"] = plan.get("access")
     if kind == "REVIEW":
         facts["Missing proof links"] = review_issues(snapshot.graph)
@@ -113,7 +115,9 @@ def _propose(store, spec, snapshot, answer_ref, answer, size, references):
     plan_ref = cursor.leadPlan
     previous = store.read(plan_ref) if plan_ref else {}
     plan = {key: answer.get(key) or previous.get(key, []) for key in ("build_order", "access")}
-    plan["build_size"] = answer.get("build_size") or previous.get("build_size", "small")
+    stories = {ref for ref, row in updated.graph.nodes.items() if row["kind"] == "story"}
+    if plan["build_order"]:
+        plan["build_order"] = _delivery_plan(plan["build_order"], stories, references, size)
     if plan["build_order"] and any(value != previous.get(key) for key, value in plan.items()):
         plan_ref = store.record("lead2_plan", {**plan, "source": answer_ref})
     store.cursor(replace(cursor, leadPlan=plan_ref, failure=""))
@@ -128,6 +132,23 @@ def _propose(store, spec, snapshot, answer_ref, answer, size, references):
         _finish_review(store, updated.revision, answer_ref, groups)
     else:
         _finish_plan(store, updated.revision, answer_ref)
+
+
+def _delivery_plan(rows, stories, references, size):
+    deliveries, pending, assigned = [], [], set()
+    for row in rows:
+        refs = [references.get(ref, ref) for ref in row.get("stories", ())]
+        pending.extend(dict.fromkeys(ref for ref in refs if ref in stories and ref not in assigned))
+        assigned.update(pending)
+        if pending and row.get("would_try_before_rest", True) and size not in ("micro", "small"):
+            deliveries.append(dict(outcome=row["outcome"], stories=pending))
+            pending = []
+    pending += sorted(stories - assigned)
+    if deliveries:
+        deliveries[-1]["stories"].extend(pending)
+    else:
+        deliveries.append(dict(outcome=rows[-1]["outcome"], stories=pending))
+    return deliveries
 
 
 def _finish_plan(store, revision, source, answer_ref=None):

@@ -22,7 +22,7 @@ def _step(row):
     shot = "".join(_image(view, action) for view in images) or "Screenshot awaiting proof"
     return (
         f'<div class="step {tone}"><div class="shot">{shot}</div><div class="stepbody">'
-        f'<b>{action}</b><span class="who">{escape(row["role"])}</span>'
+        f'<b>{action}</b><span class="who">{escape(row["priority"])} · {escape(row["role"])}</span>'
         f'<div class="ea"><span class="exp">Expected: {escape(row["expected"])}</span>'
         f'<span>Saw: {escape(row["actual"])}</span></div>'
         f'<span class="verdict v-{tone}">{mark}</span></div></div>'
@@ -80,7 +80,8 @@ def _release(run, notes, scratch, current):
             body += ('<details class="limits"><summary>Left out of the release notes</summary><ul>' + "".join(
                 f'<li>{escape(row["id"])} · {escape(row["text"])} <small>{escape(row["reason"])}</small></li>'
                 for row in notes["omitted"]) + '</ul></details>')
-    body += "".join(_step(step) for step in _owner_projection(run["steps"], scratch))
+    body += "".join(_step({**step, "priority": run["stories"][step["story"]]["priority"]})
+                    for step in _owner_projection(run["steps"], scratch))
     if run["guide_text"]:
         body += ('<details class="limits guide"><summary>How to try it yourself</summary>'
                  f'{owner_steps(run["guide_text"], scratch)}</details>')

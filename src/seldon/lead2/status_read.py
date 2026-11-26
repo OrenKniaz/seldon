@@ -8,8 +8,7 @@ from datetime import datetime
 from textwrap import shorten
 
 from ..states import LEAD2_BUILT, LEAD2_READY, LEAD2_WALK, TERMINAL
-from .build import _deliveries
-from .chunk_review import feature_status, progress, sent_feedback
+from .build import _deliveries, delivery_progress
 from .evidence import promise_status
 from .store import SpecStore
 from .timing import time_and_cost
@@ -21,7 +20,7 @@ STAGE = {"NEW": 0, "ALIGN": 1, "A": 1, "L2-STACK": 2, "L2-SPEC": 3, "L2-REVIEW":
 ACTIVITY = ["Your idea", "Asking round {round}", "Agreeing the stack", "Writing the plan",
             "Review round {review}", "Preparing your approval"]
 EVENTS = ("transition", "attempt", "answer", "attempt_end", "decision_request", "user_words",
-          "lead2_chunk", "lead2_chunk_review", "lead2_return", "lead2_walk", "lead2_walk_repair")
+          "lead2_demo_point", "lead2_return", "lead2_walk", "lead2_walk_repair")
 HOME_STAGES = ("Your idea", "Align the idea", "Agree the stack", "Write the plan", "Review & fix",
                "You approve", "Build", "Judge walks it", "Your OK")
 INTRO = r"\b(?:I['’]m|I am|My name is) ([A-Z][\w’'-]*(?: [A-Z][\w’'-]*)*)\b"
@@ -38,26 +37,13 @@ def _frame(state, revision, rounds, reviews, gate="", detail=""):
                 detail=detail if gate else "", approved=False)
 
 
-def _build_frame(state, order, chunks, sent, started):
-    # Older saved plans can contain the alignment handoff in the delivery list.
-    features = feature_status(order, chunks, sent)
-    order = [name for name in features if not name.startswith("ALIGN: Recommended stack:")]
-    # Focus the first repair, then the next build, then the first outstanding review.
-    priorities = ("fixing", "failed", "building", "under review", "not-verifiable-here", "passed")
-    index = min(range(len(order)), key=lambda i: priorities.index(features[order[i]]), default=0)
+def _build_frame(state, order, last, started, progress):
+    chunk = next((order[ref] for ref, value in progress.items() if value in ("building", "planned")),
+                 next(reversed(order.values()), ""))
     complete = state == LEAD2_BUILT
-    length = len(order)
-    chunk = f"chunk {length if complete else index + 1} of {length}" if length else ""
-    status = features[order[index]] if length else "building"
     activity = ("Build complete" if complete else "Ready to build" if not started else
-                {"fixing": "Fixing", "failed": "Review failed", "building": "Building",
-                 "under review": "Under review", "not-verifiable-here": "Testing limit",
-                 "passed": "Chunks passed"}[status])
-    next_feature = (next((name for name in order if features[name] == "building"), None)
-                    if started and not complete else None)
-    features = [(name, "planned" if value == "building" and name != next_feature else value)
-                for name, value in features.items() if name in order]
-    return dict(chunk=chunk, features=[(_label(name.partition(":")[0]), value) for name, value in features],
+                "Checking deliveries" if last.get("outcome") == "done" else "Building")
+    return dict(chunk=chunk, features=[(order[ref], value) for ref, value in progress.items()],
                 activity=activity, built=complete)
 
 
@@ -68,15 +54,17 @@ def _timeline(store, spec, revisions):
     records = sorted((int(ref[1:]), kind, body) for kind in EVENTS for ref, _, body in store.records(kind))
     finished = {body["result"]: body["finishedAt"] for _, kind, body in records
                 if kind == "attempt_end" and "finishedAt" in body}
-    order, chunks, reviews_by_chunk, feedback, last = {}, {}, {}, [], {}
+    order, last, stems, shown = {}, {}, {}, set()
     started, walking, repair = False, None, False
     judgments = {}
 
     def frame(detail=""):
         projected = _frame(state, revision, rounds, reviews, gate, detail)
         if state in (LEAD2_READY, LEAD2_BUILT) or state in BUILD_STAGES:
-            build = _build_frame(LEAD2_BUILT if state in BUILD_STAGES else state, order, chunks,
-                                 set(last.get("feedback", [])) | set(feedback), started)
+            progress = delivery_progress(order, last, shown, state, started)
+            build = _build_frame(state, order, last, started, progress)
+            projected["deliveryTrace"] = {ref: value for delivery, value in progress.items()
+                                          for ref in stems.get(delivery, ())}
             if gate:
                 build["activity"] = projected["activity"]
             elif state in BUILD_STAGES:
@@ -117,7 +105,13 @@ def _timeline(store, spec, revisions):
                 revision = spec.pins()["B"]
                 while history and history[0][0] <= revision:
                     history.popleft()
-                order = _deliveries(store, store.read(event["cause"]))[0]
+                approval = store.read(event["cause"])
+                order, _ = _deliveries(store, approval)
+                plan = store.read(approval["subject"]["plan"])["build_order"]
+                graph = spec.snapshot(revision).graph
+                stems = {ref: {p for story in row.get("stories", ()) for p in graph.follow(story)
+                               if graph.nodes.get(p, {}).get("kind") == "promise"}
+                         for ref, row in zip(order, plan)}
                 frames.append({**_frame("B", revision, rounds, reviews),
                                "activity": "Plan approved at B", "approved": True})
             if event["event"] == "trace-progress":
@@ -132,18 +126,8 @@ def _timeline(store, spec, revisions):
             detail = f"Review round {reviews} · applying your choice"
         elif kind == "attempt" and state == LEAD2_READY and event["operation"] == "WORK":
             started = True
-            feedback = store.read(event["question"])["execution"].get("feedback", [])
-        elif kind == "lead2_chunk":
-            ref = f"r{number}"
-            delivery = event.get("delivery", event["feature"])
-            chunks[delivery] = (ref, event, None)
-            reviews_by_chunk[ref] = delivery
-        elif kind == "lead2_chunk_review":
-            chunk_ref = event["chunk"]
-            feature = reviews_by_chunk[chunk_ref]
-            ref, chunk, _ = chunks[feature]
-            if ref == chunk_ref:
-                chunks[feature] = (ref, chunk, (f"r{number}", event))
+        elif kind == "lead2_demo_point":
+            shown.add(event.get("delivery"))
         elif kind == "lead2_return":
             last = event
         elif kind == "lead2_walk":
@@ -223,7 +207,8 @@ def _rows(spec, revision, commit):
             promise=ref,
             group=story_nodes[0][0] if story_nodes else "",
             feature=_cell(node, "result", "action", "not_met_if"),
-            stories=[_cell(item, "story") for _, item in story_nodes],
+            stories=[{**_cell(item, "story"), "priority": item.get("priority", "must")}
+                     for _, item in story_nodes],
             checks=[_cell(item, "action", "expected") for key, item in graph.nodes.items()
                     if key in children and item["kind"] == "check"],
             walks=[_cell(item, "scenario", "interruption") for key, item in graph.nodes.items()
@@ -292,8 +277,9 @@ def summary(store, when):
     if phase in (LEAD2_READY, LEAD2_BUILT):
         cursor = store.cursor()
         last = store.read(cursor.leadReturn) if cursor.leadReturn else {}
-        build = _build_frame(phase, _deliveries(store, store.read(cursor.B))[0], progress(store),
-                             sent_feedback(store, last), True)
+        order, _ = _deliveries(store, store.read(cursor.B))
+        shown = {row.get("delivery") for _, _, row in store.records("lead2_demo_point")}
+        build = _build_frame(phase, order, last, True, delivery_progress(order, last, shown, phase, True))
         if build["chunk"]:
             label += f" · {build['chunk']}"
     if reviews:

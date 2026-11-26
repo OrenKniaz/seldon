@@ -37,9 +37,10 @@ async function serve(argv, check, {ready = '/', deadline = 30000, preview = fals
       catch (error) { if (error.name !== 'TypeError' && error.name !== 'TimeoutError') throw error; }
       await sleep(50);
     }
-    if (preview && evidence) {
-      fs.mkdirSync(evidence, {recursive: true});
-      fs.writeFileSync(path.join(evidence, 'preview-launch.json'), JSON.stringify({argv, ready}));
+    const recipe = process.env.SELDON_PREVIEW_RECIPE || (evidence && path.join(evidence, 'preview-launch.json'));
+    if (preview && recipe) {
+      fs.mkdirSync(path.dirname(recipe), {recursive: true});
+      fs.writeFileSync(recipe, JSON.stringify({argv, ready}));
     }
     return await check({url, port, dataDir, pid: child.pid});
   } finally {

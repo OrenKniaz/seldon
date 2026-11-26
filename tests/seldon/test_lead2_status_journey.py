@@ -96,21 +96,26 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
                                   question["facts"]["Current proposal"].splitlines() if text in line)
                        for text in ("Take over the live count", "Download the count")}
             answer.update(
-                story=[dict(ref=ref, story=text, stop_using_if_broken=must,
-                            stop_using_why="The live count is needed every shift." if must else "Counting still works.",
+                story=[dict(ref=ref, story=text, core_job=must,
+                            core_job_why="The live count is needed every shift." if must else "Counting still works.",
                             nice=False, nice_why="The lead depends on this behavior.")
                        for (text, ref), must in zip(stories.items(), (True, False), strict=True)],
                 promise=[{"ref": "count", "title": "Keep the door count", "action": "Take over the door",
                           "result": "See the same count",
-                          "not_met_if": "The reported count changes"}],
+                          "not_met_if": "The reported count changes"},
+                         {"ref": "download", "title": "Export the count", "action": "Download the CSV",
+                          "result": "The CSV contains the count", "not_met_if": "The CSV is missing"}],
                 design=[{"ref": "ledger", "decision": "ledger.py", "reason": "One count", "words": idea}],
                 check=[{"ref": "verify", "action": "Read the live count", "expected": "Both leads see 15"}],
                 walk=[{"ref": "swap", "scenario": "Swap leads while the door is busy",
                        "interruption": "Lose Wi-Fi just before the swap"}],
                 link=[{"source": stories["Take over the live count"], "targets": ["count"]},
-                      {"source": "count", "targets": ["ledger", "verify", "swap"]}],
-                build_order=[{"outcome": "Safe handoff", "recommend_demo": True}],
-                build_size="large",
+                      {"source": "count", "targets": ["ledger", "verify", "swap"]},
+                      {"source": stories["Download the count"], "targets": ["download"]}],
+                build_order=[dict(outcome="Safe handoff", stories=[stories["Take over the live count"]],
+                                  try_alone_why="The lead can take over a shift.", would_try_before_rest=True),
+                             dict(outcome="CSV export", stories=[stories["Download the count"]],
+                                  try_alone_why="The lead can export an existing shift.", would_try_before_rest=True)],
             )
         else:
             answer["findings"] = "The receiving lead sees the original count."
@@ -215,12 +220,14 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
         assert "Keep it visible above the controls." in tool("state", run=str(product))["waitingFor"]["ask"]["proposal"]
         assert offered["trace"]["0"] == []
         assert any(frame["stage"] == 3 and offered["trace"][str(frame["revision"])] for frame in frames)
-        row, = offered["trace"][str(frames[-1]["revision"])]
+        row = next(r for r in offered["trace"][str(frames[-1]["revision"])]
+                   if r["feature"]["label"] == "Keep the door count")
         assert row["feature"] == {
             "label": "Keep the door count",
             "text": "See the same count\n\nTake over the door\n\nThe reported count changes",
         }
         assert row["stories"][0]["label"] == "Take over the live count"
+        assert row["stories"][0]["priority"] == "must"
         assert row["modules"][0]["label"] == "ledger.py"
         walk = row["walks"][0]
         assert walk["text"] == "Swap leads while the door is busy\n\nLose Wi-Fi just before the swap"
@@ -229,12 +236,12 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
         run.step()
         approved, build = read_status()["frames"][-2:]
         assert approved["activity"] == "Plan approved at B" and approved["stage"] == 5
-        assert build["activity"] == "Ready to build" and build["chunk"] == "chunk 1 of 1"
+        assert build["activity"] == "Ready to build" and build["chunk"] == "Safe handoff"
         assert any(label.endswith(" · Building") and active == "page"
                    for _, label, active in sidebar_links(page))
         now, earlier = read_home().split('id="earlier"', 1)
         assert "Keep one shared door count" in now and "Keep one shared door count" not in earlier
-        assert 'class="chip build">Building<' in now and "Build · chunk 1 of 1" in now
+        assert 'class="chip build">Building<' in now and "Build · Safe handoff" in now
         assert 'class="seg done" title="You approve"' in now and 'class="seg cur" title="Build"' in now
 
     (tmp_path / "other").rename(tmp_path / "moved")
@@ -246,7 +253,7 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
     assert "Another venue" in earlier and "Missing" in earlier
     assert all("Another venue" not in label for _, label, _ in sidebar_links(page))
 
-    builds, visits = 0, []
+    builds, visits, promises = 0, [], {}
 
     def build_and_walk(question):
         nonlocal builds
@@ -256,20 +263,36 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
             if builds == 1:
                 assert "Keep it visible above the controls." in question["prompt"]
                 assert "Only the current lead can close." in question["prompt"]
+                for line in question["prompt"].splitlines():
+                    ref, _, result = line.partition(": ")
+                    if result in ("See the same count", "The CSV contains the count"):
+                        promises[result] = ref
+                return json.dumps(dict(outcome="partial", acknowledged=True,
+                                       note="Waiting for Seldon's walk."))
             if builds == 2:
+                assert "Keep going: return done" in question["prompt"]
+                live = read_status()
+                assert live["timeCost"]["active"] == "build" and live["timeCost"]["activeStartedAt"]
+                assert ("Safe handoff", "building") in [tuple(x) for x in live["frames"][-1]["features"]]
+                assert "building" in live["frames"][-1]["deliveryTrace"].values()
+            if builds == 3:
                 batch, = question["facts"]["Repair records"].values()
                 finding, = batch["findings"].values()
                 assert finding["wrong_or_lost_result"] and "14 places instead of 15" in finding["reason"]
             workspace = Path(question["execution"]["cwd"])
-            count = 14 if builds == 1 else 15
-            if builds == 3:
+            count = 14 if builds == 2 else 15
+            if builds == 4:
                 (workspace / "export.csv").write_text("inside\n15\n", encoding="utf-8")
             (workspace / "index.html").write_text(f"<h1>{count} places</h1>", encoding="utf-8")
             (workspace / "ledger.py").write_text(
                 "import sys\nfrom http.server import HTTPServer, SimpleHTTPRequestHandler\n"
                 "HTTPServer((sys.argv[1], int(sys.argv[2])), SimpleHTTPRequestHandler).serve_forever()\n",
                 encoding="utf-8")
-            return json.dumps(dict(outcome="done", acknowledged=True))
+            (workspace / "export.py").write_text("# CSV export entry point\n", encoding="utf-8")
+            return json.dumps(dict(outcome="done", acknowledged=True, correction_note="",
+                code_map=[dict(promise=promises["See the same count"], modules=["index.html", "ledger.py"], tests=[]),
+                          dict(promise=promises["The CSV contains the count"],
+                               modules=["export.py"] + (["export.csv"] if builds == 4 else []), tests=[])]))
         if question["kind"] == "LEAD2-CHUNK":
             return json.dumps(dict(notes=["Take over the count and check whether it starts at 15.",
                                           "The local checks passed."]))
@@ -306,7 +329,10 @@ serve([process.argv[1], 'ledger.py', '127.0.0.1', '{port}'], url => browser(url.
   .catch(error => {console.error(error);process.exitCode=1;});
 '''
         subprocess.run(["node", "-e", check, sys._base_executable], cwd=workspace, check=True,
-                       env={**os.environ, "SELDON_EVIDENCE_DIR": evidence})
+                       env={**os.environ, "SELDON_EVIDENCE_DIR": str(Path(evidence) / "screens"),
+                            "SELDON_PREVIEW_RECIPE": str(Path(evidence) / "preview-launch.json")})
+        for shot in (Path(evidence) / "screens").glob("*.png"):
+            shot.rename(Path(evidence) / shot.name)
         if os.name == "nt":
             recipe = Path(evidence) / "preview-launch.json"
             launch = json.loads(recipe.read_text(encoding="utf-8"))
@@ -353,7 +379,7 @@ serve([process.argv[1], 'ledger.py', '127.0.0.1', '{port}'], url => browser(url.
 
     with closing(Run.reopen(product, Provider(), wait)) as run:
         assert run.run().state == "C", run.store.records("lead2_fault")
-        assert builds == 2 and visits == [{"must", "should"}, {"must"}]
+        assert builds == 3 and visits == [{"must", "should"}, {"must"}]
         assert not run.store.records("lead2_chunk_review")
         state = tool("state", run=str(product))
         note = state["releaseNotes"]
@@ -369,7 +395,7 @@ serve([process.argv[1], 'ledger.py', '127.0.0.1', '{port}'], url => browser(url.
         assert read_status()["timeCost"]["phases"]["walk"]["rounds"] == 4
         with urlopen(urljoin(page, "walk"), timeout=5) as reply:
             html = reply.read().decode()
-            assert item["text"] in html
+            assert item["text"] in html and "must · Door lead" in html
             assert "Left out of the release notes" in html and "The main checks already show what worked." in html
             assert "The local checks passed." in html
     c = tool("state", run=str(product))
@@ -383,7 +409,7 @@ serve([process.argv[1], 'ledger.py', '127.0.0.1', '{port}'], url => browser(url.
 
     with closing(Run.reopen(product, Provider(), read_reply)) as run:
         assert run.run().state == "C", run.store.records("lead2_fault")
-        assert builds == 3 and visits[-1] == {"should"}
+        assert builds == 4 and visits[-1] == {"should"}
         assert {row["text"] for row in tool("state", run=str(product))["releaseNotes"]["works"]} == {
             "Both doors see 15 places. Walked on an earlier build and unaffected by this fix.", "The CSV contains 15."}
     browser = Path(frontdoor.__file__).with_name("kit") / "browser.cjs"

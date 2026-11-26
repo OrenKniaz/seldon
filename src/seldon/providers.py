@@ -310,8 +310,6 @@ class Provider:
         fresh = lead2_call(question)
         if fresh:
             config["persist"] = True
-        if question["kind"] == "LEAD2-WALK-STEER" and config.get("effort") in ("medium", "high", "xhigh"):
-            config["effort"] = "low"
         if not self.setup.get(name + "Command"):
             raise ProviderFailure(f"{name.title()} executable unavailable; install/authenticate {name} "
                                   "before resuming", False, True)
@@ -368,6 +366,7 @@ class Provider:
         silence = invocation.get("silenceWindow")
         if question["kind"] == "LEAD2-WALK" and (evidence := question["execution"].get("evidence")):
             temp.update(SELDON_EVIDENCE_DIR=evidence, SELDON_WALK_ACTIVITY=str(Path(evidence) / "activity"),
+                        SELDON_PREVIEW_RECIPE=str(Path(evidence) / "preview-launch.json"),
                         SELDON_WALK_SILENCE_MS=str(int(silence * 1000)))
             temp.update({key: evidence for key in ("TMP", "TEMP", "TMPDIR")})
         previous = question["execution"].get("session")

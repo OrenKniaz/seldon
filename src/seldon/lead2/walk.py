@@ -29,14 +29,18 @@ ACTIONS = obj(notes=array(obj(id=TEXT, sentence=TEXT, is_problem_why=TEXT, is_pr
 advance = partial(advance_run, transitions=LEAD2_RUN)
 BRIEF = """Use the real app and disposable sample data. Walk every assigned story once in this session.
 For must stories, exercise the main path and the planned tricky cases you can reproduce. For should
-and nice stories, do one quick main-path click-through. Act as the second role in multi-person stories
-and say what that person actually sees or can do. Return one outcome and a specific observed
+and nice stories, walk the main path. Try invalid or interrupted actions that could quietly change a
+saved result, even on those stories. For handoffs, keep both roles in open sessions, act on one side,
+and record what the other side sees before reloading. Return one outcome and a specific observed
 result per story. Use can't-test-here only when you cannot exercise the story and say what is needed.
 If the main path works but a variant needs a real venue or device, record it separately as an untested
 note. For a broken story, give a short stable defect name (same as before when the same behavior fails).
-For visual paths, save one representative PNG per story using checks/kit/browser.cjs shot(name, page).
-Return its exact basename. For other paths, describe the command or action and observed output.
-For a web app record its startup with checks/kit/serve.cjs, preview: true, 127.0.0.1, {port} and {data}.
+For visual paths, save one PNG with checks/kit/browser.cjs shot(name, page) per story you can capture.
+Use the supplied evidence folder as-is. Return the exact filename including the width suffix, or "".
+For other paths, describe the command or action and observed output.
+For a web app start it with checks/kit/serve.cjs and {preview: true}. Pass 127.0.0.1, {port} and
+{data}. Use the app's tracked, repo-relative Python or Node entry point directly. Keep
+SELDON_EVIDENCE_DIR as supplied so the helper saves preview-launch.json for the Open this build button.
 Report concrete rough edges, quality or trace gaps, documented setup problems and tests needing other
 conditions as notes. Do not do separate source, guide or quality proof passes. Give the tracked guide
 path if available. Try each review finding's reported action and return a note with its exact finding
@@ -102,9 +106,13 @@ def _walk(store, snapshot, provider, target, request):
     graph = snapshot.graph
     stories = _stories(graph)
     final = last["outcome"] == "done"
-    if not final and last.get("code_map"):
-        delivered = {row["promise"] for row in last["code_map"]}
-        stories = {ref: row for ref, row in stories.items() if delivered.intersection(row["promises"])}
+    if not final and (point := request["demo"]):
+        plan = store.read(store.read(store.cursor().B)["subject"]["plan"])["build_order"]
+        through = int(store.read(point)["delivery"].rsplit("-", 1)[-1])
+        shown = {ref for row in plan[:through] for ref in row.get("stories", ())}
+        mapped = {row["promise"] for row in last.get("code_map", ())}
+        stories = {ref: row for ref, row in stories.items() if ref in shown or
+                   not shown and (not mapped or mapped.intersection(row["promises"]))}
     prior = store.read(request["prior"]) if request.get("prior") else {}
     if prior and prior["revision"] != snapshot.revision:
         prior = {}
@@ -178,8 +186,8 @@ def _offer(store, run, notes, gate="C", options=None):
     for row in notes["works"]:
         link = f" [Screenshot]({base}walk-shot/{quote(row['artifact'])})" if row["artifact"] and base else ""
         lines.append(f"- {row['text']}{link}")
-    if run["guide_text"] and base:
-        lines += ["", f"[Open the build and setup guide]({base}walk)"]
+    if (run["launch"] or run["guide_text"]) and base:
+        lines += ["", f"[Open the build and walk]({base}walk)"]
     if notes["items"]:
         lines += ["", "### What's weaker", *(f"- {r['id']} · {r['label']}: {r['text']}"
                                                + (" *(Fix these)*" if r["fixable"] else "") for r in notes["items"])]

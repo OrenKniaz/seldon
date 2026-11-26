@@ -489,9 +489,10 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
     other = ("A volunteer can also hand off to the next shift while a coat is still out. "
              "I'll check the physical label printer later.")
     calls = []
-    draft = {"build_order": [{"outcome": "1. Check in and recover a coat: restore the claim", "recommend_demo": True},
-                             {"outcome": "2. Add a printed claim card", "recommend_demo": False},
-                             {"outcome": "3. Share the shift handover", "recommend_demo": True}]}
+    draft = {"build_order": [dict(outcome="1. Check in and recover a coat: restore the claim", stories=[],
+                                  try_alone_why="A volunteer can run a claim desk.", would_try_before_rest=True),
+                             dict(outcome="2. Add a printed claim card", stories=[],
+                                  try_alone_why="It needs an active claim.", would_try_before_rest=False)]}
     access = [{"need": "Desk tablet", "supplier": "Volunteer lead", "deferred": False},
               {"need": "Check the label printer at the venue.", "supplier": "", "deferred": True}]
     qualification = "Approve, only if the CSV includes each correction reason."
@@ -635,16 +636,26 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
                               link("brief", "handover"), link(role, "handover"),
                               add("lost", "story", story="A volunteer can look for a lost claim"),
                               link("brief", "lost"), link(role, "lost")])
-            answer = dict(reason="Specify the complete handoff", **flat(edits), **draft,
+            order = [{**row, "stories": [story]} for row in draft["build_order"]]
+            order[-1]["outcome"] = "Check in and recover a coat"
+            answer = dict(reason="Specify the complete handoff", **flat(edits), build_order=order,
                           mockups=[dict(id="queue", label="Queue first", means="Show handoffs at the top"),
                                    dict(id="lookup", label="Lookup first", means="Lead with receipt lookup")],
                           access=access if calls.count(kind) == 1 else [])
             if not resolving:
+                for line in proposal.splitlines():
+                    if '"owner_choice":false' in line and line.startswith("["):
+                        ref, body = line[1:].split("] ", 1)
+                        locked = json.loads(body)
+                        answer["design"].append({"ref": ref, **{key: locked[key]
+                            for key in ("decision", "reason", "words")}})
+                        break
                 for row in answer["story"]:
-                    row.update(stop_using_if_broken=True, stop_using_why="An open claim would be lost.",
+                    row.update(core_job=True, core_job_why="An open claim would be lost.",
                                nice=False, nice_why="A volunteer needs this during the shift.")
         else:
-            assert kind == "REVIEW" and facts["Proposed build order"] == draft["build_order"]
+            assert kind == "REVIEW"
+            assert [row["outcome"] for row in facts["Proposed build order"]] == ["Check in and recover a coat"]
             assert facts["Proposed access needs"] == access
             assert other in facts["Earlier replies"] and "A restart loses the receipt" in proposal
             if calls.count(kind) > 1:
@@ -876,13 +887,13 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
             assert original_graph.links == updated.links
         b = reply("demo", ("delivery-1", "show", {}))
         groups = {g["id"]: g for g in b["ask"]["groups"]}
-        assert groups["delivery-1"]["default"] == "skip" and groups["delivery-2"]["default"] == "skip"
+        assert groups["delivery-1"]["default"] == "skip" and "delivery-2" not in groups
         assert "1. Check in" not in groups["delivery-1"]["question"]
         assert "Restart the tablet before the second shift scans the receipt" not in b["ask"]["proposal"]
         full = frontdoor.state(product, full_spec=True)
         assert "Restart the tablet before the second shift scans the receipt" in full["spec"]
         assert "Claim storage module" in full["spec"] and "Claim restart test" in full["spec"]
-        assert full["buildOrder"] == draft["build_order"]
+        assert [row["outcome"] for row in full["buildOrder"]] == ["Check in and recover a coat"]
         expected_result = "omits any correction reason" if loose_answer else "The receipt still finds it"
         assert expected_result in b["ask"]["proposal"]
         assert "Check in and recover a coat" in b["ask"]["proposal"]
@@ -912,20 +923,22 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         assert status["build"]["stage"] == "building"
         assert status["controller"] == "idle"
         assert status["approvedSpec"]["revision"] == spec.pins()["B"]
-        assert status["approvedSpec"]["buildOrder"] == draft["build_order"]
+        assert status["approvedSpec"]["buildOrder"] == full["buildOrder"]
         assert status["approvedSpec"]["accessNeeds"] == access
         from seldon.lead2.status_read import status as read_pane
 
         pane = read_pane(run.store)
         latest = pane["frames"][-1]
         assert pane["frames"][-2]["activity"] == "Plan approved at B"
-        assert latest["activity"] == "Ready to build" and latest["chunk"] == "chunk 1 of 3"
+        assert latest["activity"] == "Ready to build" and latest["chunk"] == "Check in and recover a coat"
         # The revised export still appears in the approved trace after the conditional B loop.
         assert any(expected_result in row["feature"]["text"] for row in pane["trace"][latest["revision"]])
         assert gitwork.git(product, "rev-parse", "HEAD") == initial_commit
         expected_calls = ["REVIEW", "REVIEW", "REVIEW", "LEAD2-SPEC"] if loose_answer else ["REVIEW"]
         if review_reply == "other":
             expected_calls.append("LEAD2-SPEC")
+        assert not any("editable design ID" in reason for _, _, row in run.store.records("lead2_correction")
+                       for reason in row["remaining"])
         assert calls == ["LEAD2-ALIGN"] * 3 + ["LEAD2-STACK"] * (2 if loose_answer else 1) + [
             "LEAD2-SPEC", *expected_calls]
     finally:

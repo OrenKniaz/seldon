@@ -69,6 +69,7 @@ def start(project, scratch, candidate, launch):
         env = desktop.environment({key: str(folder) for key in ("TMP", "TEMP", "TMPDIR")})
         env.pop("SELDON_WALK_ACTIVITY", None)
         env.pop("SELDON_EVIDENCE_DIR", None)
+        env.pop("SELDON_PREVIEW_RECIPE", None)
         with (folder / "startup.log").open("ab") as log:
             process = subprocess.Popen(
                 [node, str(kit), json.dumps(portable), str(folder / "url")], cwd=workspace, env=env,

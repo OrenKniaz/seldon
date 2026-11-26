@@ -1,7 +1,7 @@
 """C1/C6/C9/C11: the product briefs and typed planning answers."""
 
 from ..questions import labelled
-from ..schema import TEXT, array, choice, obj
+from ..schema import REFS, TEXT, array, choice, obj
 from .contracts import OPTION_FIELDS, SPEC_EDITS, SPEC_STORY, YES_NO
 
 SIZES = {"micro": "Minutes of agent work.", "small": "An hour or two of agent work.",
@@ -10,7 +10,7 @@ QUESTION_FIELDS = dict(question=TEXT, recommended=TEXT, recommended_means=TEXT,
                        alternative=TEXT, alternative_means=TEXT)
 QUESTIONS = array(obj(**QUESTION_FIELDS))
 MOCKUPS = array(obj(id=TEXT, label=TEXT, means=TEXT))
-DELIVERY = array(obj(outcome=TEXT, recommend_demo={"type": "boolean"}))
+DELIVERY = array(obj(outcome=TEXT, stories=REFS, try_alone_why=TEXT, would_try_before_rest=YES_NO))
 ACCESS = array(obj(need=TEXT, supplier={"type": "string"}, deferred={"type": "boolean"}))
 ALIGN_CHOICES = array(obj(question=TEXT, default=TEXT, recommended_means=TEXT, alternative=TEXT,
                           alternative_means=TEXT, her_words_quote={"type": "string"},
@@ -23,50 +23,53 @@ REVIEW = obj(findings=TEXT, unresolved_issue={"type": "string"},
              questions=array(obj(id=TEXT, recommended_id=TEXT, alternative_id=TEXT, **QUESTION_FIELDS)),
              **OPTION_FIELDS)
 TASK = {
-    "LEAD2-ALIGN": """Start reason with one real job in the owner's world from start to finish.
+    "LEAD2-ALIGN": """Start with one real job in the owner's world from start to finish.
 Use the walk to cover functions, operation (hosting, users, roles, logins, backups, offline, connections,
 cost) and appearance (device, style, key screen, language, direction, accessibility, reference).
-Preserve exact values, handoffs, races and recovery. Follow an incomplete record across transitions;
-ask what is kept, carried forward or lost when the owner has not decided. Omit immaterial choices.
+Preserve exact values, handoffs, races and recovery. Ask what happens to incomplete records when it
+matters. Default to the permissions each role needs for its stated work. Omit immaterial choices.
 Use the recommendation as default. In her_words_quote, quote the owner's exact words that settle
 this specific default. Leave it empty when in doubt. Give a one-line why before each yes/no.
 Bakery order list: would_bet yes when the owner said "show today's pickups first"; no when she
 said nothing about who can cancel orders. Wrong_costly yes if guessing could let clerks cancel
 paid orders; no if guessing changes the button color.
-Use the size fields, never a product question about size. Honor the chosen size and scope.
-Link brief and earlier replies to each short-titled product story. Link people to their stories.
-Keep demos and the owner's readiness decision as delivery choices.""",
+Size by agent effort, including local checks. Several connected stories can fit one session. Honor the chosen size.
+Use short story refs and links brief/reply → story and person → story, e.g. {"source":"brief","targets":["save"]}.
+Stories describe product behavior. Leave demonstrations and release decisions out of the spec.""",
     "LEAD2-STACK": """Recommend the stack for the accepted vision. Give each choice a plain one-line reason
 and cite the need that drove it in words. Offer alternatives only when the answer changes what is built.
 For a plain owner explain the recommendation in business language. Incorporate the owner's latest reply.""",
     "LEAD2-SPEC": """Explain identities, state changes and design. Respect the approved stack and link it to
-the promises it serves. Order outcomes. Classify build size from this spec.
-For each story, assume the other stories work. Would this failure make the owner abandon the app
-for her ordinary work? Explain before each yes/no. Bakery order list: stop_using yes if an order
-cannot be saved, no if search fails but the list still works. Nice yes for decorative icons, no for search.
-Include every story row. For a product with a user interface, give a few
+the promises it serves. For each story: is it part of the app's core job (without it the app is
+pointless)? Give core_job_why and a JSON boolean, true or false. Bakery list: saving orders is core;
+search and decorative icons are not. After false, explain nice: true for icons, false for search.
+For a core story, use nice_why: "", nice: false. Include every story, using its shown ref.
+Order build_order by feature. Give each delivery a plain outcome name and its exact story refs.
+For a micro or small dream give one product delivery. For larger dreams, explain whether each
+is worth trying before the rest. Example: {"outcome":"Record bakery orders","stories":["save"],
+"try_alone_why":"Staff can record real orders now.","would_try_before_rest":true}.
+Use false for a piece that needs the next delivery to be useful (e.g. just adding customer fields). For a product with a user interface, give a few
 quick visual directions for the key screens in mockups: describe layout, interaction and appearance so
 the owner can pick or mix them. Use an empty list when there is no visual choice to make.""",
     "REVIEW": """What could disappear while this still passes? Fix missing behaviour and proof from the
-brief and owner replies. If given a concrete unresolved issue, focus on that issue. Leave unresolved_issue
-empty when no further independent review is needed. Otherwise name one concrete gap still to resolve.
-Ask only for unresolved material product choices. Give each question and each option a distinct ID.
-Put ordinary named edits for each option in the option_* rows using its option_id. Keep those edits
-out of common edits. Leave build_order and access empty unless changed.""",
+brief and owner replies in this answer. If a gap needs another reviewer after your edits, name it in
+unresolved_issue. Otherwise return "unresolved_issue": "". Use [] for unused arrays.
+Ask only for an unresolved material product choice. Example question IDs: id "pickup", recommended_id
+"counter", alternative_id "locker". Use those exact option_id values in option_* edits only. Link
+with exact shown refs or new refs declared in those edits. Leave build_order and access empty unless changed.""",
 }
 SPEC_GUIDE = """Link each promise to planned code modules (design rows) and named tests with observable
 results (check rows). List build and judge access with suppliers; empty supplier means can't test here.
 Derive access from the planned walk.
 Mark deferred only for the specific venue checks the owner explicitly left for later.
 Leave access empty to keep a prior list or give the full revised list."""
-EDIT_GUIDE = """Use a short new ref to add or a shown ref to amend, one row per changed node.
-Retire only superseded nodes. Group links by source; replacements inherit old proof unless unlinked.
-Link brief, relevant earlier replies and roles to stories.
-Link stories to promises and promises to design and proof.
-Leave unused arrays empty. Each question names two concrete options; code adds Other."""
+EDIT_GUIDE = """Use exact refs for edits and fresh refs like order-store for additions. Rows with
+owner_choice are locked. Use their refs directly in links. Retiring an editable node removes its links.
+Link brief, replies and roles → stories → promises → design, checks and walks. Group by source.
+Use [] for unused arrays. Each product question names two concrete options; code adds Other."""
 PROMISE_GUIDE = """Give each product behavior its own action, result and failure condition. When a
-story or promise is only about showing the build or making an acceptance decision, move it to delivery
-and retire the redundant rows. Put proof under each behavior it verifies. Preserve exact choices and
+story or promise describes Seldon's demos, independent walk or release readiness, retire it.
+Keep the product behavior and its expected result. Put proof under each behavior it verifies. Preserve exact choices and
 walk what each affected person sees through changes, interruptions and recovery. Exercise each usable output."""
 
 
@@ -87,16 +90,13 @@ def question(kind, words, current, *, qualification=None, **facts):
             fields = STACK["properties"]
         elif kind == "LEAD2-ALIGN":
             fields = ALIGN["properties"]
-            prompt += "\nUse short refs for new rows, shown refs for changes and links, and business terms."
+            facts["Size choices by agent effort"] = SIZES
         else:
-            extra = REVIEW["properties"] if kind == "REVIEW" else {"mockups": MOCKUPS, "build_size": choice("small", "large")}
+            extra = REVIEW["properties"] if kind == "REVIEW" else {"mockups": MOCKUPS}
             fields = {**extra, **SPEC_EDITS, "build_order": DELIVERY, "access": ACCESS}
             if kind == "LEAD2-SPEC":
                 fields["story"] = SPEC_STORY
             prompt = "\n\n".join((prompt, SPEC_GUIDE, PROMISE_GUIDE, EDIT_GUIDE))
-    if kind in ("LEAD2-SPEC", "REVIEW") and not qualification:
-        facts["Delivery and acceptance"] = ("Build order carries the demonstrations. The independent walk checks "
-            "delivered behavior and records venue checks separately. The owner makes the readiness decision at C.")
     return {"kind": kind, "execution": {}, "schema": obj(answer=obj(reason=TEXT, **fields)),
             "renderContext": {"lead2": True},
             "prompt": prompt,

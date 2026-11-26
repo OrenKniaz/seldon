@@ -14,7 +14,7 @@ def time_and_cost(store):
     phases = {key: {"seconds": 0.0, "rounds": 0, "usageMissing": 0, **dict.fromkeys(USAGE, 0)}
               for key in phases}
     metrics = {row["attempt"]: row for _, _, row in store.records("lead2_call_metric")}
-    active = None
+    active, started = None, None
     review_rounds = 0
     for ref, _, row in store.records("attempt"):
         phase = PHASES.get(row["operation"])
@@ -25,6 +25,7 @@ def time_and_cost(store):
         if row["operation"] == "REVIEW" and not row.get("retryOf"):
             review_rounds += 1
         active = None if metric else phase
+        started = row.get("startedAt") if active else None
         entry["rounds"] += 1
         entry["seconds"] += metric.get("elapsedSeconds") or 0
         if usage := metric.get("usage"):
@@ -40,4 +41,4 @@ def time_and_cost(store):
     cursor = store.cursor()
     if cursor.failure or cursor.decision:
         active = None
-    return {"phases": phases, "active": active, "ownerWaitSeconds": waited, "reviewRounds": review_rounds}
+    return {"phases": phases, "active": active, "activeStartedAt": started if active else None, "ownerWaitSeconds": waited, "reviewRounds": review_rounds}

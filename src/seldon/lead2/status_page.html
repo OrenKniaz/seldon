@@ -76,7 +76,7 @@ section{background:#fff;border:1px solid var(--line);border-radius:12px;padding:
 .s-passed{--st:var(--passed)}.s-accepted{--st:var(--accepted)}
 .s-passed,.s-accepted{box-shadow:0 0 0 2px #e8b23a40,0 0 16px #e8b23a66;border-color:#e3c27a}
 .vision{align-self:stretch;display:flex;flex-direction:column;justify-content:center;border:1px solid #bdcbb6;border-radius:11px;padding:14px;background:#fff}
-.vision h3,.vision .idea-title{font:400 22px/1.1 Georgia,serif;margin:6px 0}
+.vision h3,.vision .idea-title{font:400 20px/1.1 Georgia,serif;margin:6px 0;overflow-wrap:normal}
 svg.lines{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0}.row,.vision{position:relative;z-index:1}
 svg.lines path{fill:none;stroke:#c3d0ba;stroke-width:1.4}svg.lines path.lit{stroke:#e2a92b;stroke-width:2.2;filter:drop-shadow(0 0 4px #e8b23a)}
 svg.lines path.bad{stroke:var(--fix);stroke-width:2}
@@ -226,12 +226,12 @@ dialog button{border:1px solid var(--line);border-radius:6px;background:var(--so
 const STAGES = [
   ["Your idea"], ["Align the idea", "rounds", true], ["Agree the stack", "rounds", true],
   ["Write the plan"], ["Review & fix", "up to 3", true], ["You approve"],
-  ["Build", "chunk by chunk", true], ["Judge walks it", "until all pass", true], ["Your OK"]
+  ["Build", "by delivery", true], ["Judge walks it", "until all pass", true], ["Your OK"]
 ];
-const LABELS = ["Feature", "User stories", "Checks & walks", "Code chunk", "Review / judge"];
+const LABELS = ["Feature", "User stories", "Checks & walks", "Code", "Review / judge"];
 const STATUS = {
-  planned: ["planned", "Planned"],
-  built: ["building", "Built"],
+  planned: ["planned", "Planned"], built: ["building", "Built"],
+  building: ["building", "Building"], passed: ["passed", "Passed"],
   "proven-current": ["passed", "Passed"],
   walked: ["passed", "Story works"],
   accepted: ["accepted", "Accepted by you"],
@@ -242,17 +242,10 @@ const STATUS = {
   "not-verifiable-here": ["review", "Can’t verify here"],
   "changed-by-person": ["planned", "Changed by you"]
 };
-const CHUNK_STATUS = {
-  planned: ["planned", "Planned"], building: ["building", "Building"],
-  "under review": ["review", "Under review"], failed: ["fix", "Review failed"],
-  fixing: ["fix", "Failed → fixing"], passed: ["passed", "Passed"],
-  "not-verifiable-here": ["planned", "Couldn’t test here"]
-};
 const EMPTY = ["No feature yet", "No story yet", "No check or walk yet", "No code planned yet", "No review yet"];
 const byId = id => document.getElementById(id);
 const loop = byId("loop"), trace = byId("trace"), timeline = byId("t"), lines = byId("lines");
 const vision = byId("ideaCell");
-
 const side = byId("side"), collapse = byId("collapse");
 const phone = matchMedia("(max-width:700px)");
 function setSidebar(collapsed) {
@@ -390,11 +383,13 @@ function showTrace(rows) {
       row.append(vision);
     }
     const [style, label] = STATUS[item.status];
-    row.dataset.line = ["passed", "accepted"].includes(style) ? "lit" : style === "fix" ? "bad" : "";
+    row.dataset.line = ["passed", "accepted", "building"].includes(style) ? "lit" : style === "fix" ? "bad" : "";
     const proof = [...item.checks, ...item.walks];
     const proofLabel = [count(item.checks, "check"), count(item.walks, "walk")].filter(Boolean).join(" · ");
-    const cells = [[item.feature], item.stories, proof, item.modules, [{label, text:label}]];
-    const summaries = ["", count(item.stories, "story", "stories"), proofLabel,
+    const stories = item.stories.map(s => ({label: s.label + " · " + s.priority,
+      text: s.priority + "\n\n" + s.text}));
+    const cells = [[item.feature], stories, proof, item.modules, [{label, text:label}]];
+    const summaries = ["", stories.map(s => s.label).join(" / "), proofLabel,
       count(item.modules, "module"), label];
     cells.forEach((values, i) => row.append(traceCell(values, LABELS[i], style,
       (i === 4 || values.length !== 1 ? summaries[i] : values[0].label) || EMPTY[i], label)));
@@ -407,7 +402,7 @@ function showBuild(frame) {
   byId("buildProgress").hidden = !frame.features;
   if (!frame.features) return;
   byId("buildFeatures").replaceChildren(...frame.features.map(([name, state]) => {
-    const [style, label] = CHUNK_STATUS[frame.built && state === "fixing" ? "failed" : state];
+    const [style, label] = STATUS[state];
     const item = element("li", "", "s-" + style);
     item.append(element("span", name), element("span", label, "tag"));
     return item;
@@ -431,19 +426,21 @@ function showTime(cost) {
   let working = 0, tokens = 0, missing = 0;
   for (const [key, label, color, style] of phases) {
     const r = cost.phases[key], n = r.fresh_input_tokens + r.cached_input_tokens + r.output_tokens;
-    working += r.seconds;
+    const active = key === cost.active && cost.activeStartedAt;
+    const seconds = r.seconds + (active ? Math.max(0, Date.now() / 1000 - cost.activeStartedAt) : 0);
+    working += seconds;
     tokens += n;
     missing += r.usageMissing;
     const bar = element("span"), mark = element("i", "", "sw");
     mark.style.background = bar.style.background = color;
-    bar.style.flexGrow = r.seconds;
-    if (r.seconds) timer.append(bar);
+    bar.style.flexGrow = seconds;
+    if (seconds) timer.append(bar);
     const title = element("span", label, style);
     if (key === "planning_review" && cost.reviewRounds)
       title.append(` · ${cost.reviewRounds} ${cost.reviewRounds === 1 ? "round" : "rounds"}`);
     if (key === cost.active) title.append(element("span", "now", "live"));
     const duration = element("span", "", "num"), usage = element("span", tokenCount(n) + (r.usageMissing ? " +" : ""), "num tok");
-    duration.append(element("b", minutes(r.seconds)));
+    duration.append(element("b", minutes(seconds)));
     usage.title = `Fresh input ${r.fresh_input_tokens} · Cached input ${r.cached_input_tokens} · Output ${r.output_tokens}`;
     if (r.usageMissing) usage.title += " · Usage unavailable for some calls";
     rows.append(mark, title, duration, usage);
@@ -489,7 +486,7 @@ function render() {
   showRelease(data.releaseNotes);
   const judge = frame.judgment || {};
   showTrace(data.trace[frame.revision].map(row =>
-    ({...row, status: judge[row.promise] || judge["*"] || row.status})));
+    ({...row, status: judge[row.promise] || judge["*"] || frame.deliveryTrace?.[row.promise] || row.status})));
 }
 
 function stopReplay() {
@@ -530,6 +527,7 @@ async function poll() {
         reachable = true;
         byId("nowText").textContent = data.frames[+timeline.value].activity;
       }
+      if (data.timeCost.active) showTime(data.timeCost);
       return;
     }
     const response = await fetch("state.json");
