@@ -13,20 +13,24 @@ from ..states import LEAD2_RUN, advance as advance_run
 from . import build_brief, chat
 from .graph import PROOF
 from .owner_guide import owner_text
-from .walk_record import CATEGORIES, current_walk, release_notes, save_walk
+from .walk_record import CATEGORIES, current_walk, release_notes, review_findings, save_walk
 
 S = build_brief.STRING
+BOOLEAN = build_brief.BOOLEAN
+WRONG_RESULT = dict(wrong_result_why=TEXT, wrong_or_lost_result=BOOLEAN)
 WALK = obj(
     stories=array(obj(story=TEXT, outcome=choice("works", "broken", "can't-test-here"),
-                      reason=TEXT, screenshot=S, defect=S)),
-    notes=array(obj(kind=choice(*CATEGORIES), stories=REFS, reason=TEXT)),
-    guide_path=S, resolved=REFS,
+                      reason=TEXT, screenshot=S, defect=S, **WRONG_RESULT)),
+    notes=array(obj(kind=choice(*CATEGORIES), stories=REFS, reason=TEXT, finding=S, **WRONG_RESULT)),
+    guide_path=S,
 )
-ACTIONS = obj(actions=array(obj(kind=choice("repair", "note", "ask"), ids=REFS, reason=TEXT)))
+ACTIONS = obj(notes=array(obj(id=TEXT, sentence=TEXT, is_problem_why=TEXT, is_problem=BOOLEAN,
+                              surprise_later_why=TEXT, surprise_later=BOOLEAN)))
 advance = partial(advance_run, transitions=LEAD2_RUN)
 BRIEF = """Use the real app and disposable sample data. Walk every assigned story once in this session.
 For must stories, exercise the main path and the planned tricky cases you can reproduce. For should
-and nice stories, do one quick main-path click-through. Return one outcome and a specific observed
+and nice stories, do one quick main-path click-through. Act as the second role in multi-person stories
+and say what that person actually sees or can do. Return one outcome and a specific observed
 result per story. Use can't-test-here only when you cannot exercise the story and say what is needed.
 If the main path works but a variant needs a real venue or device, record it separately as an untested
 note. For a broken story, give a short stable defect name (same as before when the same behavior fails).
@@ -35,8 +39,16 @@ Return its exact basename. For other paths, describe the command or action and o
 For a web app record its startup with checks/kit/serve.cjs, preview: true, 127.0.0.1, {port} and {data}.
 Report concrete rough edges, quality or trace gaps, documented setup problems and tests needing other
 conditions as notes. Do not do separate source, guide or quality proof passes. Give the tracked guide
-path if available. For a fix recheck, revisit only the listed stories and report what happened to the
-selected notes that the builder worked on. List verified resolved note IDs in resolved."""
+path if available. Try each review finding's reported action and return a note with its exact finding
+reference, affected story IDs and actual result. Return one note per recheck ID, including fixes
+that work. For a review summary, record what the review covered. Leave finding empty for new notes.
+For each verdict and note, explain whether a result was wrong or lost before answering.
+Bakery order list: yes if a saved order disappears, no if the list has cramped spacing."""
+STEER_BRIEF = """Write one plain owner-facing sentence per exact ID. Say who can do what and what fails.
+Preserve observed outcomes and limits. Use everyday words for the behavior and its consequence.
+Explain before each yes/no. Bakery order list: is_problem yes if a clerk can change another
+clerk's orders, no for a passing test summary. surprise_later yes if offline orders silently
+disappear when reconnecting, no if an optional sort control is visibly absent."""
 
 
 def step(store, spec, provider, user):
@@ -51,11 +63,11 @@ def step(store, spec, provider, user):
         if cursor.state == "C":
             return advance(store, "repair", target)
         return _walk(store, snapshot, provider, target, request)
+    if run["missing"]:
+        raise ValueError("The walk did not return verdicts for " + ", ".join(run["missing"]))
     notes = release_notes(store, run)
     if not notes:
         return _plan(store, provider, run)
-    if run["missing"]:
-        raise ValueError("The walk did not return verdicts for " + ", ".join(run["missing"]))
     broken = [item for item in notes["items"] if item["blocked"]]
     if cursor.state == "C":
         return advance(store, "repair", target) if broken else _offer(store, run, notes)
@@ -108,10 +120,12 @@ def _walk(store, snapshot, provider, target, request):
         "Agreed behaviors": {ref: graph.nodes[ref] for row in chosen.values() for ref in row["promises"]},
         "Scenarios": {ref: graph.nodes[ref] for row in chosen.values()
                       if row["priority"] == "must" for ref in row["walks"]},
-        "Notes selected for this fix": {ref: store.read(ref) for ref in request.get("items", [])},
-        "Previous outcomes for these stories": {story: store.read(ref)
-                                                 for story, ref in prior.get("results", {}).items()
-                                                 if story in chosen},
+        "Review findings": review_findings(store, last["candidate"]) if not prior else {},
+        "Notes selected for this fix": {ref: store.read(ref)["reason"] for ref in request.get("items", [])
+                                        if ref in prior.get("notes", [])},
+        "Previous outcomes for these stories": {
+            story: {key: row[key] for key in ("outcome", "reason", "defect")}
+            for story, ref in prior.get("results", {}).items() if story in chosen and (row := store.read(ref))},
     })
     question["execution"] = {"walk": workspace, "evidence": str(evidence)}
     try:
@@ -125,30 +139,14 @@ def _walk(store, snapshot, provider, target, request):
 def _plan(store, provider, run):
     rows = {row["ref"]: row for row in run["results"].values()}
     rows.update({ref: store.read(ref) for ref in run["notes"]})
-    prompt = ("Write one plain sentence per item from the recorded observations. Select repair only for a "
-              "broken must story, note for anything else, or ask for a can't-test-here owner question. "
-              "For an optional access question, write the missing condition as a note for C. "
-              "Use a single exact ID per sentence. Preserve outcomes and disclose all limitations. "
-              "For a broken story, describe what failed in plain words.")
-    question = build_brief.question("LEAD2-WALK-STEER", ACTIONS, prompt, Observations=rows,
+    question = build_brief.question("LEAD2-WALK-STEER", ACTIONS, STEER_BRIEF, Observations=rows,
                                     Stories=run["stories"])
 
     def save(source, answer):
-        sentences, errors = {}, []
-        for action in answer["actions"]:
-            for ref in action["ids"]:
-                row = rows.get(ref)
-                allowed = {"note"}
-                if row and row.get("outcome") == "broken" and run["stories"][row["story"]]["priority"] == "must":
-                    allowed.add("repair")
-                if row and row.get("outcome") == "can't-test-here":
-                    allowed.add("ask")
-                if not row or ref in sentences or action["kind"] not in allowed:
-                    errors.append(f"{ref!r}: use a shown ID once with its permitted action ({', '.join(sorted(allowed))}).")
-                else:
-                    sentences[ref] = action["reason"]
-        inference.correct(store, source, answer, errors)
-        store.record("lead2_release_notes", {"walk": run["ref"], "source": source, "sentences": sentences})
+        notes = {row["id"]: row for row in answer["notes"] if row["id"] in rows}
+        inference.correct(store, source, answer, ["Use one exact shown ID per sentence."]
+                          if len(notes) != len(answer["notes"]) else [])
+        store.record("lead2_release_notes", {"walk": run["ref"], "source": source, "notes": notes})
 
     inference.call(store, provider, question, consume=save)
 

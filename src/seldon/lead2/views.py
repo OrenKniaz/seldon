@@ -68,6 +68,8 @@ def b_changes(before, after, prior, current):
     changes = [f"- Your request · {node['words']}" for ref, node in after.graph.nodes.items()
                if node["kind"] == "dream" and ref not in before.graph.nodes]
     changes.extend(changed_promises(before.graph, after.graph))
+    changes.extend(f"- Updated choice · {node['decision']}" for ref, node in after.graph.nodes.items()
+                   if node.get("owner_choice") is True and node != before.graph.nodes.get(ref))
     labels = {"build_order": "Build order", "access": "Access needs"}
     changes.extend(f"- {label} updated." for field, label in labels.items()
                    if prior.get(field, []) != current.get(field, []))
@@ -103,8 +105,8 @@ def b_summary(graph, plan, groups, picked, *, changes=""):
             promises += ["", f"#### {story.split('. ', 1)[0]}", *_outputs(map(results.pop, refs))]
     demos = [f"- Delivery {g['id'].removeprefix('delivery-')}" for g in groups
              if picked.get(g["id"], {}).get("optionId", g["default"]) == "show"]
-    defaults = [f"- {' '.join(node['decision'].split('? ', 1)[-1].split())}" for node in graph.nodes.values()
-                if node.get("reason") == "accepted default"]
+    defaults = [f"- {node['decision']} — {node['words']}" for node in graph.nodes.values()
+                if node.get("owner_choice") is False]
     gaps = review_issues(graph)
     limit = "Can't test here"
     access = [f"- {row['need']} — {'Deferred by agreement' if row.get('deferred') else row['supplier'].strip() or limit}"
@@ -113,7 +115,7 @@ def b_summary(graph, plan, groups, picked, *, changes=""):
                       *(f"{i}. {delivery_name(item)}" for i, item in enumerate(order, 1)),
                       "", "### Demonstrations", *(demos or ["None selected."]),
                       "", "### Access needs", *(access or ["None identified."]),
-                      "", "### Accepted defaults", *(defaults or ["None."]),
+                      "", "### Assumptions", *(defaults or ["None."]),
                       *(["", "### Changes since the last offer", changes] if changes else []),
                       *(["", "### Trace gaps", *(f"- {gap}" for gap in gaps)] if gaps else [])])
 
@@ -163,7 +165,7 @@ def planning_view(graph):
         lines.extend(f"- {_details(node)}" for ref, node in graph.nodes.items()
                      if ref in children and node["kind"] != "design")
     designs = [f"- {node['decision']} — {node['reason']}" for node in graph.nodes.values()
-               if node["kind"] == "design" and node["reason"] != "accepted default"]
+               if node["kind"] == "design" and node.get("owner_choice") is not False]
     if designs:
         lines += ["", "### Design choices", *designs]
     return "\n".join(lines)

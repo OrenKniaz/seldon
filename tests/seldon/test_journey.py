@@ -521,8 +521,11 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         return fields
 
     def material_question(question, label):
-        return dict(question=question, recommended=label, recommended_means="Show the same record",
-                    alternative="Use a separate list", alternative_means="Keep a local log")
+        return dict(question=question, default=label, recommended_means="Show the same record",
+                    alternative="Use a separate list", alternative_means="Keep a local log",
+                    her_words_quote="", bet_why="The owner has not made this choice.",
+                    would_bet_she_picks_default=False,
+                    wrong_costly_why="A separate list changes what the shift can see.", wrong_costly=True)
 
     def fill(story):
         return [
@@ -580,6 +583,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
                 material_question("What if the first shift leaves early?", "Keep the claim open"),
                 material_question("How should an interrupted claim look?", "Show the outstanding claim"),
             ]
+            questions[2].update(wrong_costly=False, wrong_costly_why="Only the display changes.")
             edits.extend(link(ref, story) for ref in role_refs + sources)
             rows = flat(edits)
             answer = dict(reason="A volunteer checks in a coat, hands off the claim, then retrieves it.",
@@ -601,7 +605,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
                                           alternative_means="Use the existing shop server")]
                           if loose_answer and not revising else [])
         elif kind == "LEAD2-SPEC":
-            assert "accepted default" in proposal and "Show the outstanding claim" in proposal
+            assert '"owner_choice":false' in proposal and "Show the outstanding claim" in proposal
             assert "Use a separate list" not in proposal
             if condition := facts.get("B condition"):
                 assert condition == qualification
@@ -635,6 +639,10 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
                           mockups=[dict(id="queue", label="Queue first", means="Show handoffs at the top"),
                                    dict(id="lookup", label="Lookup first", means="Lead with receipt lookup")],
                           access=access if calls.count(kind) == 1 else [])
+            if not resolving:
+                for row in answer["story"]:
+                    row.update(stop_using_if_broken=True, stop_using_why="An open claim would be lost.",
+                               nice=False, nice_why="A volunteer needs this during the shift.")
         else:
             assert kind == "REVIEW" and facts["Proposed build order"] == draft["build_order"]
             assert facts["Proposed access needs"] == access
@@ -791,6 +799,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
             run.step()
         assert not spec.pins()
         a = reply("vision lock", ("round", "approve", {}))
+        assert [g["id"] for g in a["ask"]["groups"]] == ["round"]
         assert a["subject"]["size"] == "small"  # The scripted planner kept recommending micro.
         assert run.step() == "L2-STACK"
         run.close()
@@ -817,7 +826,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
             assert "A replacement tablet can recover an open claim" in current["spec"]
         pinned = spec.snapshot(spec.pins()["A"])
         assert pinned.parent == a["subject"]["lead2_revision"]
-        assert any(n.get("reason") == "accepted default" and "Show the outstanding claim" in n["decision"]
+        assert any(n.get("owner_choice") is False and "Show the outstanding claim" in n["decision"]
                    for n in pinned.graph.nodes.values())
         assert run.step() == "L2-REVIEW"
         if not loose_answer:
@@ -894,7 +903,7 @@ def test_fresh_lead_reviewed_spec_journey(tmp_path, monkeypatch, loose_answer, r
         assert receipt["scripted"] is True and receipt["request"] == waiting["request"]
         assert spec.pins()["B"] > b["subject"]["lead2_revision"] > spec.pins()["A"]
         assert spec.snapshot(spec.pins()["B"]).graph.nodes[story.removeprefix("priority-")]["priority"] == "should"
-        assert any(n.get("reason") == "accepted default" and "Show the outstanding claim" in n["decision"]
+        assert any(n.get("owner_choice") is False and "Show the outstanding claim" in n["decision"]
                    for n in spec.snapshot(spec.pins()["B"]).graph.nodes.values())
         assert run.store.read(receipt["userWords"])["selections"] == [
             {"groupId": "round", "optionId": "approve"}, {"groupId": story, "optionId": "should"}]

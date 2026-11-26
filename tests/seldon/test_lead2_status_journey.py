@@ -71,18 +71,35 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
         answer = {"reason": "Keep handoffs safe"}
         if question["kind"] == "LEAD2-ALIGN":
             answer.update(aligned=True, size="medium", size_reason="Several doors and handoffs",
+                          questions=[dict(question="Who can close the shift?", default="Either lead",
+                              recommended_means="Either lead can close.", alternative="The current lead",
+                              alternative_means="Only the current lead can close.", her_words_quote=" ",
+                              bet_why="Either lead seems likely.", would_bet_she_picks_default=True,
+                              wrong_costly_why="This changes who can close.",
+                              wrong_costly=True),
+                              dict(question="Where should the count be shown?", default="At the top",
+                              recommended_means="Keep it visible above the controls.", alternative="Below the controls",
+                              alternative_means="Show controls before the count.", her_words_quote="",
+                              bet_why="No location was chosen.", would_bet_she_picks_default=True,
+                              wrong_costly_why="Only presentation changes.",
+                              wrong_costly=False)],
                           person=[{"ref": "lead", "role": "Door lead"}],
-                          story=[{"ref": "handoff", "story": "Take over the live count", "priority": "must"},
-                                 {"ref": "export", "story": "Download the count", "priority": "should"}],
+                          story=[{"ref": "handoff", "story": "Take over the live count"},
+                                 {"ref": "export", "story": "Download the count"}],
                           link=[{"source": "brief", "targets": ["handoff", "export"]},
                                 {"source": "lead", "targets": ["handoff"]}])
         elif question["kind"] == "LEAD2-STACK":
             answer["stack"] = [{"ref": "local", "decision": "Host on the venue laptop",
                                 "reason": "Keep the handoff available on the private Wi-Fi", "words": idea}]
         elif question["kind"] == "LEAD2-SPEC":
-            handoff = next(line.split("]")[0][1:] for line in question["facts"]["Current proposal"].splitlines()
-                           if "Take over the live count" in line)
+            stories = {text: next(line.split("]")[0][1:] for line in
+                                  question["facts"]["Current proposal"].splitlines() if text in line)
+                       for text in ("Take over the live count", "Download the count")}
             answer.update(
+                story=[dict(ref=ref, story=text, stop_using_if_broken=must,
+                            stop_using_why="The live count is needed every shift." if must else "Counting still works.",
+                            nice=False, nice_why="The lead depends on this behavior.")
+                       for (text, ref), must in zip(stories.items(), (True, False), strict=True)],
                 promise=[{"ref": "count", "title": "Keep the door count", "action": "Take over the door",
                           "result": "See the same count",
                           "not_met_if": "The reported count changes"}],
@@ -90,9 +107,10 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
                 check=[{"ref": "verify", "action": "Read the live count", "expected": "Both leads see 15"}],
                 walk=[{"ref": "swap", "scenario": "Swap leads while the door is busy",
                        "interruption": "Lose Wi-Fi just before the swap"}],
-                link=[{"source": handoff, "targets": ["count"]},
+                link=[{"source": stories["Take over the live count"], "targets": ["count"]},
                       {"source": "count", "targets": ["ledger", "verify", "swap"]}],
                 build_order=[{"outcome": "Safe handoff", "recommend_demo": True}],
+                build_size="large",
             )
         else:
             answer["findings"] = "The receiving lead sees the original count."
@@ -147,10 +165,10 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
         with urlopen(page + "revision", timeout=5) as response:
             return response.read()
 
-    def reply(group="round", option="approve"):
+    def reply(group="round", option="approve", extra=()):
         decision = tool("state", run=str(product))["waitingFor"]
         tool("answer", run=str(product), request=decision["request"], replyId=decision["gate"],
-             selections=[{"groupId": group, "optionId": option}])
+             selections=[{"groupId": group, "optionId": option}, *extra])
 
     with closing(Run.reopen(product, provider, lambda _: frontdoor.read_answer(
         frontdoor.side(product) / "answer.json",
@@ -178,7 +196,9 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
         linked = urljoin(page, other[0])
         assert linked == opened["statusPage"]
         assert sidebar_links(linked)[1] == (*other[:2], "page")
-        reply()
+        assert "Where should the count be shown?" not in [
+            g["question"] for g in tool("state", run=str(product))["waitingFor"]["ask"]["groups"]]
+        reply(extra=[{"groupId": "q1", "optionId": "o2"}])
         run.step()
         run.step()
         stack = read_status()["frames"][-1]
@@ -192,6 +212,7 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
         frames = offered["frames"]
         assert {0, 1, 3, 4, 5} <= {frame["stage"] for frame in frames}
         assert frames[-1]["activity"] == "Waiting on you" and frames[-1]["detail"] == "Approve the plan at B"
+        assert "Keep it visible above the controls." in tool("state", run=str(product))["waitingFor"]["ask"]["proposal"]
         assert offered["trace"]["0"] == []
         assert any(frame["stage"] == 3 and offered["trace"][str(frame["revision"])] for frame in frames)
         row, = offered["trace"][str(frames[-1]["revision"])]
@@ -232,6 +253,13 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
         if question["kind"] == "WORK":
             builds += 1
             assert question["execution"]["session"] == ("builder" if builds > 1 else None)
+            if builds == 1:
+                assert "Keep it visible above the controls." in question["prompt"]
+                assert "Only the current lead can close." in question["prompt"]
+            if builds == 2:
+                batch, = question["facts"]["Repair records"].values()
+                finding, = batch["findings"].values()
+                assert finding["wrong_or_lost_result"] and "14 places instead of 15" in finding["reason"]
             workspace = Path(question["execution"]["cwd"])
             count = 14 if builds == 1 else 15
             if builds == 3:
@@ -242,17 +270,25 @@ def test_kickoff_page_follows_the_plan_and_keeps_a_replay(tmp_path, monkeypatch,
                 "HTTPServer((sys.argv[1], int(sys.argv[2])), SimpleHTTPRequestHandler).serve_forever()\n",
                 encoding="utf-8")
             return json.dumps(dict(outcome="done", acknowledged=True))
+        if question["kind"] == "LEAD2-CHUNK":
+            return json.dumps(dict(notes=["Take over the count and check whether it starts at 15.",
+                                          "The local checks passed."]))
         if question["kind"] == "LEAD2-WALK-STEER":
-            return json.dumps(dict(actions=[dict(ids=[ref], reason=row["reason"], kind="note")
-                                            for ref, row in question["facts"]["Observations"].items()]))
+            return json.dumps(dict(notes=[dict(id=ref, sentence=row["reason"],
+                is_problem=row["reason"] == "There is no CSV download.",
+                is_problem_why="The main checks already show what worked.", surprise_later=False,
+                surprise_later_why="The result is visible immediately.")
+                for ref, row in question["facts"]["Observations"].items()]))
         assert question["kind"] == "LEAD2-WALK"
         facts = question["facts"]
         by_priority = {row["priority"]: ref for ref, row in facts["Stories to walk"].items()}
         visits.append(set(by_priority))
         if set(by_priority) == {"should"}:
             assert (Path(question["execution"]["walk"]) / "export.csv").read_text() == "inside\n15\n"
+            assert not facts["Notes selected for this fix"]
             return json.dumps(dict(stories=[dict(story=by_priority["should"], outcome="works",
-                reason="The CSV contains 15.", screenshot="", defect="")], notes=[], guide_path="", resolved=[]))
+                reason="The CSV contains 15.", screenshot="", defect="", wrong_or_lost_result=False,
+                wrong_result_why="The saved count matches the CSV.")], notes=[], guide_path=""))
         evidence = question["execution"]["evidence"]
         workspace = question["execution"]["walk"]
         check = '''
@@ -271,18 +307,39 @@ serve([process.argv[1], 'ledger.py', '127.0.0.1', '{port}'], url => browser(url.
 '''
         subprocess.run(["node", "-e", check, sys._base_executable], cwd=workspace, check=True,
                        env={**os.environ, "SELDON_EVIDENCE_DIR": evidence})
-        story = next(iter(facts["Stories to walk"]))
+        if os.name == "nt":
+            recipe = Path(evidence) / "preview-launch.json"
+            launch = json.loads(recipe.read_text(encoding="utf-8"))
+            launch["argv"][0] = "py"
+            recipe.write_text(json.dumps(launch), encoding="utf-8")
+        story = by_priority["must"]
         broken = "14 places" in (Path(workspace) / "index.html").read_text()
         reason = "The count shows 14 places instead of 15." if broken else "Both doors see 15 places."
-        results = [dict(story=story, outcome="broken" if broken else "works", reason=reason,
-                        screenshot="jo-390.png", defect="shared count" if broken else "")]
+        review = list(facts["Review findings"])
+        selected = list(facts["Notes selected for this fix"])
+        results = [dict(story=story, outcome="works", screenshot="jo-390.png", defect="",
+                        reason="Both doors can open the count." if broken else reason,
+                        wrong_or_lost_result=False, wrong_result_why="The main screen loaded for both roles.")]
+        notes = [dict(kind="untested", stories=[story], reason="Venue Wi-Fi was unavailable.", finding="",
+                      wrong_or_lost_result=False, wrong_result_why="No venue result was observed.")]
+        if review:
+            assert "starts at 15" in facts["Review findings"][review[0]]
+            notes += [dict(kind="quality", stories=[story], reason=reason, finding=review[0],
+                           wrong_or_lost_result=broken, wrong_result_why=reason),
+                      dict(kind="rough", stories=[], reason="The local checks passed.", finding=review[1],
+                           wrong_or_lost_result=False, wrong_result_why="This was a test summary.")]
+        else:
+            ref, = selected
+            assert facts["Notes selected for this fix"][ref] == "The count shows 14 places instead of 15."
+            assert not broken
+            notes.append(dict(kind="rough", stories=[story], reason="The displayed count agrees across both doors.",
+                              finding=ref, wrong_or_lost_result=False, wrong_result_why="Both doors saw 15."))
         if optional := by_priority.get("should"):
             assert not (Path(workspace) / "export.csv").exists()
             results.append(dict(story=optional, outcome="broken", reason="There is no CSV download.",
-                                screenshot="", defect="missing CSV"))
-        return json.dumps(dict(stories=results,
-            notes=[dict(kind="untested", stories=[story], reason="Venue Wi-Fi was unavailable.")],
-            guide_path="", resolved=[]))
+                                screenshot="", defect="missing CSV", wrong_or_lost_result=False,
+                                wrong_result_why="The live count is still available."))
+        return json.dumps(dict(stories=results, notes=notes, guide_path=""))
 
     class Provider:
         def invoke(self, question, _started):
@@ -306,11 +363,15 @@ serve([process.argv[1], 'ledger.py', '127.0.0.1', '{port}'], url => browser(url.
         assert item["text"] == "Venue Wi-Fi was unavailable."
         assert state["waitingFor"]["subject"]["release"] == note["ref"]
         assert state["waitingFor"]["ask"]["proposal"].count(item["text"]) == 1
+        assert "The local checks passed." not in state["waitingFor"]["ask"]["proposal"]
         assert [o["label"] for o in state["waitingFor"]["ask"]["groups"][0]["options"]] == [
             "Accept as is", "Fix these", "Stop here", "Other"]
         assert read_status()["timeCost"]["phases"]["walk"]["rounds"] == 4
         with urlopen(urljoin(page, "walk"), timeout=5) as reply:
-            assert item["text"] in reply.read().decode()
+            html = reply.read().decode()
+            assert item["text"] in html
+            assert "Left out of the release notes" in html and "The main checks already show what worked." in html
+            assert "The local checks passed." in html
     c = tool("state", run=str(product))
     optional = next(item for item in c["releaseNotes"]["items"] if item["text"] == "There is no CSV download.")
     assert not optional["blocked"]
@@ -323,8 +384,8 @@ serve([process.argv[1], 'ledger.py', '127.0.0.1', '{port}'], url => browser(url.
     with closing(Run.reopen(product, Provider(), read_reply)) as run:
         assert run.run().state == "C", run.store.records("lead2_fault")
         assert builds == 3 and visits[-1] == {"should"}
-        assert [row["text"] for row in tool("state", run=str(product))["releaseNotes"]["works"]] == [
-            "Both doors see 15 places. Walked on an earlier build and unaffected by this fix.", "The CSV contains 15."]
+        assert {row["text"] for row in tool("state", run=str(product))["releaseNotes"]["works"]} == {
+            "Both doors see 15 places. Walked on an earlier build and unaffected by this fix.", "The CSV contains 15."}
     browser = Path(frontdoor.__file__).with_name("kit") / "browser.cjs"
     check = '''
 const assert = require('node:assert/strict');

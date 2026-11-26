@@ -170,7 +170,8 @@ def _judge_rows(run, state, repair, candidate, revision):
         states = {"works": "walked",
                   "broken": "fixing" if repair else "failed", "can't-test-here": "not-verifiable-here"}
         stale = (candidate and run["candidate"] != candidate) or run["revision"] != revision
-        return {promise: "stale" if stale else states[row["outcome"]]
+        return {promise: "stale" if stale else states["broken" if story in run.get("blocked_stories", ())
+                                                     else row["outcome"]]
                 for story, row in run["results"].items() for promise in run["stories"][story]["promises"]}
     if (candidate and run["candidate"] != candidate) or run["revision"] != revision:
         return {row["promise"]: "stale" for row in run["promises"]}

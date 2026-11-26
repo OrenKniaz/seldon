@@ -206,7 +206,7 @@ class SpecStore:
                 if revision == 0 or gate in pins or (gate == "B" and "A" not in pins):
                     raise ValueError("Pin A then B, each once, on a saved spec.")
                 self._require_head(snapshot, current)
-            if gate == "A" and (edits := _accepted_defaults(request)):
+            if gate == "A" and (edits := _accepted_defaults(request, self._store.read(approval))):
                 revision = self.apply(dict(revision=revision, mode="substantive", edits=edits,
                                            reason="Record defaults accepted at A"), author="owner").revision
             if gate == "B":
@@ -313,15 +313,18 @@ class SpecStore:
         raise ValueError(f"Use a stored {kind} record, got {ref!r}.")
 
 
-def _accepted_defaults(request):
-    edits = []
-    for group in request.get("ask", {}).get("groups", []):
+def _accepted_defaults(request, approval):
+    offered, edits = request.get("ask", {}).get("groups", []), []
+    for group in [*offered, *request["subject"].get("assumed", [])]:
         if not group["id"].startswith("q"):
             continue
-        option = next(item for item in group["options"] if item["id"] == group["default"])
+        picked = approval.get("choices", {}).get(group["id"], {}) if group in offered else {}
+        option_id = picked.get("optionId", group["default"])
+        option = next((item for item in group["options"] if item["id"] == option_id), None)
         edits.append(dict(op="add", name=None, node=dict(
-            kind="design", reason="accepted default", decision=f"{group['question']} {option['label']}",
-            words=option["means"],
+            kind="design", reason="Product choice", owner_choice=bool(picked),
+            decision=f"{group['question']} {option['label'] if option else picked['text']}",
+            words=option["means"] if option else picked["text"],
         )))
     return edits
 

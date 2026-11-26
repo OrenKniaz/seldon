@@ -2,7 +2,7 @@
 
 from ..questions import labelled
 from ..schema import TEXT, array, choice, obj
-from .contracts import OPTION_FIELDS, SPEC_EDITS
+from .contracts import OPTION_FIELDS, SPEC_EDITS, SPEC_STORY, YES_NO
 
 SIZES = {"micro": "Minutes of agent work.", "small": "An hour or two of agent work.",
          "medium": "Days of agent work across sessions.", "big": "Weeks or months of agent work."}
@@ -12,7 +12,11 @@ QUESTIONS = array(obj(**QUESTION_FIELDS))
 MOCKUPS = array(obj(id=TEXT, label=TEXT, means=TEXT))
 DELIVERY = array(obj(outcome=TEXT, recommend_demo={"type": "boolean"}))
 ACCESS = array(obj(need=TEXT, supplier={"type": "string"}, deferred={"type": "boolean"}))
-ALIGN = obj(aligned={"type": "boolean"}, size=choice(*SIZES), size_reason=TEXT, questions=QUESTIONS,
+ALIGN_CHOICES = array(obj(question=TEXT, default=TEXT, recommended_means=TEXT, alternative=TEXT,
+                          alternative_means=TEXT, her_words_quote={"type": "string"},
+                          bet_why=TEXT, would_bet_she_picks_default=YES_NO,
+                          wrong_costly_why=TEXT, wrong_costly=YES_NO))
+ALIGN = obj(aligned=YES_NO, size=choice(*SIZES), size_reason=TEXT, questions=ALIGN_CHOICES,
             **{kind: SPEC_EDITS[kind] for kind in ("person", "story", "retire", "link", "unlink")})
 STACK = obj(stack=SPEC_EDITS["design"], questions=QUESTIONS)
 REVIEW = obj(findings=TEXT, unresolved_issue={"type": "string"},
@@ -22,8 +26,13 @@ TASK = {
     "LEAD2-ALIGN": """Start reason with one real job in the owner's world from start to finish.
 Use the walk to cover functions, operation (hosting, users, roles, logins, backups, offline, connections,
 cost) and appearance (device, style, key screen, language, direction, accessibility, reference).
-Preserve exact values, handoffs, races and recovery. Ask only when the answer changes what gets built.
-Use sensible defaults for everything else.
+Preserve exact values, handoffs, races and recovery. Follow an incomplete record across transitions;
+ask what is kept, carried forward or lost when the owner has not decided. Omit immaterial choices.
+Use the recommendation as default. In her_words_quote, quote the owner's exact words that settle
+this specific default. Leave it empty when in doubt. Give a one-line why before each yes/no.
+Bakery order list: would_bet yes when the owner said "show today's pickups first"; no when she
+said nothing about who can cancel orders. Wrong_costly yes if guessing could let clerks cancel
+paid orders; no if guessing changes the button color.
 Use the size fields, never a product question about size. Honor the chosen size and scope.
 Link brief and earlier replies to each short-titled product story. Link people to their stories.
 Keep demos and the owner's readiness decision as delivery choices.""",
@@ -32,8 +41,10 @@ and cite the need that drove it in words. Offer alternatives only when the answe
 For a plain owner explain the recommendation in business language. Incorporate the owner's latest reply.""",
     "LEAD2-SPEC": """Explain identities, state changes and design. Respect the approved stack and link it to
 the promises it serves. Order outcomes. Classify build size from this spec.
-Tag every user story with one priority. Must means the person would stop using the app if it broke.
-Should means it matters but would not stop use. Nice means optional polish. Include every story row. For a product with a user interface, give a few
+For each story, assume the other stories work. Would this failure make the owner abandon the app
+for her ordinary work? Explain before each yes/no. Bakery order list: stop_using yes if an order
+cannot be saved, no if search fails but the list still works. Nice yes for decorative icons, no for search.
+Include every story row. For a product with a user interface, give a few
 quick visual directions for the key screens in mockups: describe layout, interaction and appearance so
 the owner can pick or mix them. Use an empty list when there is no visual choice to make.""",
     "REVIEW": """What could disappear while this still passes? Fix missing behaviour and proof from the
@@ -61,9 +72,10 @@ walk what each affected person sees through changes, interruptions and recovery.
 
 def question(kind, words, current, *, qualification=None, **facts):
     if qualification:
-        fields = dict(amendments=array(obj(ref=TEXT, result=TEXT, not_met_if=TEXT)))
-        prompt = ("Amend only existing promises explicitly named by the B condition. Keep every other "
-                  "clause verbatim. Put the condition in the promise result and failure condition.")
+        fields = dict(amendments=array(obj(ref=TEXT, result=TEXT, not_met_if=TEXT)),
+                      assumptions=array(obj(ref=TEXT, decision=TEXT)))
+        prompt = ("Use shown refs for promises and assumptions changed by the B condition. Put the change "
+                  "in their result and failure condition or revised decision. Keep unrelated clauses verbatim.")
         facts = {"B condition": qualification}
     elif "Resolve only this review reply" in facts:
         fields = SPEC_EDITS
@@ -79,6 +91,8 @@ def question(kind, words, current, *, qualification=None, **facts):
         else:
             extra = REVIEW["properties"] if kind == "REVIEW" else {"mockups": MOCKUPS, "build_size": choice("small", "large")}
             fields = {**extra, **SPEC_EDITS, "build_order": DELIVERY, "access": ACCESS}
+            if kind == "LEAD2-SPEC":
+                fields["story"] = SPEC_STORY
             prompt = "\n\n".join((prompt, SPEC_GUIDE, PROMISE_GUIDE, EDIT_GUIDE))
     if kind in ("LEAD2-SPEC", "REVIEW") and not qualification:
         facts["Delivery and acceptance"] = ("Build order carries the demonstrations. The independent walk checks "

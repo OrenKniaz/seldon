@@ -16,13 +16,17 @@ LINK_ROWS = array(obj(source=TEXT, targets=REFS))
 TITLED = ("story", "promise", "walk")
 TITLE = {"type": "string"}
 PRIORITY = choice("must", "should", "nice")
+YES_NO = {"type": "boolean"}
+# Checkpoint decisions are derived from the answers in column order.
+PRIORITIES = {(True, False): "must", (True, True): "must",
+              (False, False): "should", (False, True): "nice"}
 SPEC_EDITS = {
     **{kind: array(obj(ref=TEXT, **body["properties"], **({"title": TITLE} if kind in TITLED else {})))
        for kind, body in NODE_BODIES.items() if kind != "dream"},
     "retire": REFS, "link": LINK_ROWS, "unlink": LINK_ROWS, "replaces": LINK_ROWS,
 }
-SPEC_EDITS["story"]["items"]["properties"]["priority"] = PRIORITY
-SPEC_EDITS["story"]["items"]["required"].append("priority")
+SPEC_STORY = array(obj(**SPEC_EDITS["story"]["items"]["properties"],
+                       stop_using_why=TEXT, stop_using_if_broken=YES_NO, nice_why=TEXT, nice=YES_NO))
 OPTION_FIELDS = {
     f"option_{kind}": array(obj(option_id=TEXT, **(
         {"ref": TEXT} if kind == "retire" else field["items"]["properties"])))
@@ -35,10 +39,10 @@ NODE = {"anyOf": [
 for kind, contract in zip(NODE_BODIES, NODE["anyOf"], strict=True):
     if kind in TITLED:
         contract["properties"]["title"] = TITLE
-
-for contract in NODE["anyOf"]:
-    if contract["properties"]["kind"]["enum"] == ["story"]:
+    if kind == "story":
         contract["properties"]["priority"] = PRIORITY
+    if kind == "design":
+        contract["properties"]["owner_choice"] = YES_NO
 
 BATCH_SCHEMA = obj(
     revision={"type": "integer", "minimum": 0},
@@ -68,8 +72,7 @@ def typed_reply(body, schema):
             if (isinstance(answer.get(kind), list)
                     and "title" in fields.get(kind, {}).get("items", {}).get("properties", {})):
                 answer[kind] = [
-                    {**row, "title": row["title"] if isinstance(row.get("title"), str) else "",
-                     **({"priority": row.get("priority") or "must"} if kind in ("story", "option_story") else {})}
+                    {**row, "title": row["title"] if isinstance(row.get("title"), str) else ""}
                     if isinstance(row, dict) else row for row in answer[kind]
                 ]
     return {"answer": answer}
@@ -84,28 +87,34 @@ def normalise_edits(graph, answer, references, *, prefix=""):
         return references.get(name, "$" + prefix + name) if name else "$"
 
     if "amendments" in answer:
-        rows = {resolve(row["ref"]): row for row in answer["amendments"]}
-        edits = [dict(op="amend", id=ref,
-                      node={**graph.nodes[ref], "result": row["result"], "not_met_if": row["not_met_if"]})
-                 for ref, row in rows.items() if graph.nodes.get(ref, {}).get("kind") == "promise"]
-        return edits, [f"Amendment {ref!r}: use an existing promise ID." for ref in rows
-                       if graph.nodes.get(ref, {}).get("kind") != "promise"]
+        edits, errors = [], []
+        for field, tag, value in (("amendments", "kind", "promise"), ("assumptions", "owner_choice", False)):
+            for row in answer[field]:
+                ref = resolve(row["ref"])
+                if graph.nodes.get(ref, {}).get(tag) != value:
+                    errors.append(f"{row['ref']!r}: use an existing {'assumption' if value is False else value} ID.")
+                    continue
+                updated = {**graph.nodes[ref], **{k: v for k, v in row.items() if k != "ref"}}
+                if field == "assumptions":
+                    updated.update(owner_choice=True, words=row["decision"])
+                edits.append(dict(op="amend", id=ref, node=updated))
+        return edits, errors
 
     kinds = {ref: node["kind"] for ref, node in graph.nodes.items()}
-    fixed = {ref for ref, node in graph.nodes.items()
-             if node["kind"] == "dream" or node.get("reason") == "accepted default"}
+    fixed = {ref for ref, node in graph.nodes.items() if node["kind"] == "dream" or "owner_choice" in node}
     edits, seen, errors = [], set(), []
     for kind, fields in NODE_BODIES.items():
         for row in answer.get(kind, ()):
             ref = resolve(row["ref"])
-            if (ref == "$" or ref in fixed or ref in seen or kinds.get(ref, kind) != kind
-                    or (kind == "design" and row["reason"] == "accepted default")):
+            if ref == "$" or ref in fixed or ref in seen or kinds.get(ref, kind) != kind:
                 errors.append(f"{kind} {row['ref']!r}: use a distinct new name or an editable {kind} ID.")
                 continue
             seen.add(ref)
             node = {"kind": kind, **{key: row[key] for key in fields["properties"]}}
             if kind == "story":
-                node["priority"] = row.get("priority", graph.nodes.get(ref, {}).get("priority", "must"))
+                existing = graph.nodes.get(ref, {}).get("priority", "must")
+                node["priority"] = (PRIORITIES[row["stop_using_if_broken"], row["nice"]]
+                                    if "stop_using_if_broken" in row else existing)
             if kind in TITLED and (title := row.get("title", "").strip()
                                   or graph.nodes.get(ref, {}).get("title")):
                 node["title"] = title

@@ -45,14 +45,15 @@ def brief(graph, order, demos, kickoff):
         lines += [story, *roles, *(_details(node) for ref, node in promises.items() if ref in children)]
     linked = {ref for _, _, children in stories for ref in children}
     lines += [_details(node) for ref, node in promises.items() if ref not in linked]
-    design = {ref: n["decision"] for ref, n in graph.nodes.items() if n["kind"] == "design"}
-    lines += ["Design and stack", *(f"{c} — {graph.nodes[ref]['reason']}" for ref, c in design.items()),
+    design = {ref: n for ref, n in graph.nodes.items() if n["kind"] == "design"}
+    lines += ["Design and stack", *(f"{n['decision']} — {n['words'] if 'owner_choice' in n else n['reason']}"
+                                    for n in design.values()),
               *(n["contract"] for n in graph.nodes.values() if n["kind"] == "interface"),
               "Planned code and tests"]
     for label, ref in promise_refs(graph).items():
         related = graph.follow(ref, PROOF)
         lines += [f"{label}: {promises[ref]['result']}",
-                  *(decision for key, decision in design.items() if key in related),
+                  *(node["decision"] for key, node in design.items() if key in related),
                   *(_details(node) for key, node in graph.nodes.items()
                     if key in related and node["kind"] == "check")]
     lines += ["Build order", *(f"{ref}: {name}" for ref, name in order.items()),

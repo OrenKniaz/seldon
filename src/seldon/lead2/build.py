@@ -110,7 +110,7 @@ def _end_review(store, provider, snapshot, last):
     workspace = gitwork.admit(store.root.parent, store.cursor().scratch, last["candidate"])
     question = build_brief.question("LEAD2-CHUNK", build_brief.END_REVIEW,
         "Review the integrated build once for concrete source, quality or documentation gaps. "
-        "Return short release-note findings. Leave the product unchanged.",
+        "Return concrete findings with an action and consequence. Leave the product unchanged.",
         Candidate=last["candidate"], Stories=[node["story"] for node in snapshot.graph.nodes.values()
                                                if node["kind"] == "story"])
     evidence = Path(store.cursor().scratch) / "end-review"
@@ -118,7 +118,8 @@ def _end_review(store, provider, snapshot, last):
     question["execution"] = {"walk": workspace, "evidence": str(evidence)}
     try:
         inference.call(store, provider, question, consume=lambda source, answer:
-                       store.record("lead2_end_review", {"source": source, "notes": answer["notes"]}))
+                       store.record("lead2_end_review", {"source": source, "candidate": last["candidate"],
+                                                         "notes": answer["notes"]}))
     finally:
         reconcile_call(store)
         gitwork.git(store.root.parent, "worktree", "remove", "--force", workspace)

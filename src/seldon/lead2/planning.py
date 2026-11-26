@@ -91,6 +91,8 @@ def _propose(store, spec, snapshot, answer_ref, answer, size, references):
     cursor = store.cursor()
     if cursor.state == "L2-STACK":
         proposal = "\n".join(f"- {row['decision']} — {row['reason']}" for row in answer["stack"])
+        if changes := store.read(cursor.A).get("changes", []):
+            proposal = "\n".join(["Vision approved with these answers.", *(f"- {line}" for line in changes), "", proposal])
         groups = [*chat.product_groups(answer["questions"]), chat.gate_group("Stack")]
         chat.request(store, "Stack", snapshot.revision, groups, proposal=proposal or answer["reason"],
                      summary=answer["reason"], stack=answer_ref)
@@ -175,7 +177,16 @@ def _finish_review(store, revision, answer_ref, groups=(), *, source=None):
 def _offer_a(store, snapshot, source, answer, chosen_size):
     proposal = planning_view(snapshot.graph)
     size = chosen_size or answer["size"]
-    groups = chat.product_groups(answer["questions"])
+    questions = [{**row, "recommended": row["default"]} for row in answer["questions"]]
+    asked = [row for row in questions if row["wrong_costly"] and
+             not (row["would_bet_she_picks_default"] and row["her_words_quote"].strip())]
+    previous = next((offer for _, _, offer in reversed(store.records("decision_request")) if offer["gate"] == "A"), {})
+    assumed = {g["question"]: g for g in previous.get("subject", {}).get("assumed", [])}
+    for group in chat.product_groups(row for row in questions if row not in asked):
+        assumed[group["question"]] = group
+    groups = chat.product_groups(asked)
+    for group in groups:
+        assumed.pop(group["question"], None)
     if chosen_size is None:
         others = ((key, key.capitalize(), why) for key, why in prompts.SIZES.items() if key != size)
         groups.append(chat.group(chat.SIZE, "How large is the dream?",
@@ -183,7 +194,7 @@ def _offer_a(store, snapshot, source, answer, chosen_size):
     groups.append(chat.gate_group("A", recommend=answer["aligned"]))
     advance(store, "aligned", source, vision=source)
     chat.request(store, "A", snapshot.revision, groups, proposal=proposal or answer["reason"],
-                 summary=answer["reason"], planner_aligned=answer["aligned"], size=size)
+                 summary=answer["reason"], planner_aligned=answer["aligned"], size=size, assumed=list(assumed.values()))
 
 
 def _offer_b(store, spec, cursor):
@@ -220,7 +231,9 @@ def _answer(store, spec, user, cursor):
     picked = {c["group"]: c for c in [*ask["retained"], *choices]}
     explicit = picked.get(chat.ROUND, {}).get("optionId") == chat.APPROVE
     review = gate == "Review choices"
-    notes = list(dict.fromkeys(filter(None, [reply.get("words"), *(c["text"] for c in choices)])))
+    notes = list(dict.fromkeys(filter(None, [reply.get("words"), *(
+        f"{c['question']} {c['text']}" if gate == "A" and c["group"].startswith("q") and c["text"] else c["text"]
+        for c in choices)])))
     if review and not subject.get("options"):
         notes.extend(f"{group['question']} {option['label']} — {option['means']}"
                      for group in ask["groups"] for option in group["options"]
@@ -232,7 +245,7 @@ def _answer(store, spec, user, cursor):
                      and defaults.get(c["group"]) != c["optionId"])
     size = picked.get(chat.SIZE, {}).get("optionId")
     changes = bool(notes) or size in prompts.SIZES and size != subject.get("size")
-    approve = explicit and not changes
+    approve = explicit and (not changes or gate == "A" and not reply.get("words"))
     effect = "approve" if approve or review else "direct"
     with store.transaction():
         expected = spec.snapshot(revision).parent if gate == "scope" else revision
@@ -258,6 +271,8 @@ def _answer(store, spec, user, cursor):
                    "effect": effect}
         if gate == "A":
             receipt["size"] = size if size in prompts.SIZES else subject["size"]
+            receipt["choices"] = {key: row for key, row in picked.items() if key.startswith("q")}
+            receipt["changes"] = notes
         if approve and gate == "B":
             receipt["demonstrations"] = [g["id"] for g in ask["groups"]
                                          if picked.get(g["id"], {}).get("optionId") == "show"]
@@ -321,5 +336,5 @@ def _answer(store, spec, user, cursor):
             if gate == "scope" and cursor.requestedChange:
                 _finish_plan(store, expected, approval)
             else:
-                requested = approval if gate == "B" and explicit else None
+                requested = approval if gate == "B" and notes else None
                 advance(store, "revise", approval, requestedChange=requested)

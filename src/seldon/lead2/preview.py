@@ -26,7 +26,7 @@ def launch_recipe(evidence, files):
             return None
         runtime = Path(argv[0]).stem.casefold()
         args = [arg for arg in argv[1:] if arg not in ("-B", "-u")]
-        if runtime not in ("python", "python3", "node") or not args or args[0] not in files:
+        if runtime not in ("py", "python", "python3", "node") or not args or args[0] not in files:
             return None
         if "127.0.0.1" not in argv or not any("{port}" in arg for arg in argv):
             return None

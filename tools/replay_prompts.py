@@ -759,6 +759,12 @@ def main():
     prep.add_argument("root", type=Path)
     prep.add_argument("--recordings", type=Path, default=RIG)
     prep.add_argument("--case", choices=CASES, action="append")
+    lead = commands.add_parser("lead2", help="Render a recorded Lead 2 moment against current schemas")
+    lead.add_argument("recorded", type=Path, help="Recorded question.json or a local handoff question")
+    lead.add_argument("output", type=Path)
+    lead.add_argument("--model", help="Run the candidate prompt with this model")
+    lead.add_argument("--effort", default="medium")
+    lead.add_argument("--recorded-control", action="store_true")
     gen = commands.add_parser("generate", help="Run a fresh isolated Terra call per eligible arm")
     gen.add_argument("root", type=Path)
     gen.add_argument("--run-terra", required=True, action="store_true")
@@ -798,6 +804,8 @@ def main():
     try:
         if args.command == "prepare":
             prepare(args.root.resolve(), args.recordings.resolve(), tuple(args.case or CASES))
+        elif args.command == "lead2":
+            replay_lead2(args)
         elif args.command == "generate":
             global FULL_ACCESS
             FULL_ACCESS = args.full_access
@@ -814,6 +822,44 @@ def main():
             reveal(args.root, args.packet, args.lock, args.output)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired) as error:
         parser.exit(1, f"replay: {error}\n")
+
+
+def replay_lead2(args):
+    from seldon.lead2 import build_brief, prompts, walk
+
+    original = read_json(args.recorded)
+    kind, facts = original["kind"], dict(original["facts"])
+    if not original.get("renderContext", {}).get("lead2"):
+        raise ValueError("A Lead 2 question is required")
+    if args.model and kind == "LEAD2-WALK":
+        parent = args.output.resolve().parent
+        if not all(original["execution"].get(key) and Path(original["execution"][key]).resolve().is_relative_to(parent)
+                   for key in ("walk", "evidence")):
+            raise ValueError("Use a disposable exact-candidate worktree and evidence path for walk replay")
+    if args.recorded_control:
+        question = original
+    elif kind in {"LEAD2-ALIGN", "LEAD2-SPEC"}:
+        question = prompts.question(kind, facts.pop("Owner's words"), facts.pop("Current proposal"), **facts)
+    elif kind == "LEAD2-WALK":
+        question = build_brief.question(kind, walk.WALK, walk.BRIEF, **facts)
+    elif kind == "LEAD2-WALK-STEER":
+        question = build_brief.question(kind, walk.ACTIONS, walk.STEER_BRIEF, **facts)
+    else:
+        raise ValueError(f"No current checkpoint schema for {kind}")
+    question["execution"] = {key: original["execution"][key] for key in ("walk", "evidence")
+                             if key in original["execution"] and kind == "LEAD2-WALK"}
+    args.output.mkdir()
+    put_json(args.output / "question.json", question)
+    for name, content in render(question, "A", ()).items():
+        put(args.output / name, content)
+    if args.model:
+        setup = providers.setup_facts()
+        role = providers.role_for(kind, {})
+        setup["providers"][role].update(model=args.model, effort=args.effort)
+        raw = providers.Provider(args.output / "calls", setup)(question)
+        parsed = json.loads(raw)
+        schema.validate(parsed, question["schema"])
+        put_json(args.output / "answer.json", parsed)
 
 
 if __name__ == "__main__":

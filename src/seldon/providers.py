@@ -310,6 +310,8 @@ class Provider:
         fresh = lead2_call(question)
         if fresh:
             config["persist"] = True
+        if question["kind"] == "LEAD2-WALK-STEER" and config.get("effort") in ("medium", "high", "xhigh"):
+            config["effort"] = "low"
         if not self.setup.get(name + "Command"):
             raise ProviderFailure(f"{name.title()} executable unavailable; install/authenticate {name} "
                                   "before resuming", False, True)
@@ -332,7 +334,7 @@ class Provider:
         # The control arm uses producer order within each group of facts; keep it in the replay record.
         (folder / "question.json").write_text(
             json.dumps(question, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
-        (folder / "schema.json").write_text(encode(question["schema"]), encoding="utf-8")
+        (folder / "schema.json").write_text(json.dumps(question["schema"], ensure_ascii=False), encoding="utf-8")
         images = []
         for index, source in enumerate(question.get("images", [])):
             images.append(folder / f"image-{index}.png")
