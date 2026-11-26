@@ -1,0 +1,10 @@
+# Landing gate (gate audit 2026-11-25): fresh Lead + shared pieces it uses.
+# Also always run: every tests/seldon/test_lead2_*.py and every test_journey.py test with "fresh_lead" in its name.
+# Everything else is the archive suite: bash scripts/gate.sh <tag> --all
+tests/seldon/test_browser_kit_journey.py::test_browser_kit_reports_the_failed_path_and_closes_edge
+tests/seldon/test_front_door.py::test_chat_controls_and_continuity_golden
+tests/seldon/test_front_door.py::test_recorded_quiet_bench_round_chat_journey
+tests/seldon/test_journey.py::test_provider_works_without_disturbing_desktop
+tests/seldon/test_journey.py::test_consumption_crash_rollback_and_switch_journey[False]
+tests/seldon/test_journey.py::test_lead_milestones_golden[killed-work]
+tests/seldon/test_journey.py::test_check_kit_golden[browser]
